@@ -1,7 +1,7 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 
 import { CreatePinScreen } from '@/features/auth/screens/create-pin-screen';
 import { UnlockScreen } from '@/features/auth/screens/unlock-screen';
@@ -10,6 +10,7 @@ import { IdentitiesScreen } from '@/features/identities/screens/identities-scree
 import { WelcomeScreen } from '@/features/onboarding/screens/welcome-screen';
 import { SearchScreen } from '@/features/search/screens/search-screen';
 import { SettingsScreen } from '@/features/settings/screens/settings-screen';
+import { useAgentStore } from '@/lib/enbox/agent-store';
 import { useSessionStore } from '@/features/session/session-store';
 import { createNavigationTheme, useAppTheme } from '@/theme';
 
@@ -34,17 +35,16 @@ function MainTabs() {
   const theme = useAppTheme();
   const lock = useSessionStore((s) => s.lock);
   const reset = useSessionStore((s) => s.reset);
+  const teardownAgent = useAgentStore((s) => s.teardown);
+
+  const handleReset = useCallback(async () => {
+    teardownAgent();
+    await reset();
+  }, [teardownAgent, reset]);
 
   const renderSettings = useCallback(
-    () => (
-      <SettingsScreen
-        onLock={lock}
-        onReset={async () => {
-          await reset();
-        }}
-      />
-    ),
-    [lock, reset],
+    () => <SettingsScreen onLock={lock} onReset={handleReset} />,
+    [lock, handleReset],
   );
 
   return (
@@ -67,6 +67,16 @@ function MainTabs() {
   );
 }
 
+function AgentInitializer({ children }: { children: React.ReactNode }) {
+  const initialize = useAgentStore((s) => s.initialize);
+
+  useEffect(() => {
+    initialize();
+  }, [initialize]);
+
+  return <>{children}</>;
+}
+
 export function AppNavigator() {
   const theme = useAppTheme();
   const hasCompletedOnboarding = useSessionStore((s) => s.hasCompletedOnboarding);
@@ -76,9 +86,6 @@ export function AppNavigator() {
   const createPin = useSessionStore((s) => s.createPin);
   const unlock = useSessionStore((s) => s.unlock);
 
-  // Conditional screen rendering: React Navigation recommended pattern.
-  // When state changes (e.g. lock() called), screens are swapped and
-  // the navigator resets automatically — no imperative navigation needed.
   const showOnboarding = !hasCompletedOnboarding || !hasPinSet;
   const showUnlock = hasCompletedOnboarding && hasPinSet && isLocked;
   const showMain = hasCompletedOnboarding && hasPinSet && !isLocked;
@@ -116,7 +123,9 @@ export function AppNavigator() {
           </RootStack.Screen>
         )}
         {showMain && (
-          <RootStack.Screen name="Main" component={MainTabs} />
+          <AgentInitializer>
+            <RootStack.Screen name="Main" component={MainTabs} />
+          </AgentInitializer>
         )}
       </RootStack.Navigator>
     </NavigationContainer>
