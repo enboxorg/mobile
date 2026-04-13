@@ -1,0 +1,178 @@
+import { useSessionStore } from '@/features/session/session-store';
+import { isValidPinFormat } from '@/lib/auth/pin-format';
+import {
+  getSecureItem,
+  setSecureItem,
+  deleteSecureItem,
+} from '@/lib/storage/secure-storage';
+import { hashPin, verifyPin } from '@/lib/auth/pin-hash';
+
+jest.mock('@/lib/storage/secure-storage', () => ({
+  getSecureItem: jest.fn().mockResolvedValue(null),
+  setSecureItem: jest.fn().mockResolvedValue(undefined),
+  deleteSecureItem: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('@/lib/auth/pin-hash', () => ({
+  hashPin: jest.fn().mockResolvedValue('salt:hash'),
+  verifyPin: jest.fn().mockResolvedValue(false),
+}));
+
+const mockedGetSecureItem = getSecureItem as jest.MockedFunction<typeof getSecureItem>;
+const mockedSetSecureItem = setSecureItem as jest.MockedFunction<typeof setSecureItem>;
+const mockedDeleteSecureItem = deleteSecureItem as jest.MockedFunction<typeof deleteSecureItem>;
+const mockedHashPin = hashPin as jest.MockedFunction<typeof hashPin>;
+const mockedVerifyPin = verifyPin as jest.MockedFunction<typeof verifyPin>;
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockedGetSecureItem.mockResolvedValue(null);
+  mockedSetSecureItem.mockResolvedValue(undefined);
+  mockedDeleteSecureItem.mockResolvedValue(undefined);
+  mockedHashPin.mockResolvedValue('salt:hash');
+  mockedVerifyPin.mockResolvedValue(false);
+  useSessionStore.setState({
+    isHydrated: false,
+    hasCompletedOnboarding: false,
+    hasPinSet: false,
+    isLocked: true,
+    hasIdentity: false,
+    failedAttempts: 0,
+    lockedUntil: null,
+    lockoutCycle: 0,
+  });
+});
+
+describe('isValidPinFormat', () => {
+  it('accepts a 4-digit numeric string', () => {
+    expect(isValidPinFormat('1234')).toBe(true);
+    expect(isValidPinFormat('0000')).toBe(true);
+  });
+
+  it('rejects non-numeric or wrong-length strings', () => {
+    expect(isValidPinFormat('12')).toBe(false);
+    expect(isValidPinFormat('12345')).toBe(false);
+    expect(isValidPinFormat('abcd')).toBe(false);
+    expect(isValidPinFormat('')).toBe(false);
+  });
+});
+
+describe('useSessionStore', () => {
+  describe('hydrate', () => {
+    it('restores persisted state from secure storage', async () => {
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'session:state') return JSON.stringify({ hasCompletedOnboarding: true, hasIdentity: true });
+        if (key === 'auth:pin-hash') return 'salt:hash';
+        if (key === 'auth:lockout') return null;
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.isHydrated).toBe(true);
+      expect(state.hasCompletedOnboarding).toBe(true);
+      expect(state.hasIdentity).toBe(true);
+      expect(state.hasPinSet).toBe(true);
+    });
+
+    it('handles missing storage gracefully', async () => {
+      await useSessionStore.getState().hydrate();
+      const state = useSessionStore.getState();
+      expect(state.isHydrated).toBe(true);
+      expect(state.hasCompletedOnboarding).toBe(false);
+      expect(state.hasPinSet).toBe(false);
+    });
+
+    it('handles corrupt storage gracefully', async () => {
+      mockedGetSecureItem.mockResolvedValue('not-json');
+      await useSessionStore.getState().hydrate();
+      expect(useSessionStore.getState().isHydrated).toBe(true);
+    });
+
+    it('clears expired lockout on hydrate', async () => {
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'auth:lockout') return JSON.stringify({ failedAttempts: 3, lockedUntil: Date.now() - 1000, lockoutCycle: 1 });
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+      expect(useSessionStore.getState().failedAttempts).toBe(0);
+      expect(useSessionStore.getState().lockedUntil).toBeNull();
+      expect(useSessionStore.getState().lockoutCycle).toBe(1);
+    });
+  });
+
+  describe('createPin', () => {
+    it('hashes and stores the PIN, then unlocks', async () => {
+      mockedHashPin.mockResolvedValue('newsalt:newhash');
+      await useSessionStore.getState().createPin('5678');
+
+      expect(mockedHashPin).toHaveBeenCalledWith('5678');
+      expect(mockedSetSecureItem).toHaveBeenCalledWith('auth:pin-hash', 'newsalt:newhash');
+      expect(useSessionStore.getState().hasPinSet).toBe(true);
+      expect(useSessionStore.getState().isLocked).toBe(false);
+    });
+
+    it('rejects invalid PIN format', async () => {
+      await expect(useSessionStore.getState().createPin('ab')).rejects.toThrow('Invalid PIN format');
+    });
+  });
+
+  describe('unlock', () => {
+    it('unlocks with a correct PIN', async () => {
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'auth:pin-hash') return 'salt:hash';
+        return null;
+      });
+      mockedVerifyPin.mockResolvedValue(true);
+
+      const result = await useSessionStore.getState().unlock('1234');
+      expect(result).toBe(true);
+      expect(useSessionStore.getState().isLocked).toBe(false);
+    });
+
+    it('rejects a wrong PIN and increments failed attempts', async () => {
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'auth:pin-hash') return 'salt:hash';
+        return null;
+      });
+
+      const result = await useSessionStore.getState().unlock('0000');
+      expect(result).toBe(false);
+      expect(useSessionStore.getState().failedAttempts).toBe(1);
+    });
+
+    it('rejects invalid PIN format without hitting storage', async () => {
+      const result = await useSessionStore.getState().unlock('ab');
+      expect(result).toBe(false);
+      expect(mockedGetSecureItem).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setHasIdentity', () => {
+    it('updates state and persists', () => {
+      useSessionStore.getState().setHasIdentity(true);
+      expect(useSessionStore.getState().hasIdentity).toBe(true);
+      expect(mockedSetSecureItem).toHaveBeenCalledWith(
+        'session:state',
+        expect.stringContaining('"hasIdentity":true'),
+      );
+    });
+  });
+
+  describe('reset', () => {
+    it('clears all persisted state', async () => {
+      useSessionStore.getState().completeOnboarding();
+      await useSessionStore.getState().reset();
+
+      const state = useSessionStore.getState();
+      expect(state.hasCompletedOnboarding).toBe(false);
+      expect(state.hasPinSet).toBe(false);
+      expect(state.isLocked).toBe(true);
+      expect(state.lockoutCycle).toBe(0);
+      expect(mockedDeleteSecureItem).toHaveBeenCalledWith('auth:pin-hash');
+      expect(mockedDeleteSecureItem).toHaveBeenCalledWith('auth:lockout');
+    });
+  });
+});
