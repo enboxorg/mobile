@@ -54,7 +54,7 @@ jobs:
           retention-days: 7
 
   build-ios:
-    runs-on: macos-14
+    runs-on: macos-15
     needs: verify
     steps:
       - uses: actions/checkout@v4
