@@ -2,6 +2,7 @@ import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/ui/screen';
 import { ScreenHeader } from '@/components/ui/screen-header';
+import { useAgentStore } from '@/lib/enbox/agent-store';
 import { useAppTheme, type AppTheme } from '@/theme';
 
 export interface SettingsScreenProps {
@@ -11,6 +12,10 @@ export interface SettingsScreenProps {
 
 export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
   const theme = useAppTheme();
+  const agent = useAgentStore((s) => s.agent);
+  const identityCount = useAgentStore((s) => s.identities.length);
+
+  const agentDid = agent?.agentDid?.uri;
 
   function handleReset() {
     Alert.alert(
@@ -18,11 +23,7 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
       'This will erase all data including your identities and PIN. This cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Reset',
-          style: 'destructive',
-          onPress: () => onReset?.(),
-        },
+        { text: 'Reset', style: 'destructive', onPress: () => onReset?.() },
       ],
     );
   }
@@ -30,6 +31,24 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
   return (
     <Screen>
       <ScreenHeader title="Settings" />
+
+      {agentDid && (
+        <View style={[styles.section, { borderColor: theme.colors.border }]}>
+          <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
+            Agent
+          </Text>
+          <View style={styles.infoRow}>
+            <Text style={[styles.infoLabel, { color: theme.colors.textMuted }]}>Agent DID</Text>
+            <Text style={[styles.infoValue, { color: theme.colors.text }]} numberOfLines={1} selectable>
+              {agentDid}
+            </Text>
+          </View>
+          <View style={styles.infoRow}>
+            <Text style={[styles.infoLabel, { color: theme.colors.textMuted }]}>Identities</Text>
+            <Text style={[styles.infoValue, { color: theme.colors.text }]}>{identityCount}</Text>
+          </View>
+        </View>
+      )}
 
       <View style={[styles.section, { borderColor: theme.colors.border }]}>
         <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
@@ -48,14 +67,14 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
         <SettingsRow label="Import backup" disabled onPress={() => {}} theme={theme} />
       </View>
 
-      {onReset ? (
+      {onReset && (
         <View style={[styles.section, { borderColor: theme.colors.border }]}>
           <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
             Danger zone
           </Text>
           <SettingsRow label="Reset wallet" destructive onPress={handleReset} theme={theme} />
         </View>
-      ) : null}
+      )}
     </Screen>
   );
 }
@@ -87,35 +106,18 @@ function SettingsRow({ label, onPress, theme, disabled, destructive }: SettingsR
       ]}
     >
       <Text style={[styles.rowLabel, { color: textColor }]}>{label}</Text>
-      {!disabled ? (
-        <Text style={[styles.rowChevron, { color: theme.colors.textMuted }]}>&rsaquo;</Text>
-      ) : null}
+      {!disabled && <Text style={[styles.rowChevron, { color: theme.colors.textMuted }]}>&rsaquo;</Text>}
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  section: {
-    borderRadius: 16,
-    borderWidth: 1,
-    overflow: 'hidden',
-  },
-  sectionTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 6,
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
+  section: { borderRadius: 16, borderWidth: 1, overflow: 'hidden' },
+  sectionTitle: { fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase', paddingHorizontal: 16, paddingTop: 14, paddingBottom: 6 },
+  infoRow: { paddingHorizontal: 16, paddingVertical: 10, gap: 2 },
+  infoLabel: { fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
+  infoValue: { fontSize: 13, fontFamily: 'monospace' },
+  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14 },
   rowLabel: { fontSize: 16 },
   rowChevron: { fontSize: 22 },
 });

@@ -1,7 +1,7 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { useCallback, useEffect } from 'react';
+import { useCallback } from 'react';
 
 import { CreatePinScreen } from '@/features/auth/screens/create-pin-screen';
 import { UnlockScreen } from '@/features/auth/screens/unlock-screen';
@@ -67,16 +67,6 @@ function MainTabs() {
   );
 }
 
-function AgentInitializer({ children }: { children: React.ReactNode }) {
-  const initialize = useAgentStore((s) => s.initialize);
-
-  useEffect(() => {
-    initialize();
-  }, [initialize]);
-
-  return <>{children}</>;
-}
-
 export function AppNavigator() {
   const theme = useAppTheme();
   const hasCompletedOnboarding = useSessionStore((s) => s.hasCompletedOnboarding);
@@ -85,6 +75,9 @@ export function AppNavigator() {
   const completeOnboarding = useSessionStore((s) => s.completeOnboarding);
   const createPin = useSessionStore((s) => s.createPin);
   const unlock = useSessionStore((s) => s.unlock);
+  const teardownAgent = useAgentStore((s) => s.teardown);
+  const initializeFirstLaunch = useAgentStore((s) => s.initializeFirstLaunch);
+  const unlockAgent = useAgentStore((s) => s.unlockAgent);
 
   const showOnboarding = !hasCompletedOnboarding || !hasPinSet;
   const showUnlock = hasCompletedOnboarding && hasPinSet && isLocked;
@@ -104,7 +97,10 @@ export function AppNavigator() {
               {() => (
                 <CreatePinScreen
                   onComplete={async (pin) => {
+                    // 1. Store the hashed PIN for future unlock
                     await createPin(pin);
+                    // 2. Initialize the agent vault with the PIN as password
+                    await initializeFirstLaunch(pin);
                   }}
                 />
               )}
@@ -116,16 +112,24 @@ export function AppNavigator() {
             {() => (
               <UnlockScreen
                 onUnlock={async (pin) => {
-                  return await unlock(pin);
+                  // 1. Verify the PIN hash
+                  const valid = await unlock(pin);
+                  if (!valid) return false;
+                  // 2. Unlock the agent vault with the PIN as password
+                  try {
+                    await unlockAgent(pin);
+                  } catch {
+                    // Vault unlock failed — re-lock the session
+                    teardownAgent();
+                  }
+                  return valid;
                 }}
               />
             )}
           </RootStack.Screen>
         )}
         {showMain && (
-          <AgentInitializer>
-            <RootStack.Screen name="Main" component={MainTabs} />
-          </AgentInitializer>
+          <RootStack.Screen name="Main" component={MainTabs} />
         )}
       </RootStack.Navigator>
     </NavigationContainer>
