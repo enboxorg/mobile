@@ -1,0 +1,141 @@
+name: Debug on Emulator
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'specs/**'
+      - 'metro.config.js'
+      - 'babel.config.js'
+      - 'index.js'
+      - 'package.json'
+
+jobs:
+  debug-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - run: bun install --frozen-lockfile
+
+      - name: Build release APK (JS pre-bundled, no dev server needed)
+        run: ./gradlew assembleRelease --no-daemon -x lint
+        working-directory: android
+
+      - name: Run on emulator and capture logs
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 31
+          arch: x86_64
+          profile: pixel_5
+          force-avd-creation: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          disable-animations: true
+          script: |
+            set -e
+
+            echo "=== Installing release APK ==="
+            adb install android/app/build/outputs/apk/release/app-release.apk
+
+            echo "=== Clearing logcat ==="
+            adb logcat -c
+
+            echo "=== Launching app ==="
+            adb shell am start -n org.enbox.mobile/.MainActivity
+
+            echo "=== Waiting for app to start (20s) ==="
+            sleep 20
+
+            echo "=== Capturing initial logcat ==="
+            adb logcat -d > /tmp/logcat-startup.txt 2>&1
+
+            echo "=== Simulating PIN entry: tap through welcome screen ==="
+            # Tap "Get started" button (center-bottom area)
+            adb shell input tap 540 1800
+            sleep 3
+
+            echo "=== On Create PIN screen: enter 1234 ==="
+            # Tap the PIN input field
+            adb shell input tap 540 900
+            sleep 1
+            adb shell input text "1234"
+            sleep 1
+            # Tap "Next" button
+            adb shell input tap 540 1400
+            sleep 2
+
+            echo "=== Confirm PIN: enter 1234 ==="
+            adb shell input tap 540 900
+            sleep 1
+            adb shell input text "1234"
+            sleep 1
+            # Tap "Set PIN" button
+            adb shell input tap 700 1400
+            sleep 2
+
+            echo "=== Waiting for agent initialization (30s) ==="
+            sleep 30
+
+            echo "=== Taking screenshot ==="
+            adb shell screencap -p /sdcard/screenshot.png
+            adb pull /sdcard/screenshot.png /tmp/screenshot-after-pin.png 2>/dev/null || true
+
+            echo ""
+            echo "========================================="
+            echo "=== ReactNativeJS + Crash Logs ==="
+            echo "========================================="
+            adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E
+
+            echo ""
+            echo "========================================="
+            echo "=== All ERROR level logs ==="
+            echo "========================================="
+            adb logcat -d '*:E' | grep -i "react\|enbox\|level\|crypto\|fatal\|exception" || true
+
+            echo ""
+            echo "=== Saving full logcat ==="
+            adb logcat -d > /tmp/logcat-full.txt 2>&1
+            adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E > /tmp/logcat-rn.txt 2>&1
+
+      - name: Upload logs and screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-debug-${{ github.sha }}
+          path: |
+            /tmp/logcat-full.txt
+            /tmp/logcat-rn.txt
+            /tmp/logcat-startup.txt
+            /tmp/screenshot-after-pin.png
+          retention-days: 7
