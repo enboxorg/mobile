@@ -18,6 +18,14 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk /opt/ghc /usr/local/share/boost
+          sudo apt-get -qq purge -y 'dotnet-*' 'aspnetcore-*' 'firefox' 'google-chrome-stable' || true
+          sudo apt-get -qq autoremove -y || true
+          sudo apt-get -qq clean || true
+          df -h /
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
