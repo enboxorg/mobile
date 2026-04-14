@@ -49,13 +49,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   initializeFirstLaunch: async (password) => {
     set({ isInitializing: true, error: null });
     try {
+      console.log('[agent-store] initializeFirstLaunch: creating agent...');
       const { agent, authManager } = await initializeAgent();
+
+      console.log('[agent-store] checking firstLaunch...');
       const isFirst = await agent.firstLaunch();
+      console.log('[agent-store] firstLaunch:', isFirst);
 
       let recoveryPhrase: string;
       if (isFirst) {
+        console.log('[agent-store] initializing vault...');
         recoveryPhrase = await agent.initialize({ password });
+        console.log('[agent-store] vault initialized.');
       } else {
+        console.log('[agent-store] starting existing vault...');
         await agent.start({ password });
         recoveryPhrase = '';
       }
@@ -63,8 +70,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       set({ agent, authManager, isInitializing: false, recoveryPhrase });
       return recoveryPhrase;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Agent initialization failed';
-      console.error('[agent] first launch failed:', err);
+      const message = err instanceof Error
+        ? `${err.message}\n${(err as any).stack ?? ''}`
+        : 'Agent initialization failed';
+      console.error('[agent-store] first launch failed:', message);
       set({ error: message, isInitializing: false });
       throw err;
     }
@@ -73,15 +82,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   unlockAgent: async (password) => {
     set({ isInitializing: true, error: null });
     try {
+      console.log('[agent-store] unlockAgent: creating agent...');
       const { agent, authManager } = await initializeAgent();
+      console.log('[agent-store] starting vault...');
       await agent.start({ password });
+      console.log('[agent-store] vault started.');
       set({ agent, authManager, isInitializing: false });
 
-      // Load identities in background
       get().refreshIdentities().catch(() => {});
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Agent unlock failed';
-      console.error('[agent] unlock failed:', err);
+      const message = err instanceof Error
+        ? `${err.message}\n${(err as any).stack ?? ''}`
+        : 'Agent unlock failed';
+      console.error('[agent-store] unlock failed:', message);
       set({ error: message, isInitializing: false });
       throw err;
     }

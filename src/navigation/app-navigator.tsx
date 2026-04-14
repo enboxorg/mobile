@@ -97,9 +97,7 @@ export function AppNavigator() {
               {() => (
                 <CreatePinScreen
                   onComplete={async (pin) => {
-                    // 1. Store the hashed PIN for future unlock
                     await createPin(pin);
-                    // 2. Initialize the agent vault with the PIN as password
                     await initializeFirstLaunch(pin);
                   }}
                 />

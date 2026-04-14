@@ -53,6 +53,8 @@ export function CreatePinScreen({ onComplete }: CreatePinScreenProps) {
     setError(null);
     try {
       await onComplete(pin);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Setup failed. Please try again.');
     } finally {
       setLoading(false);
     }
