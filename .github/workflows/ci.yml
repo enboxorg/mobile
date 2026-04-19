@@ -86,6 +86,5 @@ jobs:
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'platform=iOS Simulator,name=iPhone 16' \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcpretty --color
+            CODE_SIGNING_ALLOWED=NO
         working-directory: ios
