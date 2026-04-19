@@ -50,7 +50,7 @@ The mobile app now implements the **wallet side** of the relay-mediated Enbox co
 
 Supported intake today:
 - `enbox://connect?request_uri=...&encryption_key=...` deep links
-- QR code payloads that encode that same URI format
+- QR code payloads that encode that same URI format via native camera scanning
 
 Current flow:
 1. A client app generates a WalletConnect relay URI.
@@ -63,11 +63,15 @@ Current flow:
 Key files:
 - `src/hooks/use-wallet-connect-linking.ts` -- listens for incoming deep links
 - `src/features/connect/screens/wallet-connect-request-screen.tsx` -- native consent UI
+- `src/features/connect/screens/wallet-connect-scanner-screen.tsx` -- native QR scanner for wallet-side intake
 - `android/app/src/main/AndroidManifest.xml` -- Android `enbox://connect` intent filter
 - `ios/EnboxMobile/Info.plist` -- iOS URL scheme registration
 
-Not built yet:
-- Native camera QR scanner UI in the wallet app. The protocol payload format is already supported once scanned.
+Consent UI highlights:
+- protocol-by-protocol permission grouping
+- low / medium / high risk badges
+- readable summaries for read, write, delete, subscribe, and protocol configure scopes
+- encrypted type visibility for protocols that require decryption keys
 
 ## Native Modules
 

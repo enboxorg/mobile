@@ -15,6 +15,67 @@ import { useAgentStore } from '@/lib/enbox/agent-store';
 import { useWalletConnectStore } from '@/lib/enbox/wallet-connect-store';
 import { useAppTheme } from '@/theme';
 
+type ScopeSummary = {
+  label: string;
+  risk: 'low' | 'medium' | 'high';
+};
+
+type ProtocolSummary = {
+  protocol: string;
+  risk: ScopeSummary['risk'];
+  permissions: ScopeSummary[];
+  encryptedTypes: string[];
+};
+
+function summarizeScope(scope: any): ScopeSummary {
+  const target = 'protocolPath' in scope && scope.protocolPath ? ` for ${scope.protocolPath}` : '';
+
+  if (scope.interface === 'Protocols' && scope.method === 'Configure') {
+    return { label: `Install or update the protocol${target}`, risk: 'high' };
+  }
+  if (scope.interface === 'Protocols' && scope.method === 'Query') {
+    return { label: `Read protocol configuration${target}`, risk: 'low' };
+  }
+  if (scope.interface === 'Records' && scope.method === 'Write') {
+    return { label: `Write records${target}`, risk: 'high' };
+  }
+  if (scope.interface === 'Records' && scope.method === 'Delete') {
+    return { label: `Delete records${target}`, risk: 'high' };
+  }
+  if (scope.interface === 'Records' && scope.method === 'Read') {
+    return { label: `Read records${target}`, risk: 'low' };
+  }
+  if (scope.interface === 'Records' && scope.method === 'Query') {
+    return { label: `Query records${target}`, risk: 'medium' };
+  }
+  if (scope.interface === 'Records' && scope.method === 'Subscribe') {
+    return { label: `Subscribe to record changes${target}`, risk: 'medium' };
+  }
+  if (scope.interface === 'Messages' && scope.method === 'Read') {
+    return { label: `Read and sync delegated messages${target}`, risk: 'medium' };
+  }
+
+  return { label: `${scope.interface}.${scope.method}${target}`, risk: 'medium' };
+}
+
+function summarizeProtocol(request: any): ProtocolSummary {
+  const summaries: ScopeSummary[] = request.permissionScopes.map(summarizeScope);
+  const risk = summaries.some((s) => s.risk === 'high')
+    ? 'high'
+    : summaries.some((s) => s.risk === 'medium')
+      ? 'medium'
+      : 'low';
+
+  return {
+    protocol: request.protocolDefinition.protocol,
+    risk,
+    permissions: summaries,
+    encryptedTypes: Object.entries(request.protocolDefinition.types ?? {})
+      .filter(([, typeDef]) => (typeDef as any)?.encryptionRequired)
+      .map(([path]) => path),
+  };
+}
+
 export function WalletConnectRequestScreen() {
   const theme = useAppTheme();
   const agent = useAgentStore((s) => s.agent);
@@ -46,6 +107,11 @@ export function WalletConnectRequestScreen() {
     } catch {
       return '';
     }
+  }, [pending]);
+
+  const protocolSummaries = useMemo(() => {
+    if (!pending) return [];
+    return pending.request.permissionRequests.map(summarizeProtocol);
   }, [pending]);
 
   async function handleApprove() {
@@ -134,18 +200,58 @@ export function WalletConnectRequestScreen() {
       <View style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}> 
         <Text style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>Requested permissions</Text>
         <ScrollView style={styles.permissions}>
-          {pending.request.permissionRequests.map((request, requestIndex) => (
-            <View key={`${request.protocolDefinition.protocol}-${requestIndex}`} style={styles.permissionGroup}>
-              <Text style={[styles.protocol, { color: theme.colors.text }]}>{request.protocolDefinition.protocol}</Text>
-              {request.permissionScopes.map((scope: any, scopeIndex) => (
+          {protocolSummaries.map((summary, requestIndex) => (
+            <View key={`${summary.protocol}-${requestIndex}`} style={[styles.permissionGroup, { borderColor: theme.colors.border }]}> 
+              <View style={styles.permissionHeader}>
+                <Text style={[styles.protocol, { color: theme.colors.text }]}>{summary.protocol}</Text>
+                <View style={[
+                  styles.riskBadge,
+                  {
+                    backgroundColor:
+                      summary.risk === 'high'
+                        ? theme.colors.warning
+                        : summary.risk === 'medium'
+                          ? theme.colors.surfaceMuted
+                          : theme.colors.surfaceMuted,
+                  },
+                ]}>
+                  <Text style={[
+                    styles.riskBadgeText,
+                    { color: summary.risk === 'high' ? theme.colors.accentText : theme.colors.text },
+                  ]}>
+                    {summary.risk.toUpperCase()}
+                  </Text>
+                </View>
+              </View>
+
+              {summary.permissions.map((permission: ScopeSummary, scopeIndex: number) => (
                 <Text key={scopeIndex} style={[styles.scope, { color: theme.colors.textMuted }]}>
-                  {scope.interface}.{scope.method}
-                  {'protocolPath' in scope && scope.protocolPath ? ` on ${scope.protocolPath}` : ''}
-                  {'contextId' in scope && scope.contextId ? ` (${scope.contextId})` : ''}
+                  • {permission.label}
                 </Text>
               ))}
+
+              {summary.encryptedTypes.length > 0 ? (
+                <View style={styles.encryptedBox}>
+                  <Text style={[styles.encryptedTitle, { color: theme.colors.textMuted }]}>Encrypted types</Text>
+                  {summary.encryptedTypes.map((path) => (
+                    <Text key={path} style={[styles.encryptedType, { color: theme.colors.textMuted }]}>
+                      {path}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
             </View>
           ))}
+
+          <View style={[styles.warningBox, { borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]}> 
+            <Text style={[styles.warningTitle, { color: theme.colors.text }]}>What approval does</Text>
+            <Text style={[styles.warningBody, { color: theme.colors.textMuted }]}> 
+              Approval creates a delegated DID for the app with only the permissions listed above. You can revoke the session later by disconnecting the app.
+            </Text>
+            <Text style={[styles.warningBody, { color: theme.colors.textMuted }]}> 
+              High-risk permissions include protocol installation, record writes, and record deletion.
+            </Text>
+          </View>
         </ScrollView>
       </View>
 
@@ -199,9 +305,18 @@ const styles = StyleSheet.create({
   appName: { fontSize: 18, fontWeight: '700' },
   origin: { fontSize: 12, fontFamily: 'monospace' },
   permissions: { maxHeight: 220 },
-  permissionGroup: { gap: 4, marginBottom: 10 },
+  permissionGroup: { gap: 6, marginBottom: 12, borderWidth: 1, borderRadius: 14, padding: 12 },
+  permissionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   protocol: { fontSize: 14, fontWeight: '600' },
   scope: { fontSize: 13, lineHeight: 18 },
+  riskBadge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
+  riskBadgeText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
+  encryptedBox: { gap: 4, marginTop: 4 },
+  encryptedTitle: { fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
+  encryptedType: { fontSize: 12, fontFamily: 'monospace' },
+  warningBox: { borderRadius: 14, borderWidth: 1, padding: 12, gap: 6, marginTop: 8 },
+  warningTitle: { fontSize: 13, fontWeight: '700' },
+  warningBody: { fontSize: 12, lineHeight: 18 },
   identityCreate: { gap: 10 },
   input: { borderRadius: 14, borderWidth: 1, fontSize: 16, paddingHorizontal: 14, paddingVertical: 12 },
   identityList: { gap: 10 },

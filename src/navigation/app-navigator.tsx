@@ -7,6 +7,7 @@ import { CreatePinScreen } from '@/features/auth/screens/create-pin-screen';
 import { UnlockScreen } from '@/features/auth/screens/unlock-screen';
 import { ConnectScreen } from '@/features/connect/screens/connect-screen';
 import { WalletConnectRequestScreen } from '@/features/connect/screens/wallet-connect-request-screen';
+import { WalletConnectScannerScreen } from '@/features/connect/screens/wallet-connect-scanner-screen';
 import { IdentitiesScreen } from '@/features/identities/screens/identities-screen';
 import { WelcomeScreen } from '@/features/onboarding/screens/welcome-screen';
 import { SearchScreen } from '@/features/search/screens/search-screen';
@@ -21,6 +22,7 @@ type RootStackParamList = {
   CreatePin: undefined;
   Unlock: undefined;
   WalletConnectRequest: undefined;
+  WalletConnectScanner: undefined;
   Main: undefined;
 };
 
@@ -131,12 +133,13 @@ export function AppNavigator() {
             )}
           </RootStack.Screen>
         )}
-        {showMain && (
+        {showMain && showWalletConnectRequest && (
+          <RootStack.Screen name="WalletConnectRequest" component={WalletConnectRequestScreen} />
+        )}
+        {showMain && !showWalletConnectRequest && (
           <>
-            {showWalletConnectRequest ? (
-              <RootStack.Screen name="WalletConnectRequest" component={WalletConnectRequestScreen} />
-            ) : null}
             <RootStack.Screen name="Main" component={MainTabs} />
+            <RootStack.Screen name="WalletConnectScanner" component={WalletConnectScannerScreen} />
           </>
         )}
       </RootStack.Navigator>
