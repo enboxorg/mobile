@@ -6,11 +6,13 @@ import { useCallback } from 'react';
 import { CreatePinScreen } from '@/features/auth/screens/create-pin-screen';
 import { UnlockScreen } from '@/features/auth/screens/unlock-screen';
 import { ConnectScreen } from '@/features/connect/screens/connect-screen';
+import { WalletConnectRequestScreen } from '@/features/connect/screens/wallet-connect-request-screen';
 import { IdentitiesScreen } from '@/features/identities/screens/identities-screen';
 import { WelcomeScreen } from '@/features/onboarding/screens/welcome-screen';
 import { SearchScreen } from '@/features/search/screens/search-screen';
 import { SettingsScreen } from '@/features/settings/screens/settings-screen';
 import { useAgentStore } from '@/lib/enbox/agent-store';
+import { useWalletConnectStore } from '@/lib/enbox/wallet-connect-store';
 import { useSessionStore } from '@/features/session/session-store';
 import { createNavigationTheme, useAppTheme } from '@/theme';
 
@@ -18,6 +20,7 @@ type RootStackParamList = {
   Welcome: undefined;
   CreatePin: undefined;
   Unlock: undefined;
+  WalletConnectRequest: undefined;
   Main: undefined;
 };
 
@@ -78,10 +81,12 @@ export function AppNavigator() {
   const teardownAgent = useAgentStore((s) => s.teardown);
   const initializeFirstLaunch = useAgentStore((s) => s.initializeFirstLaunch);
   const unlockAgent = useAgentStore((s) => s.unlockAgent);
+  const pendingWalletRequest = useWalletConnectStore((s) => s.pending);
 
   const showOnboarding = !hasCompletedOnboarding || !hasPinSet;
   const showUnlock = hasCompletedOnboarding && hasPinSet && isLocked;
   const showMain = hasCompletedOnboarding && hasPinSet && !isLocked;
+  const showWalletConnectRequest = showMain && !!pendingWalletRequest;
 
   return (
     <NavigationContainer theme={createNavigationTheme(theme)}>
@@ -127,7 +132,12 @@ export function AppNavigator() {
           </RootStack.Screen>
         )}
         {showMain && (
-          <RootStack.Screen name="Main" component={MainTabs} />
+          <>
+            {showWalletConnectRequest ? (
+              <RootStack.Screen name="WalletConnectRequest" component={WalletConnectRequestScreen} />
+            ) : null}
+            <RootStack.Screen name="Main" component={MainTabs} />
+          </>
         )}
       </RootStack.Navigator>
     </NavigationContainer>

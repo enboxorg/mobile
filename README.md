@@ -40,7 +40,34 @@ Key files:
 - `src/lib/enbox/agent-init.ts` -- agent + auth manager initialization
 - `src/lib/enbox/agent-store.ts` -- global agent state (Zustand)
 - `src/lib/enbox/connect.ts` -- mobile connect flow via WalletConnect relay
+- `src/lib/enbox/wallet-connect-store.ts` -- wallet-side pending request intake and approval flow
+- `src/lib/enbox/prepare-protocol.ts` -- protocol installation helper reused from the web wallet
 - `metro.config.js` -- `level` → `RNLevel` resolver override
+
+## Wallet-Side Connect
+
+The mobile app now implements the **wallet side** of the relay-mediated Enbox connect flow.
+
+Supported intake today:
+- `enbox://connect?request_uri=...&encryption_key=...` deep links
+- QR code payloads that encode that same URI format
+
+Current flow:
+1. A client app generates a WalletConnect relay URI.
+2. The mobile wallet receives it via the `enbox://connect` protocol handler.
+3. The wallet fetches and decrypts the pending request using `EnboxConnectProtocol.getConnectRequest()`.
+4. The user reviews the requested protocols and scopes, chooses an identity, and approves or denies.
+5. On approval, the wallet installs requested protocols on all DWN endpoints and submits the encrypted response with `EnboxConnectProtocol.submitConnectResponse()`.
+6. The wallet shows the 4-digit confirmation PIN for the requesting app.
+
+Key files:
+- `src/hooks/use-wallet-connect-linking.ts` -- listens for incoming deep links
+- `src/features/connect/screens/wallet-connect-request-screen.tsx` -- native consent UI
+- `android/app/src/main/AndroidManifest.xml` -- Android `enbox://connect` intent filter
+- `ios/EnboxMobile/Info.plist` -- iOS URL scheme registration
+
+Not built yet:
+- Native camera QR scanner UI in the wallet app. The protocol payload format is already supported once scanned.
 
 ## Native Modules
 
