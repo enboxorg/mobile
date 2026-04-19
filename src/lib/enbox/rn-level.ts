@@ -23,6 +23,19 @@ export interface RNLevelOptions {
   valueEncoding?: string;
 }
 
+export function normalizeLocation(location: string): string {
+  // react-native-leveldb prepends the app documents/files directory and then
+  // opens the provided path directly with LevelDB. Nested relative paths like
+  // `DATA/AGENT/VAULT_STORE` fail because parent directories are not created,
+  // and LevelDB errors opening the LOCK file.
+  //
+  // We flatten the logical path into a unique single directory name.
+  return location
+    .replace(/^[/.]+/, '')
+    .replace(/[\\/]+/g, '__')
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
 export class RNLevel {
   private _db: LevelDB | null = null;
   private _location: string;
@@ -47,7 +60,7 @@ export class RNLevel {
   supports = { additionalMethods: {} };
 
   constructor(location: string, _options?: RNLevelOptions) {
-    this._location = location;
+    this._location = normalizeLocation(location);
     this._prefix = '';
     this._root = this;
   }
