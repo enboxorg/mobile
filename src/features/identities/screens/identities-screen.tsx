@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -23,6 +23,8 @@ export function IdentitiesScreen() {
   const refreshIdentities = useAgentStore((s) => s.refreshIdentities);
   const agent = useAgentStore((s) => s.agent);
   const isInitializing = useAgentStore((s) => s.isInitializing);
+  const agentError = useAgentStore((s) => s.error);
+  const clearAgentError = useAgentStore((s) => s.clearError);
 
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
@@ -43,7 +45,13 @@ export function IdentitiesScreen() {
     }
   }, [name, creating, createIdentity]);
 
-  if (isInitializing || !agent) {
+  useEffect(() => {
+    if (agent) {
+      refreshIdentities().catch(() => {});
+    }
+  }, [agent, refreshIdentities]);
+
+  if (!agent && isInitializing) {
     return (
       <Screen contentContainerStyle={styles.centered}>
         <ActivityIndicator size="large" color={theme.colors.accent} />
@@ -54,9 +62,33 @@ export function IdentitiesScreen() {
     );
   }
 
+  if (!agent) {
+    return (
+      <Screen contentContainerStyle={styles.centered}>
+        <View style={[styles.errorCard, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
+          <Text style={[styles.errorTitle, { color: theme.colors.warning }]}>Agent unavailable</Text>
+          <Text style={[styles.errorBody, { color: theme.colors.textMuted }]}>
+            {agentError ?? 'The wallet agent is not available in this session.'}
+          </Text>
+          <AppButton label="Dismiss" variant="secondary" onPress={clearAgentError} />
+        </View>
+      </Screen>
+    );
+  }
+
   return (
     <Screen>
       <ScreenHeader title="Identities" />
+
+      {agentError ? (
+        <View style={[styles.inlineError, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
+          <Text style={[styles.inlineErrorTitle, { color: theme.colors.warning }]}>Agent warning</Text>
+          <Text style={[styles.inlineErrorBody, { color: theme.colors.textMuted }]} numberOfLines={4}>
+            {agentError}
+          </Text>
+          <AppButton label="Clear warning" variant="secondary" onPress={clearAgentError} />
+        </View>
+      ) : null}
 
       {identities.length === 0 && !showCreate && (
         <View style={[styles.empty, { borderColor: theme.colors.border }]}>
@@ -144,6 +176,12 @@ function IdentityRow({ identity, theme }: { identity: any; theme: AppTheme }) {
 const styles = StyleSheet.create({
   centered: { flexGrow: 1, justifyContent: 'center', alignItems: 'center' },
   loadingText: { marginTop: 12, fontSize: 15 },
+  errorCard: { borderRadius: 24, borderWidth: 1, padding: 20, gap: 12, width: '100%' },
+  errorTitle: { fontSize: 18, fontWeight: '700' },
+  errorBody: { fontSize: 14, lineHeight: 20 },
+  inlineError: { borderRadius: 16, borderWidth: 1, padding: 16, gap: 8 },
+  inlineErrorTitle: { fontSize: 16, fontWeight: '700' },
+  inlineErrorBody: { fontSize: 13, lineHeight: 18 },
   empty: { borderRadius: 24, borderWidth: 1, borderStyle: 'dashed', padding: 24, gap: 12, alignItems: 'center' },
   emptyTitle: { fontSize: 18, fontWeight: '700' },
   emptyBody: { fontSize: 15, lineHeight: 22, textAlign: 'center' },

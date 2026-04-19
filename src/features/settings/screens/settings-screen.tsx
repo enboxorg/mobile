@@ -14,6 +14,7 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
   const theme = useAppTheme();
   const agent = useAgentStore((s) => s.agent);
   const identityCount = useAgentStore((s) => s.identities.length);
+  const agentError = useAgentStore((s) => s.error);
 
   const agentDid = agent?.agentDid?.uri;
 
@@ -49,6 +50,17 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
           </View>
         </View>
       )}
+
+      {agentError ? (
+        <View style={[styles.section, { borderColor: theme.colors.border }]}> 
+          <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>Agent error</Text>
+          <View style={styles.infoRow}>
+            <Text style={[styles.infoValue, { color: theme.colors.warning }]} selectable>
+              {agentError}
+            </Text>
+          </View>
+        </View>
+      ) : null}
 
       <View style={[styles.section, { borderColor: theme.colors.border }]}>
         <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>

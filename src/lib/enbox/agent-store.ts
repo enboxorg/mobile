@@ -31,6 +31,9 @@ export interface AgentStore {
   /** Refresh identities list from the agent. */
   refreshIdentities: () => Promise<void>;
 
+  /** Clear the last agent error. */
+  clearError: () => void;
+
   /** Create a new identity. */
   createIdentity: (name: string) => Promise<BearerIdentity>;
 
@@ -68,6 +71,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }
 
       set({ agent, authManager, isInitializing: false, recoveryPhrase });
+      get().refreshIdentities().catch(() => {});
       return recoveryPhrase;
     } catch (err) {
       const message = err instanceof Error
@@ -110,6 +114,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     } catch (err) {
       console.warn('[agent] identity list failed:', err);
     }
+  },
+
+  clearError: () => {
+    set({ error: null });
   },
 
   createIdentity: async (name) => {
