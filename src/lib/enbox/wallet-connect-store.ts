@@ -33,7 +33,7 @@ export interface WalletConnectStore {
   clear: () => void;
 }
 
-function parseConnectUrl(rawUrl: string): { requestUri: string; encryptionKey: string } {
+export function parseConnectUrl(rawUrl: string): { requestUri: string; encryptionKey: string } {
   const url = new URL(rawUrl);
   const isConnect = url.protocol === 'enbox:' && (url.hostname === 'connect' || url.pathname === '/connect');
   if (!isConnect) {
