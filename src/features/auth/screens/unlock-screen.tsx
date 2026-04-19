@@ -72,6 +72,10 @@ export function UnlockScreen({ onUnlock }: UnlockScreenProps) {
           setError(`Incorrect PIN. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`);
         }
       }
+    } catch (err) {
+      setPin('');
+      inputRef.current?.focus();
+      setError(err instanceof Error ? err.message : 'Unlock failed. Please try again.');
     } finally {
       setLoading(false);
     }

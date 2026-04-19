@@ -80,6 +80,7 @@ export function AppNavigator() {
   const completeOnboarding = useSessionStore((s) => s.completeOnboarding);
   const createPin = useSessionStore((s) => s.createPin);
   const unlock = useSessionStore((s) => s.unlock);
+  const lock = useSessionStore((s) => s.lock);
   const teardownAgent = useAgentStore((s) => s.teardown);
   const initializeFirstLaunch = useAgentStore((s) => s.initializeFirstLaunch);
   const unlockAgent = useAgentStore((s) => s.unlockAgent);
@@ -104,8 +105,8 @@ export function AppNavigator() {
               {() => (
                 <CreatePinScreen
                   onComplete={async (pin) => {
-                    await createPin(pin);
                     await initializeFirstLaunch(pin);
+                    await createPin(pin);
                   }}
                 />
               )}
@@ -115,23 +116,25 @@ export function AppNavigator() {
         {showUnlock && (
           <RootStack.Screen name="Unlock">
             {() => (
-              <UnlockScreen
-                onUnlock={async (pin) => {
-                  // 1. Verify the PIN hash
-                  const valid = await unlock(pin);
-                  if (!valid) return false;
-                  // 2. Unlock the agent vault with the PIN as password
-                  try {
-                    await unlockAgent(pin);
-                  } catch {
-                    // Vault unlock failed — re-lock the session
-                    teardownAgent();
-                  }
-                  return valid;
-                }}
-              />
-            )}
-          </RootStack.Screen>
+                <UnlockScreen
+                  onUnlock={async (pin) => {
+                    // 1. Verify the PIN hash
+                    const valid = await unlock(pin);
+                    if (!valid) return false;
+                    // 2. Unlock the agent vault with the PIN as password
+                    try {
+                      await unlockAgent(pin);
+                      return true;
+                    } catch {
+                      // Vault unlock failed — re-lock the session
+                      lock();
+                      teardownAgent();
+                      throw new Error('Wallet vault could not be opened with this PIN.');
+                    }
+                  }}
+                />
+              )}
+            </RootStack.Screen>
         )}
         {showMain && showWalletConnectRequest && (
           <RootStack.Screen name="WalletConnectRequest" component={WalletConnectRequestScreen} />
