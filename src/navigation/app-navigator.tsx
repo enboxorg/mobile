@@ -80,6 +80,7 @@ export function AppNavigator() {
   const completeOnboarding = useSessionStore((s) => s.completeOnboarding);
   const createPin = useSessionStore((s) => s.createPin);
   const unlock = useSessionStore((s) => s.unlock);
+  const unlockSession = useSessionStore((s) => s.unlockSession);
   const lock = useSessionStore((s) => s.lock);
   const teardownAgent = useAgentStore((s) => s.teardown);
   const initializeFirstLaunch = useAgentStore((s) => s.initializeFirstLaunch);
@@ -105,8 +106,9 @@ export function AppNavigator() {
               {() => (
                 <CreatePinScreen
                   onComplete={async (pin) => {
-                    await initializeFirstLaunch(pin);
                     await createPin(pin);
+                    await initializeFirstLaunch(pin);
+                    unlockSession();
                   }}
                 />
               )}
@@ -124,6 +126,7 @@ export function AppNavigator() {
                     // 2. Unlock the agent vault with the PIN as password
                     try {
                       await unlockAgent(pin);
+                      unlockSession();
                       return true;
                     } catch {
                       // Vault unlock failed — re-lock the session

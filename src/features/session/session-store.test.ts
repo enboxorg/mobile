@@ -104,14 +104,14 @@ describe('useSessionStore', () => {
   });
 
   describe('createPin', () => {
-    it('hashes and stores the PIN, then unlocks', async () => {
+    it('hashes and stores the PIN while keeping the session locked until vault init completes', async () => {
       mockedHashPin.mockResolvedValue('newsalt:newhash');
       await useSessionStore.getState().createPin('5678');
 
       expect(mockedHashPin).toHaveBeenCalledWith('5678');
       expect(mockedSetSecureItem).toHaveBeenCalledWith('auth:pin-hash', 'newsalt:newhash');
       expect(useSessionStore.getState().hasPinSet).toBe(true);
-      expect(useSessionStore.getState().isLocked).toBe(false);
+      expect(useSessionStore.getState().isLocked).toBe(true);
     });
 
     it('rejects invalid PIN format', async () => {
@@ -129,7 +129,7 @@ describe('useSessionStore', () => {
 
       const result = await useSessionStore.getState().unlock('1234');
       expect(result).toBe(true);
-      expect(useSessionStore.getState().isLocked).toBe(false);
+      expect(useSessionStore.getState().isLocked).toBe(true);
     });
 
     it('rejects a wrong PIN and increments failed attempts', async () => {
@@ -158,6 +158,13 @@ describe('useSessionStore', () => {
         'session:state',
         expect.stringContaining('"hasIdentity":true'),
       );
+    });
+  });
+
+  describe('unlockSession', () => {
+    it('marks the session unlocked after the vault is ready', () => {
+      useSessionStore.getState().unlockSession();
+      expect(useSessionStore.getState().isLocked).toBe(false);
     });
   });
 

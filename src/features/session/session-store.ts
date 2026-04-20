@@ -61,6 +61,7 @@ export interface SessionState {
   completeOnboarding: () => void;
   createPin: (pin: string) => Promise<void>;
   unlock: (pin: string) => Promise<boolean>;
+  unlockSession: () => void;
   lock: () => void;
   setHasIdentity: (value: boolean) => void;
   reset: () => Promise<void>;
@@ -145,7 +146,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
     const hashed = await hashPin(pin);
     await setSecureItem(PIN_HASH_KEY, hashed);
-    set({ hasPinSet: true, isLocked: false, failedAttempts: 0, lockedUntil: null, lockoutCycle: 0 });
+    // Persist the PIN immediately so onboarding survives later vault-init failures.
+    // Keep the session locked until the vault is actually initialized.
+    set({ hasPinSet: true, isLocked: true, failedAttempts: 0, lockedUntil: null, lockoutCycle: 0 });
     persistLockout({ failedAttempts: 0, lockedUntil: null, lockoutCycle: 0 });
   },
 
@@ -161,7 +164,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const match = await verifyPin(pin, storedHash);
 
     if (match) {
-      set({ isLocked: false, failedAttempts: 0, lockedUntil: null, lockoutCycle: 0 });
+      // The caller unlocks the session only after the agent/vault is ready.
+      set({ failedAttempts: 0, lockedUntil: null, lockoutCycle: 0 });
       persistLockout({ failedAttempts: 0, lockedUntil: null, lockoutCycle: 0 });
       return true;
     }
@@ -181,6 +185,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     return false;
   },
+
+  unlockSession: () => set({ isLocked: false }),
 
   lock: () => set({ isLocked: true }),
 
