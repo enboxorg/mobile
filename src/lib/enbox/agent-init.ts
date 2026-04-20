@@ -15,6 +15,7 @@ export async function initializeAgent() {
   console.log('[agent-init] Creating auth manager...');
   const authManager = await AuthManager.create({
     storage: new SecureStorageAdapter(),
+    localDwnStrategy: 'off',
   });
   console.log('[agent-init] Auth manager created.');
 
