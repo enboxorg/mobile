@@ -21,6 +21,11 @@ export async function initializeAgent() {
   console.log('[agent-init] Creating agent...');
   const agent = await EnboxUserAgent.create({
     dataPath: 'ENBOX_AGENT',
+    // Mobile wallet runs against remote DID-document endpoints.
+    // Do not attempt local DWN discovery via filesystem (`~/.enbox/dwn.json`),
+    // which is meant for CLI/native desktop flows and triggers Node built-in
+    // requires (`node:fs/promises`, `node:path`, `node:os`).
+    localDwnStrategy: 'off',
   });
   console.log('[agent-init] Agent created.');
 
