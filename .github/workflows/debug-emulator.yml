@@ -88,36 +88,12 @@ jobs:
             echo "=== Capturing initial logcat ==="
             adb logcat -d > /tmp/logcat-startup.txt 2>&1
 
-            echo "=== Simulating PIN entry: tap through welcome screen ==="
-            # Tap "Get started" button (center-bottom area)
-            adb shell input tap 540 1800
-            sleep 3
+            echo "=== Driving onboarding flow by UI text ==="
+            python3 scripts/emulator-debug-flow.py || true
 
-            echo "=== On Create PIN screen: enter 1234 ==="
-            # Tap the PIN input field
-            adb shell input tap 540 900
-            sleep 1
-            adb shell input text "1234"
-            sleep 1
-            # Tap "Next" button
-            adb shell input tap 540 1400
-            sleep 2
-
-            echo "=== Confirm PIN: enter 1234 ==="
-            adb shell input tap 540 900
-            sleep 1
-            adb shell input text "1234"
-            sleep 1
-            # Tap "Set PIN" button
-            adb shell input tap 700 1400
-            sleep 2
-
-            echo "=== Waiting for agent initialization (30s) ==="
-            sleep 30
-
-            echo "=== Taking screenshot ==="
-            adb shell screencap -p /sdcard/screenshot.png
-            adb pull /sdcard/screenshot.png /tmp/screenshot-after-pin.png 2>/dev/null || true
+            echo "=== Copying screenshots and dumps ==="
+            mkdir -p /tmp/emulator-ui
+            cp -R /tmp/emulator-ui/. /tmp/emulator-ui-artifacts/ 2>/dev/null || true
 
             echo ""
             echo "========================================="
@@ -145,5 +121,5 @@ jobs:
             /tmp/logcat-full.txt
             /tmp/logcat-rn.txt
             /tmp/logcat-startup.txt
-            /tmp/screenshot-after-pin.png
+            /tmp/emulator-ui-artifacts/**
           retention-days: 7
