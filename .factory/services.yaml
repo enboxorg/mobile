@@ -1,0 +1,16 @@
+# Authoritative command + service manifest for the mission.
+# Workers MUST read commands from here; do not hardcode in skills.
+#
+# This mission has NO long-running services. It is a React Native mobile app:
+# Jest runs single-threaded, builds happen on CI, no local dev servers or
+# databases are started by the mission.
+
+commands:
+  install: bun install --frozen-lockfile
+  lint: bun run lint
+  typecheck: bun run typecheck
+  test: bun run test
+  verify: bun run verify
+  ci_emulator_dispatch: bash scripts/run-ci-emulator.sh
+
+services: {}

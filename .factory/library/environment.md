@@ -1,0 +1,57 @@
+# Environment
+
+Environment variables, external dependencies, and host-level setup notes.
+
+**What belongs here:** Required env vars, tool versions, external API dependencies, platform quirks.
+**What does NOT belong here:** Commands or service ports (see `.factory/services.yaml`), system architecture (see `architecture.md`), testing surface (see `user-testing.md`).
+
+---
+
+## Toolchain
+
+- **Node:** >= 22.11.0 (verified: 22.x). Declared in `package.json` `engines`.
+- **Bun:** 1.3.11 verified. Used as the primary package manager (`bun install`, `bun run <script>`).
+- **TypeScript:** 5.8.3 (via devDeps). Strict mode on.
+- **Jest:** 29.6.3. Always invoked with `--runInBand` via `bun run test`.
+- **gh CLI:** 2.45.0, authenticated with `repo` scope on this host. Used for `gh workflow run`, `gh run watch`, `gh run download`.
+- **git:** 2.43.0. Default branch `master`.
+- **python3:** 3.10.6 (used only inside CI emulator flow scripts; not required locally).
+
+## Not installed on the orchestrator/worker host
+
+Workers run on a Linux host WITHOUT these — do not attempt to use them locally:
+
+- No Java / JDK
+- No Android SDK / emulator / ADB
+- No Xcode / CocoaPods / macOS
+- No ffmpeg, no Jupyter, no Docker
+
+Any step requiring an Android build, iOS build, or emulator MUST run on GitHub Actions (`ci.yml`, `build-apk.yml`, `debug-emulator.yml`). Workers trigger those via `gh` CLI and validate via artifact inspection.
+
+## React Native specifics
+
+- React Native 0.85 (bare project, no Expo).
+- New Architecture enabled (Fabric + Turbo Modules). Codegen runs at build time on CI.
+- Metro resolver override in `metro.config.js` rewrites `level` imports in `@enbox/*` packages to `src/lib/enbox/rn-level.ts`.
+- `scripts/apply-patches.mjs` runs on `postinstall`. Existing patches for `react-native-leveldb` (Android gradle + iOS env_posix.cc) must be preserved; the mission adds an `@enbox/agent` vault-injection patch.
+- No metro/dev server is expected to run under a worker session — tests only.
+
+## External APIs / services
+
+- **@enbox/* SDK packages** (agent, auth, crypto, dids, dwn-clients, protocols, api, common) installed from npm. No network access at runtime required by tests.
+- **DWN discovery:** disabled on mobile by the `AgentDwnApi` monkey-patch in `agent-init.ts` (`localDwnStrategy === 'off'`). Tests must not regress this.
+- **WalletConnect relay:** used at runtime for the `enbox://connect` flow. Not required for unit tests — mocked.
+
+## Environment variables
+
+No mission-specific environment variables. The app itself has no `.env` file; all config is committed.
+
+## GitHub Actions runners
+
+- `ci.yml`: `ubuntu-latest` (verify + build-android) and `macos-14` (build-ios).
+- `debug-emulator.yml`: `ubuntu-latest` with KVM enabled; uses `reactivecircus/android-emulator-runner@v2` at API 31 / x86_64 / `pixel_5`, headless, `-no-window -gpu swiftshader_indirect`.
+- `build-apk.yml`: `ubuntu-latest`.
+
+## Host resources
+
+This orchestrator host has 257 GB RAM / 32 cores. Workers may run multiple `rg`/`jest` invocations in parallel when helpful; however, Jest itself is pinned to `--runInBand` to avoid flakes with React Native's jest-preset.
