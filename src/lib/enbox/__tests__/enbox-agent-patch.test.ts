@@ -49,6 +49,9 @@ const sha256 = (p: string) =>
 
 const runScript = () => execFileSync('node', [SCRIPT], { cwd: ROOT, stdio: 'pipe' });
 
+const runScriptCapture = (): string =>
+  execFileSync('node', [SCRIPT], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
+
 describe('@enbox/agent vault-injection patch (filesystem)', () => {
   it('widens AgentParams.agentVault and EnboxUserAgent.vault to IdentityVault in dist/types', () => {
     const dts = readFileSync(DTS, 'utf8');
@@ -150,6 +153,91 @@ describe('@enbox/agent vault-injection patch (script behavior)', () => {
       unlinkSync(backup);
       runScript();
     }
+  });
+});
+
+describe('postinstall patch logging (VAL-PATCH-001)', () => {
+  it('emits a [postinstall] Patched line for @enbox/agent when the .d.ts is in a pre-patch state', () => {
+    const backup = DTS + '.test-log-bak';
+    copyFileSync(DTS, backup);
+    try {
+      // Simulate a fresh-install pre-patch state by restoring the upstream
+      // HdIdentityVault tokens and stripping the IdentityVault type import.
+      const preState = readFileSync(DTS, 'utf8')
+        .replace(/agentVault: IdentityVault\b/g, 'agentVault: HdIdentityVault')
+        .replace(/(^|\s)vault: IdentityVault\b/gm, '$1vault: HdIdentityVault')
+        .replace(
+          /^import type \{ IdentityVault \} from '\.\/types\/identity-vault\.js';\r?\n/m,
+          '',
+        );
+      writeFileSync(DTS, preState, 'utf8');
+
+      const stdout = runScriptCapture();
+      expect(stdout).toContain(
+        '[postinstall] Patched @enbox/agent/dist/types/enbox-user-agent.d.ts',
+      );
+      // The file should now actually be patched (log reflects a real write).
+      const patched = readFileSync(DTS, 'utf8');
+      expect(patched).toMatch(/agentVault: IdentityVault\b/);
+    } finally {
+      copyFileSync(backup, DTS);
+      unlinkSync(backup);
+      // Leave the file in a fully-patched state for downstream tests.
+      runScript();
+    }
+  });
+
+  it('emits a [postinstall] Patched line for react-native-leveldb gradle when the target needs patching', () => {
+    const backup = LEVELDB_GRADLE + '.test-log-bak';
+    copyFileSync(LEVELDB_GRADLE, backup);
+    try {
+      // Revert to a state where google() is absent from the repositories
+      // block, matching what the patcher's regex expects to find pre-patch.
+      const preState = readFileSync(LEVELDB_GRADLE, 'utf8').replace(
+        /repositories \{\n(\s*)google\(\)\n\1mavenCentral\(\)\n\}/m,
+        'repositories {\n$1mavenCentral()\n}',
+      );
+      expect(preState).not.toEqual(readFileSync(LEVELDB_GRADLE, 'utf8'));
+      writeFileSync(LEVELDB_GRADLE, preState, 'utf8');
+
+      const stdout = runScriptCapture();
+      expect(stdout).toContain(
+        '[postinstall] Patched react-native-leveldb/android/build.gradle',
+      );
+    } finally {
+      copyFileSync(backup, LEVELDB_GRADLE);
+      unlinkSync(backup);
+      runScript();
+    }
+  });
+
+  it('emits a [postinstall] Patched line for react-native-leveldb env_posix.cc when the C++ source needs patching', () => {
+    const backup = LEVELDB_ENV_POSIX + '.test-log-bak';
+    copyFileSync(LEVELDB_ENV_POSIX, backup);
+    try {
+      // Simulate the upstream libc++ incompatibility the patch fixes.
+      const pre = readFileSync(LEVELDB_ENV_POSIX, 'utf8').replace(
+        /std::memory_order_relaxed/g,
+        'std::memory_order::memory_order_relaxed',
+      );
+      writeFileSync(LEVELDB_ENV_POSIX, pre, 'utf8');
+
+      const stdout = runScriptCapture();
+      expect(stdout).toContain(
+        '[postinstall] Patched react-native-leveldb/cpp/leveldb/util/env_posix.cc',
+      );
+    } finally {
+      copyFileSync(backup, LEVELDB_ENV_POSIX);
+      unlinkSync(backup);
+      runScript();
+    }
+  });
+
+  it('emits no [postinstall] Patched lines on the idempotent repeat-run (all targets already patched)', () => {
+    // Guarantee every target is in the patched state.
+    runScript();
+    const stdout = runScriptCapture();
+    expect(stdout).not.toMatch(/\[postinstall\] Patched/);
   });
 });
 
