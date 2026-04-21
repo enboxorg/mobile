@@ -66,6 +66,25 @@ The contract file `validation-contract.md` labels each assertion with its `Tool:
 - The Jest preset for React Native is sensitive; enabling multi-worker Jest has historically caused flakes — keep `--runInBand`.
 - `uiautomator dump` on cold emulator startup can miss the first frame. The CI flow script is expected to poll with bounded retries (see VAL-CI-010).
 - The CI emulator runner has finite disk; the workflow already frees `/usr/share/dotnet` + Android NDK ghosts before building. Do not add large artifact steps that break this budget.
+- For `VAL-PATCH-007`, avoid a plain `grep "IdentityVault"` on the ESM bundle because it also matches the valid `HdIdentityVault` fallback symbol as a substring; use an exact-word regex or import-specific guard instead.
+
+## Validation Concurrency
+
+- **Surface: jest-local**
+  - Max concurrent validators: `1`
+  - Reason: the authoritative local surface is `bun run test` with Jest `--runInBand`, plus shell/file assertions against a single shared working tree and `node_modules/`.
+- **Surface: ci-android-emulator**
+  - Max concurrent validators: `1`
+  - Reason: emulator runs are expensive, mutate shared GitHub Actions branch state, and the mission guidance allows only one outstanding CI emulator dispatch at a time.
+
+## Flow Validator Guidance: jest-local
+
+- Isolation boundary: the shared repository checkout at `/home/liran/src/enboxorg/mobile`.
+- Allowed tools: local shell commands, Jest, file reads/greps, and temporary files under `.factory/validation/<milestone>/user-testing/` plus mission evidence directories.
+- Do not start browsers, TUIs, Android emulators, Gradle, Xcode, or other native-build tooling for milestone `patch-injection`.
+- Keep execution single-threaded: do not enable parallel Jest workers and do not spawn nested validators.
+- Do not edit product code while validating. Only write the assigned flow report and evidence artifacts.
+- For patch-injection assertions, prefer the real local user-facing validation surface defined by the contract: `bun install --frozen-lockfile`, `bun run verify`, shell greps, and smoke scripts against the patched `@enbox/agent` package.
 
 ## Update policy
 

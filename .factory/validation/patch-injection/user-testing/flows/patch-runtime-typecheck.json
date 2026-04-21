@@ -1,0 +1,96 @@
+{
+  "groupId": "patch-runtime-typecheck",
+  "testedAt": "2026-04-21T23:25:39Z",
+  "surface": "jest-local",
+  "assignedAssertions": [
+    "VAL-PATCH-004",
+    "VAL-PATCH-005",
+    "VAL-PATCH-006",
+    "VAL-PATCH-008",
+    "VAL-PATCH-009",
+    "VAL-PATCH-010",
+    "VAL-PATCH-020"
+  ],
+  "isolation": {
+    "repoRoot": "/home/liran/src/enboxorg/mobile",
+    "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+    "evidenceDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/patch-injection/patch-runtime-typecheck"
+  },
+  "toolsUsed": [
+    "local-shell",
+    "node",
+    "bun"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-PATCH-004",
+      "status": "pass",
+      "reason": "A Node smoke script passed a stub vault into EnboxUserAgent.create() and confirmed the resulting agent reused that exact object as agent.vault.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/patch-injection/patch-runtime-typecheck/val-patch-004-005-runtime.log"
+      ]
+    },
+    {
+      "id": "VAL-PATCH-005",
+      "status": "pass",
+      "reason": "The same runtime smoke script showed typeof agent.vault.initialize === 'function' and agent.initialize({ password: 'x' }) forwarded to the stub initialize method and returned 'rp'.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/patch-injection/patch-runtime-typecheck/val-patch-004-005-runtime.log"
+      ]
+    },
+    {
+      "id": "VAL-PATCH-006",
+      "status": "pass",
+      "reason": "Two isolated Node smoke checks confirmed both the no-arg create() path and the explicit agentVault: undefined path produced an HdIdentityVault instance.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/patch-injection/patch-runtime-typecheck/val-patch-006-default-fallback.log"
+      ]
+    },
+    {
+      "id": "VAL-PATCH-008",
+      "status": "pass",
+      "reason": "bun run typecheck completed successfully with the committed positive contract fixture src/__contract__/vault-injection.ts in scope.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/src/__contract__/vault-injection.ts",
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/patch-injection/patch-runtime-typecheck/typecheck-positive.log"
+      ]
+    },
+    {
+      "id": "VAL-PATCH-009",
+      "status": "pass",
+      "reason": "A temporary incompatible agentVault fixture caused tsc --noEmit to fail with TS2740 referencing IdentityVault, proving the widened type did not collapse to any.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/patch-injection/patch-runtime-typecheck/typecheck-negative.log"
+      ]
+    },
+    {
+      "id": "VAL-PATCH-010",
+      "status": "pass",
+      "reason": "The clean typecheck run reported auth_error_matches=0, so the widened vault typing produced no diagnostics under node_modules/@enbox/auth.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/patch-injection/patch-runtime-typecheck/typecheck-positive.log"
+      ]
+    },
+    {
+      "id": "VAL-PATCH-020",
+      "status": "pass",
+      "reason": "After bun install --frozen-lockfile revalidated the patched dependency tree, bun run verify exited 0 with lint, typecheck, and all Jest suites passing.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/patch-injection/patch-runtime-typecheck/install.log",
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/patch-injection/patch-runtime-typecheck/verify.log"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "Running both VAL-PATCH-006 default-path checks back-to-back against the default DATA/AGENT vault store in one Node process did not complete cleanly after the first HdIdentityVault opened the store.",
+      "resolved": true,
+      "resolution": "Validated the no-arg and explicit-undefined cases in isolated Node processes and used a separate dataPath for the explicit-undefined case.",
+      "affectedAssertions": [
+        "VAL-PATCH-006"
+      ]
+    }
+  ],
+  "blockers": [],
+  "summary": "All 7 assigned assertions passed on the local jest-local surface. Runtime smoke checks, positive and negative typecheck validations, and the aggregate verify command all succeeded; bun run verify finished with 10/10 suites and 56/56 tests passing."
+}

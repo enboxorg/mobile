@@ -1,0 +1,53 @@
+{
+  "milestone": "patch-injection",
+  "round": 1,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 20,
+    "passed": 19,
+    "failed": 1,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-PATCH-002",
+    "VAL-PATCH-003",
+    "VAL-PATCH-004",
+    "VAL-PATCH-005",
+    "VAL-PATCH-006",
+    "VAL-PATCH-007",
+    "VAL-PATCH-008",
+    "VAL-PATCH-009",
+    "VAL-PATCH-010",
+    "VAL-PATCH-011",
+    "VAL-PATCH-012",
+    "VAL-PATCH-013",
+    "VAL-PATCH-014",
+    "VAL-PATCH-015",
+    "VAL-PATCH-016",
+    "VAL-PATCH-017",
+    "VAL-PATCH-018",
+    "VAL-PATCH-019",
+    "VAL-PATCH-020"
+  ],
+  "failedAssertions": [
+    {
+      "id": "VAL-PATCH-001",
+      "reason": "Fresh `bun install --frozen-lockfile` exited 0 but the install log contained no `[postinstall]` patch lines for `@enbox/agent` or `react-native-leveldb`, so the required fresh-install logging evidence was absent."
+    }
+  ],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added validation concurrency limits, flow-validator isolation guidance for the local Jest surface, and a note to use exact-word matching for VAL-PATCH-007 because plain `grep \"IdentityVault\"` also matches `HdIdentityVault`.",
+      "source": "setup"
+    }
+  ],
+  "flowReports": [
+    ".factory/validation/patch-injection/user-testing/flows/patch-install-static.json",
+    ".factory/validation/patch-injection/user-testing/flows/patch-runtime-typecheck.json",
+    ".factory/validation/patch-injection/user-testing/flows/patch-robustness.json"
+  ],
+  "generatedAt": "2026-04-21T23:33:09.390369+00:00",
+  "previousRound": null
+}
