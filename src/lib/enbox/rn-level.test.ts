@@ -44,4 +44,14 @@ describe('RNLevel', () => {
     await expect(sub.put('foo', 'bar')).resolves.toBeUndefined();
     expect(mockPut).toHaveBeenCalledWith('!child!foo', 'bar');
   });
+
+  it('throws a level-style notFound error for missing keys', async () => {
+    mockGetStr.mockReturnValueOnce(null);
+    const db = new RNLevel('DATA/AGENT/VAULT_STORE');
+
+    await expect(db.get('missing')).rejects.toMatchObject({
+      code: 'LEVEL_NOT_FOUND',
+      notFound: true,
+    });
+  });
 });

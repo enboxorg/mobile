@@ -12,9 +12,10 @@ import { LevelDB } from 'react-native-leveldb';
 const SUBLEVEL_SEP = '!';
 const LEVEL_NOT_FOUND = 'LEVEL_NOT_FOUND';
 
-function notFoundError(): Error & { code: string } {
-  const err = new Error('Key not found') as Error & { code: string };
+function notFoundError(): Error & { code: string; notFound: true } {
+  const err = new Error('Key not found') as Error & { code: string; notFound: true };
   err.code = LEVEL_NOT_FOUND;
+  err.notFound = true;
   return err;
 }
 
