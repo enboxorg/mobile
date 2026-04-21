@@ -82,12 +82,7 @@ export class RNLevel {
   }
 
   async open(): Promise<void> {
-    if (this._status === 'open') return;
-    this._status = 'opening';
-    if (!this._db) {
-      this._db = new LevelDB(this._location, true, false);
-    }
-    this._status = 'open';
+    this.ensureOpen();
   }
 
   async close(): Promise<void> {
@@ -106,9 +101,16 @@ export class RNLevel {
   }
 
   private ensureOpen(): LevelDB {
-    if (!this._db || this._status !== 'open') {
+    if (!this._db || this._status === 'closed') {
+      this._status = 'opening';
+      this._db = new LevelDB(this._location, true, false);
+      this._status = 'open';
+    }
+
+    if (this._status !== 'open') {
       throw new Error('Database is not open');
     }
+
     return this._db;
   }
 
