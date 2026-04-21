@@ -67,6 +67,7 @@ The contract file `validation-contract.md` labels each assertion with its `Tool:
 - `uiautomator dump` on cold emulator startup can miss the first frame. The CI flow script is expected to poll with bounded retries (see VAL-CI-010).
 - The CI emulator runner has finite disk; the workflow already frees `/usr/share/dotnet` + Android NDK ghosts before building. Do not add large artifact steps that break this budget.
 - For `VAL-PATCH-007`, avoid a plain `grep "IdentityVault"` on the ESM bundle because it also matches the valid `HdIdentityVault` fallback symbol as a substring; use an exact-word regex or import-specific guard instead.
+- For local `VAL-PATCH-001` reruns on Bun 1.3.11, a plain fresh repo copy is not enough once the host has installed before: Bun reuses postinstall-mutated cache entries for `@enbox/agent` and `react-native-leveldb`. To reproduce the expected `[postinstall] Patched ...` lines, validate in a temp repo copy **and** temporarily move only those package cache entries out of `~/.bun/install/cache/`, then restore them after the install completes.
 
 ## Validation Concurrency
 
