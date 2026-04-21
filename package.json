@@ -26,7 +26,8 @@
     "ios": {
       "modulesProvider": {
         "NativeSecureStorage": "RCTNativeSecureStorage",
-        "NativeCrypto": "RCTNativeCrypto"
+        "NativeCrypto": "RCTNativeCrypto",
+        "NativeBiometricVault": "RCTNativeBiometricVault"
       }
     }
   },
