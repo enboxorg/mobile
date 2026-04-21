@@ -55,3 +55,18 @@ No mission-specific environment variables. The app itself has no `.env` file; al
 ## Host resources
 
 This orchestrator host has 257 GB RAM / 32 cores. Workers may run multiple `rg`/`jest` invocations in parallel when helpful; however, Jest itself is pinned to `--runInBand` to avoid flakes with React Native's jest-preset.
+
+## Bun cache gotcha (local-only)
+
+Bun 1.3.11 caches the **post-install** contents of packages at `~/.bun/install/cache/<pkg>@<ver>@@@<n>`. Consequently, after the first `bun install` on a given host, `scripts/apply-patches.mjs` persists its widened `@enbox/agent` and `react-native-leveldb` output INTO the cache. A subsequent `rm -rf node_modules && bun install --frozen-lockfile` then reuses that already-patched cached extraction and `scripts/apply-patches.mjs` prints nothing because all targets are already patched.
+
+**Implication:** if you (or a validator) need to reproduce the fresh-install postinstall log output for `@enbox/agent` / `react-native-leveldb` on a host that has already installed once, you must clear the cache entries for those two packages first:
+
+```bash
+mv ~/.bun/install/cache/@enbox/agent@* /tmp/ 2>/dev/null || true
+mv ~/.bun/install/cache/react-native-leveldb* /tmp/ 2>/dev/null || true
+rm -rf node_modules
+bun install --frozen-lockfile   # now prints [postinstall] Patched ... lines
+```
+
+CI runners start with an empty cache so this is a local-only concern. Jest tests for patch logging (`src/lib/enbox/__tests__/enbox-agent-patch.test.ts`) avoid the cache entirely by mutating the already-installed `node_modules/` files and re-running the script directly.
