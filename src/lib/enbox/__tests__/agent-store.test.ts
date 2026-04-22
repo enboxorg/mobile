@@ -247,14 +247,19 @@ describe('agent-store.initializeFirstLaunch() — VAL-VAULT-014', () => {
     expect(params.localDwnStrategy).toBe('off');
   });
 
-  it('calls agent.initialize WITHOUT forwarding a user-supplied password', async () => {
+  it('calls agent.initialize WITHOUT a password key at all (scrutiny blocker 2)', async () => {
     await useAgentStore.getState().initializeFirstLaunch();
 
     expect(mockAgentInitialize).toHaveBeenCalledTimes(1);
     const params = mockAgentInitialize.mock.calls[0][0];
-    // The mobile vault does not take a password; the store passes an empty
-    // string purely to satisfy the upstream `AgentInitializeParams` shape.
-    expect(params?.password ?? '').toBe('');
+    // The mobile vault does not take a password. The store must NOT
+    // include a `password` property at all (stronger than the earlier
+    // "empty string" shape) so the downstream biometric-only contract
+    // is preserved.
+    expect(params).toBeDefined();
+    expect(Object.prototype.hasOwnProperty.call(params, 'password')).toBe(false);
+    // Defensive guard in case a future refactor sets password=undefined.
+    expect((params as Record<string, unknown>).password).toBeUndefined();
   });
 
   it('returns empty string and calls agent.start when firstLaunch is false', async () => {
@@ -292,12 +297,14 @@ describe('agent-store.unlockAgent() — VAL-VAULT-015', () => {
     expect(state.error).toBeNull();
   });
 
-  it('calls agent.start without forwarding a user-supplied password', async () => {
+  it('calls agent.start WITHOUT a password key at all (scrutiny blocker 2)', async () => {
     await useAgentStore.getState().unlockAgent();
 
     expect(mockAgentStart).toHaveBeenCalledTimes(1);
     const params = mockAgentStart.mock.calls[0][0];
-    expect(params?.password ?? '').toBe('');
+    expect(params).toBeDefined();
+    expect(Object.prototype.hasOwnProperty.call(params, 'password')).toBe(false);
+    expect((params as Record<string, unknown>).password).toBeUndefined();
   });
 
   it('passes the BiometricVault instance as agentVault to EnboxUserAgent.create', async () => {

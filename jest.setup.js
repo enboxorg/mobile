@@ -83,8 +83,25 @@ function mockBiometricVaultDeterministicHex(seed, byteLength) {
   return out;
 }
 
-function mockBiometricVaultDefaultGenerate(alias /* , options */) {
-  const secret = mockBiometricVaultDeterministicHex(`secret:${alias}`, 32);
+function mockBiometricVaultDefaultGenerate(alias, options) {
+  // Caller may pre-seed the wallet secret by passing a 64-char lower-case
+  // hex string under `options.secretHex`. When supplied, store those exact
+  // bytes so the JS layer's local derivation matches the native store.
+  let secret;
+  const providedHex = options && typeof options.secretHex === 'string' ? options.secretHex : null;
+  if (providedHex) {
+    if (!/^[0-9a-f]{64}$/.test(providedHex)) {
+      return Promise.reject(
+        mockBiometricVaultMakeError(
+          'VAULT_ERROR',
+          'secretHex must be 64 lower-case hex characters',
+        ),
+      );
+    }
+    secret = providedHex;
+  } else {
+    secret = mockBiometricVaultDeterministicHex(`secret:${alias}`, 32);
+  }
   const iv = mockBiometricVaultDeterministicHex(`iv:${alias}`, 12);
   mockBiometricVaultStore.set(alias, { secret, iv });
   return Promise.resolve(undefined);

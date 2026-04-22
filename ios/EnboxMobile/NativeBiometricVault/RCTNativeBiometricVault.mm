@@ -238,15 +238,55 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
     return;
   }
 
+  // Caller may pre-seed the 32-byte wallet secret by passing lower-case
+  // hex (length 64) under `secretHex`. When provided we MUST store those
+  // exact bytes so the JS layer can derive the HD seed / mnemonic from
+  // the same bytes without triggering a follow-up biometric read during
+  // provisioning.
+  NSString *secretHex = [options[@"secretHex"] isKindOfClass:[NSString class]]
+      ? options[@"secretHex"] : nil;
+
   dispatch_async(_keychainQueue, ^{
-    // Generate a fresh 256-bit secret.
+    // Resolve the 32-byte wallet secret: caller-provided bytes when valid
+    // hex was supplied, otherwise freshly generated CSPRNG entropy.
     NSMutableData *secretData = [NSMutableData dataWithLength:kBiometricVaultSecretByteLength];
-    OSStatus randStatus = SecRandomCopyBytes(kSecRandomDefault,
-                                             kBiometricVaultSecretByteLength,
-                                             secretData.mutableBytes);
-    if (randStatus != errSecSuccess) {
-      reject(kErrVault, @"Failed to generate random secret", nil);
-      return;
+    BOOL usingCallerBytes = NO;
+    if (secretHex.length == kBiometricVaultSecretByteLength * 2) {
+      uint8_t *bytes = (uint8_t *)secretData.mutableBytes;
+      BOOL parseOk = YES;
+      for (NSUInteger i = 0; i < kBiometricVaultSecretByteLength; i++) {
+        unichar hi = [secretHex characterAtIndex:i * 2];
+        unichar lo = [secretHex characterAtIndex:i * 2 + 1];
+        int hiVal = -1;
+        int loVal = -1;
+        if (hi >= '0' && hi <= '9') hiVal = hi - '0';
+        else if (hi >= 'a' && hi <= 'f') hiVal = 10 + (hi - 'a');
+        else if (hi >= 'A' && hi <= 'F') hiVal = 10 + (hi - 'A');
+        if (lo >= '0' && lo <= '9') loVal = lo - '0';
+        else if (lo >= 'a' && lo <= 'f') loVal = 10 + (lo - 'a');
+        else if (lo >= 'A' && lo <= 'F') loVal = 10 + (lo - 'A');
+        if (hiVal < 0 || loVal < 0) {
+          parseOk = NO;
+          break;
+        }
+        bytes[i] = (uint8_t)((hiVal << 4) | loVal);
+      }
+      if (parseOk) {
+        usingCallerBytes = YES;
+      } else {
+        [secretData resetBytesInRange:NSMakeRange(0, secretData.length)];
+        reject(kErrVault, @"secretHex is not valid 64-character lower-case hex", nil);
+        return;
+      }
+    }
+    if (!usingCallerBytes) {
+      OSStatus randStatus = SecRandomCopyBytes(kSecRandomDefault,
+                                               kBiometricVaultSecretByteLength,
+                                               secretData.mutableBytes);
+      if (randStatus != errSecSuccess) {
+        reject(kErrVault, @"Failed to generate random secret", nil);
+        return;
+      }
     }
 
     // Construct the access control object that requires:

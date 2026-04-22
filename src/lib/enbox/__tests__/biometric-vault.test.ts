@@ -182,6 +182,23 @@ describe('BiometricVault.initialize() — provisioning', () => {
     expect(phrase.trim().length).toBeGreaterThan(0);
   });
 
+  it('calls generateAndStoreSecret once and getSecret ZERO times (no second biometric prompt)', async () => {
+    // Scrutiny blocker 1(a): `initialize()` must not biometric-read the
+    // just-provisioned secret back via `getSecret()`.
+    native.getSecret.mockClear();
+    const vault = new BiometricVault();
+
+    await vault.initialize({});
+
+    expect(native.generateAndStoreSecret).toHaveBeenCalledTimes(1);
+    expect(native.getSecret).toHaveBeenCalledTimes(0);
+    // Confirm the JS layer handed its locally-derived 32 bytes to
+    // native — the canonical hex shape is 64 lower-case hex chars.
+    const opts = native.generateAndStoreSecret.mock.calls[0][1];
+    expect(typeof opts.secretHex).toBe('string');
+    expect(opts.secretHex).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it('rejects with VAULT_ERROR_ALREADY_INITIALIZED when hasSecret already true', async () => {
     native.hasSecret.mockImplementationOnce(async () => true);
     const vault = new BiometricVault();
@@ -594,24 +611,56 @@ describe('BiometricVault — does not persist recovery phrase through its own Se
 });
 
 // ===========================================================================
-// VAL-VAULT-027 — partial-init failure rolls back the native secret
+// VAL-VAULT-027 — partial-init failure rollback semantics
+//
+// Original contract wording demanded that a local-derivation failure AFTER
+// generateAndStoreSecret resolved must call deleteSecret(). The
+// fix-biometric-vault-js-scrutiny-blockers feature narrowed that rule: a
+// provisioning-success-then-local-derivation failure MUST leave the
+// native secret intact so the user can retry unlock rather than being
+// trapped back in first-launch setup. The rollback is only required
+// when the native generateAndStoreSecret call ITSELF fails — in which
+// case there's nothing actually on disk to roll back. These tests
+// pin that new behavior.
 // ===========================================================================
 describe('BiometricVault — partial-init recovery (VAL-VAULT-027)', () => {
-  it('deletes the orphan secret if a later step in initialize() throws', async () => {
+  it('does NOT call deleteSecret if local derivation throws after provisioning succeeded', async () => {
     const didFactory = jest.fn(async () => {
       throw new Error('simulated DID failure');
     });
     const { api } = makeSecureStorage();
     const vault = new BiometricVault({ didFactory, secureStorage: api });
 
+    const deleteCallsBefore = native.deleteSecret.mock.calls.length;
+
     await expect(vault.initialize({})).rejects.toBeDefined();
 
     expect(native.generateAndStoreSecret).toHaveBeenCalledTimes(1);
-    expect(native.deleteSecret).toHaveBeenCalledWith(WALLET_ROOT_KEY_ALIAS);
-    expect(await vault.isInitialized()).toBe(false);
-    // SecureStorage must not have been marked initialized either.
+    // The native call succeeded; deleteSecret must NOT be invoked on
+    // the derivation-failure path.
+    expect(native.deleteSecret.mock.calls.length).toBe(deleteCallsBefore);
+    // The native secret is still present; an "isInitialized" call
+    // should now report true (hasSecret returns true).
+    expect(await vault.isInitialized()).toBe(true);
+    // SecureStorage must not have been marked initialized — derivation
+    // never reached the persist step.
     const setCalls = api.set.mock.calls.map(([k]) => k);
     expect(setCalls).not.toContain(INITIALIZED_STORAGE_KEY);
+  });
+
+  it('still surfaces a native-side generateAndStoreSecret failure without calling deleteSecret', async () => {
+    native.generateAndStoreSecret.mockImplementationOnce(async () => {
+      const err = new Error('native-side failure') as Error & { code: string };
+      err.code = 'VAULT_ERROR';
+      throw err;
+    });
+    const vault = new BiometricVault();
+
+    const deleteCallsBefore = native.deleteSecret.mock.calls.length;
+    await expect(vault.initialize({})).rejects.toBeDefined();
+    // Nothing on disk to roll back — no deleteSecret call needed or made.
+    expect(native.deleteSecret.mock.calls.length).toBe(deleteCallsBefore);
+    expect(await vault.isInitialized()).toBe(false);
   });
 });
 

@@ -255,9 +255,31 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             deleteKeystoreKey(keyAlias)
             val key = createKeystoreKey(keyAlias)
 
-            // 32-byte wallet secret.
+            // 32-byte wallet secret — caller-provided bytes (via `secretHex`,
+            // lower-case hex of length 64) when supplied, otherwise freshly
+            // generated CSPRNG entropy. Caller-provided bytes allow the JS
+            // layer to derive the HD seed / mnemonic from the same bytes
+            // that are stored here without a follow-up biometric read
+            // during provisioning.
             val secret = ByteArray(SECRET_BYTES)
-            SecureRandom().nextBytes(secret)
+            val providedHex = if (options.hasKey("secretHex")) options.getString("secretHex") else null
+            if (providedHex != null) {
+                if (providedHex.length != SECRET_BYTES * 2) {
+                    promise.reject(ERR_VAULT, "secretHex must be 64 lower-case hex characters")
+                    return
+                }
+                for (i in 0 until SECRET_BYTES) {
+                    val hi = Character.digit(providedHex[i * 2], 16)
+                    val lo = Character.digit(providedHex[i * 2 + 1], 16)
+                    if (hi < 0 || lo < 0) {
+                        promise.reject(ERR_VAULT, "secretHex is not valid hex")
+                        return
+                    }
+                    secret[i] = ((hi shl 4) or lo).toByte()
+                }
+            } else {
+                SecureRandom().nextBytes(secret)
+            }
             secretBuf = secret
 
             // AndroidKeyStore AES/GCM requirement: when the key was created

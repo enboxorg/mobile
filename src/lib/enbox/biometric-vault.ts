@@ -271,6 +271,34 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
+/** Encode bytes as a lower-case hex string. */
+function bytesToHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+/**
+ * Generate 32 cryptographically random bytes for the wallet's root
+ * secret. Uses `crypto.getRandomValues` which is provided by
+ * react-native-quick-crypto in the app and by Node's built-in
+ * `crypto.webcrypto` in Jest.
+ */
+function generateWalletSecretBytes(): Uint8Array {
+  const out = new Uint8Array(32);
+  const g = (globalThis as any).crypto;
+  if (g && typeof g.getRandomValues === 'function') {
+    g.getRandomValues(out);
+    return out;
+  }
+  throw new VaultError(
+    'VAULT_ERROR',
+    'crypto.getRandomValues is not available to generate wallet secret',
+  );
+}
+
 function zeroBytes(bytes: Uint8Array | undefined) {
   if (bytes) bytes.fill(0);
 }
@@ -528,10 +556,16 @@ export class BiometricVault
       );
     }
 
-    // If caller supplied a recoveryPhrase (restore flow), derive the
-    // 256-bit entropy from it so the stored secret round-trips to the
-    // same mnemonic. Otherwise the native module generates fresh
-    // entropy.
+    // 2. Derive the canonical 32 bytes of wallet entropy ENTIRELY in JS
+    //    before touching the native layer. On a restore flow we use the
+    //    user-supplied recovery phrase so the resulting secret
+    //    deterministically round-trips to the same mnemonic. On a fresh
+    //    install we generate 32 bytes via WebCrypto. Either way the
+    //    bytes are captured in a local variable so we never need to
+    //    biometric-read them back through `getSecret()` during
+    //    provisioning — the second prompt that used to fire here has
+    //    been eliminated.
+    let entropy: Uint8Array;
     if (params.recoveryPhrase) {
       const trimmed = params.recoveryPhrase.trim();
       if (!validateMnemonic(trimmed, wordlist)) {
@@ -540,38 +574,54 @@ export class BiometricVault
           'Invalid recovery phrase provided to BiometricVault.initialize()',
         );
       }
-      // Fresh validation path — supply consumers that need restore.
-      mnemonicToEntropy(trimmed, wordlist);
+      entropy = mnemonicToEntropy(trimmed, wordlist);
+      if (entropy.length !== 32) {
+        throw new VaultError(
+          'VAULT_ERROR',
+          `Expected 32 bytes of entropy from recovery phrase, got ${entropy.length}`,
+        );
+      }
+    } else {
+      entropy = generateWalletSecretBytes();
     }
 
-    let secretProvisioned = false;
+    // 3. Hand the already-derived bytes to the native module so it
+    //    provisions the biometric-gated secret with EXACTLY the bytes
+    //    we derived above. If this call fails (the native side was
+    //    unable to create the keystore/keychain entry) there is nothing
+    //    to roll back — no secret ever landed on disk.
     try {
-      // 2. Have the native module generate + store the secret.
       await this._native.generateAndStoreSecret(WALLET_ROOT_KEY_ALIAS, {
         requireBiometrics: true,
         invalidateOnEnrollmentChange: true,
+        secretHex: bytesToHex(entropy),
       });
-      secretProvisioned = true;
-
-      // 3. Retrieve the secret bytes to deterministically derive the
-      //    mnemonic / HD seed / DID.
-      const secretHex = await this._native.getSecret(
-        WALLET_ROOT_KEY_ALIAS,
-        this._provisionPrompt,
-      );
-
-      const secretBytes = hexToBytes(secretHex);
-      if (secretBytes.length !== 32) {
-        throw new VaultError(
-          'VAULT_ERROR',
-          `Expected 32-byte native secret, got ${secretBytes.length}`,
-        );
+    } catch (err) {
+      const mapped = mapNativeErrorToVaultError(err);
+      if (mapped?.code === 'VAULT_ERROR_KEY_INVALIDATED') {
+        this._biometricState = 'invalidated';
+        await this._persistBiometricState('invalidated');
       }
-      const mnemonic = entropyToMnemonic(secretBytes, wordlist);
+      // Zero the derived entropy — it never landed on-device but may
+      // still be in JS memory.
+      zeroBytes(entropy);
+      this._clearInMemoryState();
+      throw mapped ?? err;
+    }
+
+    // 4. Derive the HD seed, mnemonic, and BearerDid from the same bytes
+    //    we just handed to native. If any of these steps throw, we
+    //    DELIBERATELY do NOT call `deleteSecret()` — a provisioning
+    //    success that hit a local derivation error leaves the user's
+    //    biometric-gated secret intact so they can retry unlock rather
+    //    than being forced back through setup. This trades the
+    //    theoretical "orphan secret" edge case for a far less
+    //    destructive recovery UX.
+    try {
+      const mnemonic = entropyToMnemonic(entropy, wordlist);
       if (!validateMnemonic(mnemonic, wordlist)) {
         throw new VaultError('VAULT_ERROR', 'Derived mnemonic failed validation');
       }
-
       const rootSeed = await mnemonicToSeed(mnemonic);
       const rootHdKey = HDKey.fromMasterSeed(rootSeed);
       const bearerDid = await this._didFactory({
@@ -580,8 +630,8 @@ export class BiometricVault
       });
       const cek = await deriveContentEncryptionKey(rootHdKey);
 
-      // 4. Commit in-memory state only after every step succeeded.
-      this._secretBytes = secretBytes;
+      // 5. Commit in-memory state only after every step succeeded.
+      this._secretBytes = entropy;
       this._rootSeed = rootSeed;
       this._rootHdKey = rootHdKey;
       this._bearerDid = bearerDid;
@@ -599,25 +649,14 @@ export class BiometricVault
 
       return mnemonic;
     } catch (err) {
-      const mapped = mapNativeErrorToVaultError(err);
-
-      if (mapped?.code === 'VAULT_ERROR_KEY_INVALIDATED') {
-        this._biometricState = 'invalidated';
-        await this._persistBiometricState('invalidated');
-      }
-
-      // Roll back a partially-provisioned secret to avoid the user being
-      // trapped in an "initialized-but-unusable" state.
-      if (secretProvisioned) {
-        try {
-          await this._native.deleteSecret(WALLET_ROOT_KEY_ALIAS);
-        } catch {
-          // best-effort cleanup
-        }
-      }
-
+      // Local derivation failed AFTER the native provisioning call
+      // succeeded. Zero the in-memory entropy for good hygiene, but
+      // leave the native secret and any persisted flags untouched so
+      // the user can retry unlock instead of being forced back through
+      // first-launch setup.
+      zeroBytes(entropy);
       this._clearInMemoryState();
-      throw mapped ?? err;
+      throw err;
     }
   }
 

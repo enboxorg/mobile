@@ -318,3 +318,61 @@ export async function createRNLevelDatabase(
   await db.open();
   return db;
 }
+
+/**
+ * Every LevelDB location the `EnboxUserAgent` opens under a given
+ * `dataPath`. Used by `destroyAgentLevelDatabases()` to wipe persistent
+ * agent state during reset.
+ *
+ * This mirrors the upstream `@enbox/agent` and `@enbox/dwn-sdk-js`
+ * sub-store names (`VAULT_STORE`, `DID_RESOLVERCACHE`, `DWN_*`,
+ * `SYNC_STORE`). Keep in sync with `node_modules/@enbox/agent/src/
+ * enbox-user-agent.ts` / `dwn-api.ts` / `sync-engine-level.ts`.
+ */
+export const AGENT_LEVEL_DB_SUBPATHS: readonly string[] = [
+  'VAULT_STORE',
+  'DID_RESOLVERCACHE',
+  'DWN_DATASTORE',
+  'DWN_STATEINDEX',
+  'DWN_MESSAGESTORE',
+  'DWN_MESSAGEINDEX',
+  'DWN_RESUMABLETASKSTORE',
+  'SYNC_STORE',
+];
+
+/**
+ * Idempotently destroy the on-disk LevelDB at `location`.
+ *
+ * Uses `react-native-leveldb`'s `LevelDB.destroyDB(name, force)` which
+ * closes any open handle first (via the `force` flag) and removes the
+ * native database files. When the database does not exist or the
+ * native module is unavailable (tests without a react-native-leveldb
+ * mock), this resolves without throwing.
+ */
+export async function destroyRNLevelDatabase(location: string): Promise<void> {
+  const name = normalizeLocation(location);
+  try {
+    // `force: true` closes any open handle before destroying the
+    // on-disk files, which is required by react-native-leveldb's
+    // API contract.
+    LevelDB.destroyDB(name, true);
+  } catch {
+    // Idempotent: missing database / unavailable native module is a
+    // no-op rather than an error. Callers treat reset() as best-effort.
+  }
+}
+
+/**
+ * Wipe every LevelDB the `EnboxUserAgent` persists under `dataPath`.
+ *
+ * This is the fallback that `useAgentStore.reset()` uses to guarantee
+ * the app's on-disk state matches a clean post-reset install. Call
+ * ordering (close → destroy) is delegated to `destroyRNLevelDatabase`,
+ * which passes `force: true` to `LevelDB.destroyDB`. Safe to call
+ * multiple times in sequence — each sub-path is destroyed idempotently.
+ */
+export async function destroyAgentLevelDatabases(dataPath: string): Promise<void> {
+  for (const sub of AGENT_LEVEL_DB_SUBPATHS) {
+    await destroyRNLevelDatabase(`${dataPath}/${sub}`);
+  }
+}

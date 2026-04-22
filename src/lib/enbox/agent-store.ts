@@ -20,9 +20,21 @@ import NativeBiometricVault from '@specs/NativeBiometricVault';
 import { initializeAgent } from './agent-init';
 import {
   BiometricVault,
+  BIOMETRIC_STATE_STORAGE_KEY,
+  INITIALIZED_STORAGE_KEY,
   WALLET_ROOT_KEY_ALIAS,
   type BiometricState,
 } from './biometric-vault';
+import { destroyAgentLevelDatabases } from './rn-level';
+import { SecureStorageAdapter } from './storage-adapter';
+
+/**
+ * `dataPath` passed to `EnboxUserAgent.create()` in `agent-init.ts`.
+ * Duplicated as a module-scoped constant here so `reset()` can wipe
+ * the matching LevelDB directories without reaching into the created
+ * agent instance (which might already be torn down when reset runs).
+ */
+const AGENT_DATA_PATH = 'ENBOX_AGENT';
 
 /** Error code emitted by the biometric vault when the OS cannot satisfy a biometric prompt. */
 const BIOMETRICS_UNAVAILABLE_CODE = 'VAULT_ERROR_BIOMETRICS_UNAVAILABLE';
@@ -130,13 +142,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       let recoveryPhrase: string;
       if (isFirst) {
         console.log('[agent-store] initializing vault (biometric prompt)...');
-        // BiometricVault ignores `password`; we pass an empty string to
-        // satisfy the upstream `AgentInitializeParams` TypeScript shape.
-        recoveryPhrase = await agent.initialize({ password: '' });
+        // BiometricVault has no password. The upstream
+        // `AgentInitializeParams` TypeScript shape still requires
+        // `password: string`; we narrow it locally so the call site
+        // does NOT carry a `password` property at all. The upstream
+        // type will be loosened once @enbox/agent ships a vault-aware
+        // overload (tracked alongside the `scripts/apply-patches.mjs`
+        // enbox-agent-vault-injection patch).
+        // @ts-expect-error password removed — BiometricVault ignores it
+        recoveryPhrase = await agent.initialize({});
         console.log('[agent-store] vault initialized.');
       } else {
         console.log('[agent-store] starting existing vault (biometric prompt)...');
-        await agent.start({ password: '' });
+        // @ts-expect-error password removed — BiometricVault ignores it
+        await agent.start({});
         recoveryPhrase = '';
       }
 
@@ -182,9 +201,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       console.log('[agent-store] unlockAgent: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       console.log('[agent-store] starting vault (biometric prompt)...');
-      // BiometricVault ignores `password`; empty string satisfies the
-      // upstream `AgentStartParams` TypeScript shape.
-      await agent.start({ password: '' });
+      // BiometricVault has no password. The upstream
+      // `AgentStartParams` TypeScript shape still requires `password:
+      // string`; we narrow it locally so the call site does NOT carry
+      // a `password` property at all. The upstream type will be
+      // loosened once @enbox/agent ships a vault-aware overload
+      // (tracked alongside the `scripts/apply-patches.mjs`
+      // enbox-agent-vault-injection patch).
+      // @ts-expect-error password removed — BiometricVault ignores it
+      await agent.start({});
       console.log('[agent-store] vault started.');
       set({
         agent,
@@ -272,11 +297,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   reset: async () => {
     const { vault } = get();
 
-    // 1. Wipe the biometric-gated native secret. Use the vault's own
-    //    reset() when available (also clears vault SecureStorage flags);
-    //    fall back to a direct native deleteSecret call so reset remains
-    //    useful even if the vault was never constructed (e.g. after a
-    //    corrupt-start scenario).
+    // 1. Wipe the biometric-gated native secret + the persisted vault
+    //    SecureStorage flags. When a vault instance exists we delegate
+    //    to `vault.reset()` which clears both
+    //    `enbox.vault.initialized` and `enbox.vault.biometric-state`
+    //    via its own SecureStorageLike dependency. The fallback path
+    //    (vault was never constructed — e.g. corrupt-start / invalidated
+    //    recovery) has no such dependency, so it must ALSO clear those
+    //    keys directly via the SecureStorageAdapter so the next cold
+    //    launch does not misroute away from onboarding because a stale
+    //    `enbox.vault.initialized = 'true'` flag survived.
     if (vault) {
       try {
         await vault.reset();
@@ -292,13 +322,47 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           err,
         );
       }
+      // Clear the SecureStorage flags that BiometricVault would have
+      // cleared if a vault instance existed. The two keys match the
+      // constants exported from `biometric-vault.ts`.
+      const fallbackStorage = new SecureStorageAdapter();
+      try {
+        await fallbackStorage.remove(INITIALIZED_STORAGE_KEY);
+      } catch (err) {
+        console.warn(
+          '[agent-store] reset: no-vault fallback clear initialized failed:',
+          err,
+        );
+      }
+      try {
+        await fallbackStorage.remove(BIOMETRIC_STATE_STORAGE_KEY);
+      } catch (err) {
+        console.warn(
+          '[agent-store] reset: no-vault fallback clear biometric-state failed:',
+          err,
+        );
+      }
     }
 
-    // 2. Tear down the in-memory agent / authManager / vault state and
+    // 2. Wipe the on-disk ENBOX_AGENT LevelDB data so a post-reset
+    //    relaunch starts from a genuinely clean state rather than
+    //    resurrecting identities / DWN records / sync cursors from the
+    //    previous wallet. The helper closes any open handle first and
+    //    resolves idempotently when nothing is on disk.
+    try {
+      await destroyAgentLevelDatabases(AGENT_DATA_PATH);
+    } catch (err) {
+      console.warn(
+        '[agent-store] reset: LevelDB wipe failed (ignored):',
+        err,
+      );
+    }
+
+    // 3. Tear down the in-memory agent / authManager / vault state and
     //    null out the one-shot recovery phrase if it was still held.
     get().teardown();
 
-    // 3. Clear persisted session state + PIN-era storage artefacts. The
+    // 4. Clear persisted session state + PIN-era storage artefacts. The
     //    import lives inside the function to avoid a circular import at
     //    module load time (session-store ↔ agent-store).
     try {
