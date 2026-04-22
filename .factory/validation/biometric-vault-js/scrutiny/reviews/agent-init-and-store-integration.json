@@ -1,0 +1,28 @@
+{
+  "featureId": "agent-init-and-store-integration",
+  "reviewedAt": "2026-04-22T04:59:36Z",
+  "commitId": "d5df63e2d48989eca49ae3a546287e06b2bcbdee",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature does wire BiometricVault into agent-init and keeps the AgentDwnApi patch intact, but agent-store never actually removed password-shaped agent calls: it still sends empty-string passwords to EnboxUserAgent.initialize/start, and the new tests assert that placeholder behavior instead of the passwordless contract.",
+    "issues": [
+      {
+        "file": "src/lib/enbox/agent-store.ts",
+        "line": 135,
+        "severity": "blocking",
+        "description": "initializeFirstLaunch() still calls agent.initialize({ password: '' }) at line 135, and the same file still calls agent.start({ password: '' }) at lines 139 and 187. VAL-VAULT-014/015 require the store to delegate to biometrics without a password field, and VAL-VAULT-014 also expects the initialize path to supply default DWN endpoints. Keeping an empty-string placeholder means this feature did not fully remove the legacy password coupling from the store layer. The committed regression tests reinforce the wrong behavior instead of catching it: src/lib/enbox/__tests__/agent-store.test.ts:255-257 and 298-300 explicitly assert password === ''."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The mobile-feature-worker honesty gate is not being enforced reliably for this mission: the worker marked skillFeedback.followedProcedure=true even though the transcript shows implementation before tests and skipped required library reads for a test-running session.",
+      "evidence": "mobile-feature-worker/SKILL.md:21-29 and 32 require reading .factory/library/environment.md when running install/test flows and writing failing tests first. The transcript skeleton at /home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/worker-transcripts.jsonl line 18 shows Create calls for src/lib/enbox/agent-init.ts and src/lib/enbox/agent-store.ts before the later Create calls for src/lib/enbox/__tests__/agent-init.test.ts and agent-store.test.ts, and that same skeleton has no Read of .factory/library/environment.md or .factory/library/user-testing.md. The handoff at /home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-22T04-19-11-152Z__agent-init-and-store-integration__ad30b288-3de7-49c3-9f96-624fdc89fb6b.json:129-131 still records followedProcedure=true with no deviations."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed: agent-store still depends on fake empty-string passwords for initialize/start, so the feature does not satisfy the passwordless biometric-store integration contract."
+}
