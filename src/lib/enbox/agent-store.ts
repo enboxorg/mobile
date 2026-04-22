@@ -70,6 +70,29 @@ export interface AgentStore {
    */
   unlockAgent: () => Promise<void>;
 
+  /**
+   * Recovery path — invoked by `RecoveryRestoreScreen` when the user
+   * pastes an existing 12- or 24-word BIP-39 mnemonic after the native
+   * secret was invalidated (or after a fresh install on a known
+   * wallet).
+   *
+   * Steps (matches the mission-spec `restoreFromMnemonic` contract):
+   *   1. Delete any existing biometric-gated native secret so the vault
+   *      can re-initialize from the restored entropy.
+   *   2. Create a fresh agent + vault via `initializeAgent()`.
+   *   3. Call `agent.initialize({ recoveryPhrase })` which forwards the
+   *      phrase to `BiometricVault.initialize()`, re-sealing a new
+   *      biometric secret derived from the caller-provided mnemonic.
+   *   4. On success flip the store's `biometricState` to `'ready'` and
+   *      refresh the identities list. The one-shot `recoveryPhrase`
+   *      field is cleared — the user already owns the words that were
+   *      just entered; the store must NOT hold them in JS memory.
+   *
+   * The caller is expected to have already normalized the phrase
+   * (trim / lower-case / single-space) and validated it against BIP-39.
+   */
+  restoreFromMnemonic: (mnemonic: string) => Promise<void>;
+
   /** Refresh identities list from the agent. */
   refreshIdentities: () => Promise<void>;
 
@@ -229,6 +252,83 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         console.warn('[agent-store] unlock blocked: biometric key invalidated');
       } else {
         console.error('[agent-store] unlock failed:', message);
+      }
+      let nextBiometricState = get().biometricState;
+      if (code === BIOMETRICS_UNAVAILABLE_CODE) {
+        nextBiometricState = 'unavailable';
+      } else if (code === KEY_INVALIDATED_CODE) {
+        nextBiometricState = 'invalidated';
+      }
+      set({
+        error: message,
+        isInitializing: false,
+        agent: null,
+        authManager: null,
+        vault: null,
+        biometricState: nextBiometricState,
+      });
+      throw err;
+    }
+  },
+
+  restoreFromMnemonic: async (mnemonic: string) => {
+    set({ isInitializing: true, error: null });
+    try {
+      // 1. Wipe any prior biometric-gated secret so the vault's
+      //    `initialize({ recoveryPhrase })` path won't fast-fail with
+      //    `VAULT_ERROR_ALREADY_INITIALIZED`. Best-effort — a missing
+      //    alias resolves as success on both iOS and Android.
+      try {
+        await NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS);
+      } catch (err) {
+        console.warn(
+          '[agent-store] restoreFromMnemonic: deleteSecret failed (ignored):',
+          err,
+        );
+      }
+
+      // 2. Create a fresh agent + vault. We do NOT reuse any existing
+      //    instance — the old state is tied to the now-invalid secret
+      //    and the agent's internal DWN layer must be wired against a
+      //    vault whose BearerDid matches the restored entropy.
+      console.log('[agent-store] restoreFromMnemonic: creating agent...');
+      const { agent, authManager, vault } = await initializeAgent();
+
+      // 3. Re-seal the biometric vault with the caller-provided
+      //    mnemonic. `agent.initialize` forwards `recoveryPhrase`
+      //    straight into `BiometricVault.initialize` which derives the
+      //    entropy, calls `NativeBiometricVault.generateAndStoreSecret`,
+      //    and rebuilds the HD seed / BearerDid in memory. Any native
+      //    rejection is mapped to a canonical VAULT_ERROR_* and
+      //    surfaced via the screen.
+      // @ts-expect-error password removed — BiometricVault ignores it
+      await agent.initialize({ recoveryPhrase: mnemonic });
+
+      set({
+        agent,
+        authManager,
+        vault,
+        isInitializing: false,
+        biometricState: 'ready',
+        // Do NOT mirror the restored mnemonic into the store — the
+        // user already knows it (they just typed it) and persisting it
+        // in JS memory would violate the one-shot recovery-phrase
+        // contract (VAL-VAULT-018). `recoveryPhrase` stays `null`.
+        recoveryPhrase: null,
+      });
+
+      get()
+        .refreshIdentities()
+        .catch(() => {});
+    } catch (err) {
+      const code = (err as { code?: unknown })?.code;
+      const message = messageFromError(err, 'Wallet restore failed');
+      if (code === BIOMETRICS_UNAVAILABLE_CODE) {
+        console.warn('[agent-store] restore blocked: biometrics unavailable');
+      } else if (code === KEY_INVALIDATED_CODE) {
+        console.warn('[agent-store] restore blocked: biometric key invalidated');
+      } else {
+        console.error('[agent-store] restoreFromMnemonic failed:', message);
       }
       let nextBiometricState = get().biometricState;
       if (code === BIOMETRICS_UNAVAILABLE_CODE) {
