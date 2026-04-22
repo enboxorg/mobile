@@ -277,10 +277,57 @@ describe('RecoveryRestoreScreen', () => {
     // and has at least one identity available to rehydrate.
     expect(useSessionStore.getState().hasCompletedOnboarding).toBe(true);
     expect(useSessionStore.getState().hasIdentity).toBe(true);
+    // isLocked must also flip to `false` so the navigator matrix can
+    // route the user past BiometricUnlock without requiring a second
+    // prompt — the `hydrateRestored()` helper is the single entry
+    // point that touches all four flags.
+    expect(useSessionStore.getState().isLocked).toBe(false);
     // `onRestored` is how the screen hands control back to the navigator;
     // it must be fired exactly once, no more.
     expect(onRestored).toHaveBeenCalledTimes(1);
   });
+
+  // ------------------------------------------------------------------
+  // Commit-path contract: the screen MUST flip the session snapshot
+  // via the store's dedicated `hydrateRestored()` helper exactly once
+  // on a successful restore. This guards against a regression to a
+  // raw `useSessionStore.setState({...})` call which would bypass the
+  // store's persistence path and mis-route a cold relaunch to the
+  // Welcome / BiometricSetup screens.
+  // ------------------------------------------------------------------
+  it('commits the restored session exactly once via useSessionStore.hydrateRestored()', async () => {
+    (mockRestoreFromMnemonic as jest.Mock).mockResolvedValue(undefined);
+    useSessionStore.setState({ biometricStatus: 'invalidated' });
+
+    const hydrateRestoredSpy = jest.spyOn(
+      useSessionStore.getState(),
+      'hydrateRestored',
+    );
+
+    const onRestored = jest.fn();
+    const screen = render(
+      <RecoveryRestoreScreen onRestored={onRestored} />,
+    );
+
+    typeMnemonic(screen, VALID_MNEMONIC_24);
+
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Restore wallet'));
+    });
+
+    expect(mockRestoreFromMnemonic).toHaveBeenCalledTimes(1);
+    expect(hydrateRestoredSpy).toHaveBeenCalledTimes(1);
+    expect(onRestored).toHaveBeenCalledTimes(1);
+  });
+
+  // Negative-path commit contract — a restore failure MUST NOT flip
+  // the session flags via `hydrateRestored()`. Covered by the
+  // existing "surfaces an inline alert when restoreFromMnemonic
+  // rejects and does NOT route away" test (below): it asserts
+  // `biometricStatus` remains `'invalidated'`, `hasCompletedOnboarding`
+  // is not flipped, and `onRestored` is not called — all of which
+  // would be violated if the screen called `hydrateRestored()` on
+  // the error path.
 
   // ------------------------------------------------------------------
   // VAL-UX-026: biometric vault sealing is re-armed exactly once

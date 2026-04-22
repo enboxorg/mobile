@@ -81,6 +81,24 @@ export interface SessionState {
   setHasIdentity: (value: boolean) => void;
   /** Transition the biometric status exposed to the navigator. */
   setBiometricStatus: (next: BiometricStatus) => void;
+  /**
+   * Atomically commit the post-recovery-restore session snapshot.
+   *
+   * Applies all four session flags — `biometricStatus: 'ready'`,
+   * `hasCompletedOnboarding: true`, `hasIdentity: true`,
+   * `isLocked: false` — in a single `setState`, then persists the
+   * identity/onboarding half to SecureStorage via `persistSession()`
+   * so a cold relaunch (which runs `hydrate()` against a fresh
+   * process) routes the restored wallet straight to
+   * `BiometricUnlock → Main` instead of falling back to `Welcome` or
+   * `BiometricSetup`.
+   *
+   * The raw `setState` call that previously lived in
+   * `recovery-restore-screen.tsx` bypassed the store's persistence
+   * path entirely; this helper is the single source of truth for
+   * committing a successful restore.
+   */
+  hydrateRestored: () => void;
   reset: () => Promise<void>;
 }
 
@@ -203,6 +221,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setBiometricStatus: (next) => {
     set({ biometricStatus: next });
+  },
+
+  hydrateRestored: () => {
+    // One atomic state transition followed by one persist call — see
+    // the docstring on `SessionState.hydrateRestored` for the rationale.
+    set({
+      biometricStatus: 'ready',
+      hasCompletedOnboarding: true,
+      hasIdentity: true,
+      isLocked: false,
+    });
+    persistSession({
+      hasCompletedOnboarding: true,
+      hasIdentity: true,
+    });
   },
 
   reset: async () => {

@@ -117,7 +117,7 @@ export function RecoveryRestoreScreen({
     (s) => (s as { restoreFromMnemonic?: (m: string) => Promise<void> })
       .restoreFromMnemonic,
   );
-  const setBiometricStatus = useSessionStore((s) => s.setBiometricStatus);
+  const hydrateRestored = useSessionStore((s) => s.hydrateRestored);
 
   const [phrase, setPhrase] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -209,17 +209,19 @@ export function RecoveryRestoreScreen({
     try {
       await restoreFromMnemonic(normalized);
 
-      // On success rehydrate the session flags + flip the biometric
-      // status so the navigator matrix routes the user to `Main`. We
-      // set `hasCompletedOnboarding` + `hasIdentity` to `true` because
-      // the mnemonic the user entered implies a wallet was previously
-      // established — see VAL-UX-024 evidence.
-      useSessionStore.setState({
-        biometricStatus: 'ready',
-        hasCompletedOnboarding: true,
-        hasIdentity: true,
-        isLocked: false,
-      });
+      // On success commit the restored session snapshot through the
+      // session-store's dedicated helper. `hydrateRestored()`:
+      //   1. Atomically sets biometricStatus='ready',
+      //      hasCompletedOnboarding=true, hasIdentity=true, and
+      //      isLocked=false in one `setState` call so subsequent
+      //      navigator selectors observe a consistent snapshot.
+      //   2. Persists the onboarding/identity half to SecureStorage
+      //      via the store's internal `persistSession()` pipe — the
+      //      previous inline `useSessionStore.setState({...})` call
+      //      bypassed persistence, which caused cold relaunches to
+      //      rehydrate stale flags and misroute the restored wallet
+      //      back to Welcome / BiometricSetup (VAL-UX-024).
+      hydrateRestored();
 
       if (!restoredRef.current) {
         restoredRef.current = true;
@@ -235,16 +237,12 @@ export function RecoveryRestoreScreen({
       inFlightRef.current = false;
       setIsSubmitting(false);
     }
-    // `setBiometricStatus` is read for completeness even though we
-    // prefer the atomic multi-key `setState` above — referencing it
-    // keeps the action bound to the store for future refactors.
-    void setBiometricStatus;
   }, [
+    hydrateRestored,
     isShapeValid,
     normalized,
     onRestored,
     restoreFromMnemonic,
-    setBiometricStatus,
   ]);
 
   const handleChange = useCallback((next: string) => {
