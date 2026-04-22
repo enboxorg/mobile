@@ -16,7 +16,7 @@ module.exports = {
   // can load it alongside the CJS React Native preset. Everything else in
   // `node_modules/` keeps the preset's default "do not transform" rule.
   transformIgnorePatterns: [
-    'node_modules/(?!((jest-)?react-native|@react-native(-community)?|ed25519-keygen)/)',
+    'node_modules/(?!((jest-)?react-native|@react-native(-community)?|@react-navigation|ed25519-keygen)/)',
   ],
   collectCoverageFrom: [
     'src/**/*.{ts,tsx}',
