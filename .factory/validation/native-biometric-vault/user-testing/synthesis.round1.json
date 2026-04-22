@@ -1,12 +1,12 @@
 {
   "milestone": "native-biometric-vault",
-  "round": 2,
+  "round": 1,
   "status": "fail",
   "assertionsSummary": {
     "total": 42,
-    "passed": 41,
-    "failed": 1,
-    "blocked": 0
+    "passed": 40,
+    "failed": 0,
+    "blocked": 2
   },
   "passedAssertions": [
     "VAL-NATIVE-001",
@@ -28,7 +28,6 @@
     "VAL-NATIVE-018",
     "VAL-NATIVE-019",
     "VAL-NATIVE-020",
-    "VAL-NATIVE-021",
     "VAL-NATIVE-022",
     "VAL-NATIVE-023",
     "VAL-NATIVE-024",
@@ -51,13 +50,17 @@
     "VAL-NATIVE-041",
     "VAL-NATIVE-042"
   ],
-  "failedAssertions": [
+  "failedAssertions": [],
+  "blockedAssertions": [
     {
       "id": "VAL-NATIVE-013",
-      "reason": "Authoritative ci.yml run 24757119845 for head e854367d3600f127c5e6420e9c88e1eb5edaa10f failed build-ios because Xcode referenced a doubled NativeBiometricVault source path that does not exist."
+      "blockedBy": "GitHub Actions shows successful `build-ios` jobs on runs 24753819737 (head `7e86221`) and 24754326012 (head `c931605`), but the current local branch is ahead of `origin/mission/biometric-vault` by 5 commits, including build-affecting fix commit `08a6b24` that modified `ios/EnboxMobile.xcodeproj/project.pbxproj` and `RCTNativeBiometricVault.mm`. Because no `ci.yml` run exists after those fixes landed and this task forbids dispatching a new workflow, the current milestone state cannot be confirmed for VAL-NATIVE-013."
+    },
+    {
+      "id": "VAL-NATIVE-021",
+      "blockedBy": "GitHub Actions run 24754326012 proves `build-android` succeeded for remote head `c931605` and uploaded artifact `android-debug-apk` containing `app-debug.apk`, but the current local branch is ahead of origin by 5 commits, including build-affecting fix commit `08a6b24` that modified `android/app/src/main/java/org/enbox/mobile/nativemodules/NativeBiometricVaultModule.kt`. With no existing `ci.yml` run for the post-fix commits and no permission to dispatch one, the current milestone state remains unverified for VAL-NATIVE-021."
     }
   ],
-  "blockedAssertions": [],
   "appliedUpdates": [
     {
       "target": "user-testing.md",
@@ -68,19 +71,13 @@
       "target": "user-testing.md",
       "description": "Documented that build-only GitHub Actions assertions must compare a successful run head SHA with the local branch tip; if local HEAD is ahead of origin, existing green runs are not authoritative.",
       "source": "flow-report"
-    },
-    {
-      "target": "user-testing.md",
-      "description": "Documented that if the only ci.yml run for the exact branch tip is still in progress, validators should wait for it with gh run watch before deciding build-backed assertions.",
-      "source": "flow-report"
     }
   ],
   "flowReports": [
     ".factory/validation/native-biometric-vault/user-testing/flows/native-static-spec-source.json",
     ".factory/validation/native-biometric-vault/user-testing/flows/native-js-tests.json",
-    ".factory/validation/native-biometric-vault/user-testing/flows/native-ci-build-status.json",
-    ".factory/validation/native-biometric-vault/user-testing/flows/native-ci-build-status-rerun.json"
+    ".factory/validation/native-biometric-vault/user-testing/flows/native-ci-build-status.json"
   ],
-  "generatedAt": "2026-04-22T02:52:02.933991+00:00",
-  "previousRound": ".factory/validation/native-biometric-vault/user-testing/synthesis.round1.json"
+  "generatedAt": "2026-04-22T02:28:35.173804+00:00",
+  "previousRound": null
 }

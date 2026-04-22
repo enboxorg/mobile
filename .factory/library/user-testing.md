@@ -69,6 +69,7 @@ The contract file `validation-contract.md` labels each assertion with its `Tool:
 - For `VAL-PATCH-007`, avoid a plain `grep "IdentityVault"` on the ESM bundle because it also matches the valid `HdIdentityVault` fallback symbol as a substring; use an exact-word regex or import-specific guard instead.
 - For local `VAL-PATCH-001` reruns on Bun 1.3.11, a plain fresh repo copy is not enough once the host has installed before: Bun reuses postinstall-mutated cache entries for `@enbox/agent` and `react-native-leveldb`. To reproduce the expected `[postinstall] Patched ...` lines, validate in a temp repo copy **and** temporarily move only those package cache entries out of `~/.bun/install/cache/`, then restore them after the install completes.
 - For build-only assertions backed by GitHub Actions (`VAL-NATIVE-013`, `VAL-NATIVE-021`, and later CI assertions), compare the successful run's `headSha` to the local branch tip before treating the run as authoritative. If local `HEAD` is ahead of `origin/<branch>`, existing green runs do not cover the newer commits and the assertion should stay blocked until CI runs on the newer tip.
+- If the only `ci.yml` run for the exact branch tip is still `in_progress`, wait on that run with `gh run watch <run-id>` before deciding build-backed assertions. Do not freeze `VAL-NATIVE-013` / `VAL-NATIVE-021` from older runs while the matching-HEAD run is still executing.
 
 ## Validation Concurrency
 
