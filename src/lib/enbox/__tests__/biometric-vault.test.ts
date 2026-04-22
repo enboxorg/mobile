@@ -613,39 +613,84 @@ describe('BiometricVault — does not persist recovery phrase through its own Se
 // ===========================================================================
 // VAL-VAULT-027 — partial-init failure rollback semantics
 //
-// Original contract wording demanded that a local-derivation failure AFTER
-// generateAndStoreSecret resolved must call deleteSecret(). The
-// fix-biometric-vault-js-scrutiny-blockers feature narrowed that rule: a
-// provisioning-success-then-local-derivation failure MUST leave the
-// native secret intact so the user can retry unlock rather than being
-// trapped back in first-launch setup. The rollback is only required
-// when the native generateAndStoreSecret call ITSELF fails — in which
-// case there's nothing actually on disk to roll back. These tests
-// pin that new behavior.
+// When `NativeBiometricVault.generateAndStoreSecret` resolves but a
+// subsequent step in `initialize()` throws (mnemonic derivation, HD seed,
+// BearerDid creation, DWN endpoint registration, or SecureStorage flag
+// set), the vault MUST roll back by calling
+// `NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS)` before
+// re-throwing the ORIGINAL error. That way `isInitialized()` returns
+// `false` afterwards and the user is not trapped in an
+// "already-initialized but unusable" state. Rollback is best-effort:
+// if `deleteSecret()` itself rejects, a console warning is logged but
+// the ORIGINAL derivation error is still the one that bubbles up.
+//
+// Conversely, if `generateAndStoreSecret` fails before any secret ever
+// lands on disk, there is nothing to roll back and `deleteSecret`
+// must NOT be invoked.
 // ===========================================================================
 describe('BiometricVault — partial-init recovery (VAL-VAULT-027)', () => {
-  it('does NOT call deleteSecret if local derivation throws after provisioning succeeded', async () => {
+  it('rolls back the orphan native secret when local derivation throws after provisioning succeeded', async () => {
+    const didError = new Error('simulated DID failure');
     const didFactory = jest.fn(async () => {
-      throw new Error('simulated DID failure');
+      throw didError;
     });
     const { api } = makeSecureStorage();
     const vault = new BiometricVault({ didFactory, secureStorage: api });
 
     const deleteCallsBefore = native.deleteSecret.mock.calls.length;
 
-    await expect(vault.initialize({})).rejects.toBeDefined();
+    // (b) the original derivation error bubbles unchanged to the caller.
+    await expect(vault.initialize({})).rejects.toBe(didError);
 
     expect(native.generateAndStoreSecret).toHaveBeenCalledTimes(1);
-    // The native call succeeded; deleteSecret must NOT be invoked on
-    // the derivation-failure path.
-    expect(native.deleteSecret.mock.calls.length).toBe(deleteCallsBefore);
-    // The native secret is still present; an "isInitialized" call
-    // should now report true (hasSecret returns true).
-    expect(await vault.isInitialized()).toBe(true);
-    // SecureStorage must not have been marked initialized — derivation
-    // never reached the persist step.
-    const setCalls = api.set.mock.calls.map(([k]) => k);
-    expect(setCalls).not.toContain(INITIALIZED_STORAGE_KEY);
+
+    // (a) deleteSecret called exactly once with WALLET_ROOT_KEY_ALIAS
+    // before the error surfaces.
+    const newDeleteCalls = native.deleteSecret.mock.calls.slice(deleteCallsBefore);
+    expect(newDeleteCalls).toHaveLength(1);
+    expect(newDeleteCalls[0][0]).toBe(WALLET_ROOT_KEY_ALIAS);
+
+    // (c) isInitialized() returns false afterwards — the native store
+    // no longer has an entry because rollback removed it.
+    expect(await vault.isInitialized()).toBe(false);
+    expect(vault.isLocked()).toBe(true);
+
+    // (d) No SecureStorage flags were persisted on the rollback path.
+    const setKeys = api.set.mock.calls.map(([k]) => k);
+    expect(setKeys).not.toContain(INITIALIZED_STORAGE_KEY);
+    expect(setKeys).not.toContain(BIOMETRIC_STATE_STORAGE_KEY);
+  });
+
+  it('still bubbles the ORIGINAL derivation error and logs a warning when deleteSecret itself rejects', async () => {
+    const didError = new Error('simulated DID failure');
+    const didFactory = jest.fn(async () => {
+      throw didError;
+    });
+    const deleteError = new Error('rollback boom');
+    native.deleteSecret.mockRejectedValueOnce(deleteError);
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ didFactory, secureStorage: api });
+
+    try {
+      // The ORIGINAL derivation error must bubble — not the deleteSecret
+      // rejection. This is critical so callers see the real root cause.
+      await expect(vault.initialize({})).rejects.toBe(didError);
+
+      expect(native.deleteSecret).toHaveBeenCalledWith(WALLET_ROOT_KEY_ALIAS);
+      // A console warning is logged about the failed rollback.
+      expect(warnSpy).toHaveBeenCalled();
+      const warnArgs = warnSpy.mock.calls[0] as unknown[];
+      expect(String(warnArgs[0])).toMatch(/BiometricVault/);
+      expect(warnArgs).toEqual(expect.arrayContaining([deleteError]));
+      // No SecureStorage flags were persisted.
+      const setKeys = api.set.mock.calls.map(([k]) => k);
+      expect(setKeys).not.toContain(INITIALIZED_STORAGE_KEY);
+      expect(setKeys).not.toContain(BIOMETRIC_STATE_STORAGE_KEY);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('still surfaces a native-side generateAndStoreSecret failure without calling deleteSecret', async () => {

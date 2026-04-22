@@ -610,13 +610,19 @@ export class BiometricVault
     }
 
     // 4. Derive the HD seed, mnemonic, and BearerDid from the same bytes
-    //    we just handed to native. If any of these steps throw, we
-    //    DELIBERATELY do NOT call `deleteSecret()` — a provisioning
-    //    success that hit a local derivation error leaves the user's
-    //    biometric-gated secret intact so they can retry unlock rather
-    //    than being forced back through setup. This trades the
-    //    theoretical "orphan secret" edge case for a far less
-    //    destructive recovery UX.
+    //    we just handed to native. If any of these steps throw AFTER the
+    //    native provisioning call already succeeded, we MUST roll back
+    //    the orphan native secret via `deleteSecret()` before re-throwing
+    //    so `isInitialized()` correctly reports `false` afterwards. Per
+    //    VAL-VAULT-027 (and the underlying issue requirement — "the user
+    //    should not be forced through setup repeatedly if vault
+    //    initialization partially fails"), leaving the native secret
+    //    behind would trap the user in an unusable state on the next
+    //    launch because `hasSecret()` would return `true` but unlock
+    //    would fail to re-derive anything useful. Rollback is best-effort
+    //    — if `deleteSecret()` itself rejects we log a warning and still
+    //    surface the ORIGINAL derivation error so the caller sees the
+    //    real root cause.
     try {
       const mnemonic = entropyToMnemonic(entropy, wordlist);
       if (!validateMnemonic(mnemonic, wordlist)) {
@@ -650,10 +656,26 @@ export class BiometricVault
       return mnemonic;
     } catch (err) {
       // Local derivation failed AFTER the native provisioning call
-      // succeeded. Zero the in-memory entropy for good hygiene, but
-      // leave the native secret and any persisted flags untouched so
-      // the user can retry unlock instead of being forced back through
-      // first-launch setup.
+      // succeeded. Best-effort roll back the orphan native secret so
+      // `isInitialized()` returns false and the user can retry
+      // first-launch setup cleanly instead of being trapped in an
+      // "already-initialized but unusable" state.
+      try {
+        await this._native.deleteSecret(WALLET_ROOT_KEY_ALIAS);
+      } catch (deleteErr) {
+        // Rollback itself failed — surface a warning but still throw
+        // the ORIGINAL derivation error below so the caller sees the
+        // real root cause rather than a secondary rollback failure.
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[BiometricVault] Failed to roll back native secret after partial init failure',
+          deleteErr,
+        );
+      }
+      // Zero the in-memory entropy and clear any partially-committed
+      // derived state. We intentionally do NOT persist
+      // `INITIALIZED_STORAGE_KEY` or `BIOMETRIC_STATE_STORAGE_KEY`
+      // here — persistence only happens on the success path above.
       zeroBytes(entropy);
       this._clearInMemoryState();
       throw err;
