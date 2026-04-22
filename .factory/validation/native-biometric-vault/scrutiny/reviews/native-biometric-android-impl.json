@@ -1,0 +1,38 @@
+{
+  "featureId": "native-biometric-android-impl",
+  "reviewedAt": "2026-04-22T01:41:56Z",
+  "commitId": "c9316055d29c53b4b8f469dfd76c2b0b1262267f",
+  "transcriptSkeletonReviewed": false,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Fail: the Android module covers the requested registration, manifest, and dependency wiring, but the secret-sealing path combines `setRandomizedEncryptionRequired(true)` with a caller-supplied GCM IV during `Cipher.ENCRYPT_MODE`. On Android Keystore AES/GCM keys this can reject provisioning at runtime, so first-launch vault creation is not reliable.",
+    "issues": [
+      {
+        "file": "android/app/src/main/java/org/enbox/mobile/nativemodules/NativeBiometricVaultModule.kt",
+        "line": 264,
+        "severity": "blocking",
+        "description": "The key spec enables `setRandomizedEncryptionRequired(true)` at lines 117-122, but `generateAndStoreSecret()` still generates its own IV and passes it into `cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(...))` at lines 259-264. For Android Keystore AES/GCM keys, randomized-encryption-required mode rejects caller-provided IVs on encryption, so provisioning can fail with a `GeneralSecurityException` instead of storing the wallet secret. Initialize the cipher without an IV (`cipher.init(Cipher.ENCRYPT_MODE, key)`) and then persist the provider-generated `cipher.iv`."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "This feature's mission artifacts are incomplete: `features.json` marks the feature completed, but there is no completed worker session, no handoff file for the assigned worker session, and no transcript skeleton entry to review. That breaks the `mobile-feature-worker` / mission handoff trail and makes it impossible to audit how CI verification was performed.",
+      "evidence": "`features.json` lines 995-1000 show `status: \"completed\"` with `workerSessionIds: [\"df61d8ff-e408-48d6-9eae-9cffeb26f33d\"]` but `completedWorkerSessionId: null`; `progress_log.jsonl` lines 38-40 show that same worker session only started and then failed from daemon inactivity; `AGENTS.md` lines 106-112 require every worker to produce a handoff."
+    },
+    {
+      "area": "conventions",
+      "observation": "Mission guidance still documents the wrong canonical biometric error-code union. `AGENTS.md` lists `TIMEOUT`, while the shipped spec/tests/native implementations use `BIOMETRY_LOCKOUT_PERMANENT` instead.",
+      "evidence": "`AGENTS.md` line 52 lists `(USER_CANCELED, BIOMETRY_UNAVAILABLE, BIOMETRY_NOT_ENROLLED, BIOMETRY_LOCKOUT, KEY_INVALIDATED, NOT_FOUND, AUTH_FAILED, VAULT_ERROR, TIMEOUT)`, but `src/lib/enbox/__tests__/native-biometric-vault.test.ts` lines 45-54 define the nine canonical codes with `BIOMETRY_LOCKOUT_PERMANENT` and no `TIMEOUT`; the iOS and Android native vault files use that same set."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The validation contract's Android IV guidance is too permissive for Keystore-backed AES/GCM. It says either a provider-generated IV or a caller-generated `GCMParameterSpec` IV is acceptable, but once `setRandomizedEncryptionRequired(true)` is also required, the caller-supplied-IV path leads directly to the runtime failure in this feature.",
+      "evidence": "`validation-contract.md` lines 3388-3395 allow both `cipher.init(Cipher.ENCRYPT_MODE, key)` and a caller-generated `GCMParameterSpec(128, iv)` while separately requiring `setRandomizedEncryptionRequired(true)`; `NativeBiometricVaultModule.kt` lines 120 and 259-264 follow that combination."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail: the reviewed diff wires up the Android NativeBiometricVault module, manifest permissions, dependency, and TurboModule registration, but `generateAndStoreSecret()` is not safe to ship because it supplies its own GCM IV while the Keystore key requires randomized encryption. I also could not review a transcript skeleton or handoff for the assigned worker session because the mission metadata only records a timed-out worker and no completion artifacts."
+}
