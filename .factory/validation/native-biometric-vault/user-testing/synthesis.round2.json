@@ -1,0 +1,86 @@
+{
+  "milestone": "native-biometric-vault",
+  "round": 2,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 42,
+    "passed": 41,
+    "failed": 1,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-NATIVE-001",
+    "VAL-NATIVE-002",
+    "VAL-NATIVE-003",
+    "VAL-NATIVE-004",
+    "VAL-NATIVE-005",
+    "VAL-NATIVE-006",
+    "VAL-NATIVE-007",
+    "VAL-NATIVE-008",
+    "VAL-NATIVE-009",
+    "VAL-NATIVE-010",
+    "VAL-NATIVE-011",
+    "VAL-NATIVE-012",
+    "VAL-NATIVE-014",
+    "VAL-NATIVE-015",
+    "VAL-NATIVE-016",
+    "VAL-NATIVE-017",
+    "VAL-NATIVE-018",
+    "VAL-NATIVE-019",
+    "VAL-NATIVE-020",
+    "VAL-NATIVE-021",
+    "VAL-NATIVE-022",
+    "VAL-NATIVE-023",
+    "VAL-NATIVE-024",
+    "VAL-NATIVE-025",
+    "VAL-NATIVE-026",
+    "VAL-NATIVE-027",
+    "VAL-NATIVE-028",
+    "VAL-NATIVE-029",
+    "VAL-NATIVE-030",
+    "VAL-NATIVE-031",
+    "VAL-NATIVE-032",
+    "VAL-NATIVE-033",
+    "VAL-NATIVE-034",
+    "VAL-NATIVE-035",
+    "VAL-NATIVE-036",
+    "VAL-NATIVE-037",
+    "VAL-NATIVE-038",
+    "VAL-NATIVE-039",
+    "VAL-NATIVE-040",
+    "VAL-NATIVE-041",
+    "VAL-NATIVE-042"
+  ],
+  "failedAssertions": [
+    {
+      "id": "VAL-NATIVE-013",
+      "reason": "Authoritative ci.yml run 24757119845 for head e854367d3600f127c5e6420e9c88e1eb5edaa10f failed build-ios because Xcode referenced a doubled NativeBiometricVault source path that does not exist."
+    }
+  ],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added a native-biometric-vault-local flow-validator guidance section covering read-only GH inspection, no local native builds, and single-concurrency local validation.",
+      "source": "setup"
+    },
+    {
+      "target": "user-testing.md",
+      "description": "Documented that build-only GitHub Actions assertions must compare a successful run head SHA with the local branch tip; if local HEAD is ahead of origin, existing green runs are not authoritative.",
+      "source": "flow-report"
+    },
+    {
+      "target": "user-testing.md",
+      "description": "Documented that if the only ci.yml run for the exact branch tip is still in progress, validators should wait for it with gh run watch before deciding build-backed assertions.",
+      "source": "flow-report"
+    }
+  ],
+  "flowReports": [
+    ".factory/validation/native-biometric-vault/user-testing/flows/native-static-spec-source.json",
+    ".factory/validation/native-biometric-vault/user-testing/flows/native-js-tests.json",
+    ".factory/validation/native-biometric-vault/user-testing/flows/native-ci-build-status.json",
+    ".factory/validation/native-biometric-vault/user-testing/flows/native-ci-build-status-rerun.json"
+  ],
+  "generatedAt": "2026-04-22T02:52:02.933991+00:00",
+  "previousRound": ".factory/validation/native-biometric-vault/user-testing/synthesis.round1.json"
+}

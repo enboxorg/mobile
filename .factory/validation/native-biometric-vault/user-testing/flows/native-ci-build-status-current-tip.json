@@ -1,0 +1,79 @@
+{
+  "surface": "native-biometric-vault-local",
+  "assertions": [
+    {
+      "id": "VAL-NATIVE-013",
+      "status": "pass",
+      "validatedForCurrentBranchTip": true,
+      "rationale": "Authoritative ci.yml run 24758431202 is for the exact current branch tip 335762667bbf1ffad6ced0b6da7094aa405f2df8 on mission/biometric-vault, and its build-ios job completed successfully including the \"Build iOS (Debug, Simulator)\" step.",
+      "evidence": {
+        "currentHead": "335762667bbf1ffad6ced0b6da7094aa405f2df8",
+        "branch": "mission/biometric-vault",
+        "authoritativeRunForCurrentTip": true,
+        "matchingRunCountForHeadSha": 1,
+        "runId": 24758431202,
+        "runUrl": "https://github.com/enboxorg/mobile/actions/runs/24758431202",
+        "runStatus": "completed",
+        "runConclusion": "success",
+        "jobId": 72436636443,
+        "jobName": "build-ios",
+        "jobUrl": "https://github.com/enboxorg/mobile/actions/runs/24758431202/job/72436636443",
+        "jobStatus": "completed",
+        "jobConclusion": "success",
+        "jobStartedAt": "2026-04-22T03:21:33Z",
+        "jobCompletedAt": "2026-04-22T03:36:32Z",
+        "stepEvidence": {
+          "name": "Build iOS (Debug, Simulator)",
+          "conclusion": "success",
+          "startedAt": "2026-04-22T03:22:34Z",
+          "completedAt": "2026-04-22T03:36:28Z"
+        },
+        "logExcerptPath": "native-biometric-vault/native-ci-build-status-current-tip/build-ios-log-excerpt.txt",
+        "logExcerpt": [
+          "build-ios\tRun bundle exec pod install\t2026-04-22T03:22:19.9143450Z \u001b[36m\u001b[1m[Codegen]\u001b[0m Processing EnboxNativeModulesSpec\u001b[0m",
+          "build-ios\tRun bundle exec pod install\t2026-04-22T03:22:19.9157160Z \u001b[36m\u001b[1m[Codegen]\u001b[0m Generating Native Code for EnboxNativeModulesSpec - ios\u001b[0m",
+          "build-ios\tBuild iOS (Debug, Simulator)\t\ufeff2026-04-22T03:22:34.2117830Z ##[group]Run xcodebuild build \\",
+          "build-ios\tBuild iOS (Debug, Simulator)\t2026-04-22T03:22:34.2118330Z \u001b[36;1mxcodebuild build \\\u001b[0m",
+          "build-ios\tBuild iOS (Debug, Simulator)\t2026-04-22T03:22:36.8125060Z Command line invocation:",
+          "build-ios\tBuild iOS (Debug, Simulator)\t2026-04-22T03:22:36.8128900Z     /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/xcodebuild build -workspace EnboxMobile.xcworkspace -scheme EnboxMobile -configuration Debug -sdk iphonesimulator -destination \"generic/platform=iOS Simulator\" CODE_SIGNING_ALLOWED=NO",
+          "build-ios\tBuild iOS (Debug, Simulator)\t2026-04-22T03:24:17.0052710Z \u001b[36m\u001b[1m[Codegen]\u001b[0m Processing EnboxNativeModulesSpec\u001b[0m",
+          "build-ios\tBuild iOS (Debug, Simulator)\t2026-04-22T03:24:17.0434290Z \u001b[36m\u001b[1m[Codegen]\u001b[0m Generating Native Code for EnboxNativeModulesSpec - ios\u001b[0m",
+          "build-ios\tBuild iOS (Debug, Simulator)\t2026-04-22T03:36:28.2627340Z ** BUILD SUCCEEDED **"
+        ],
+        "metadataPaths": [
+          "native-biometric-vault/native-ci-build-status-current-tip/ci-run-list.json",
+          "native-biometric-vault/native-ci-build-status-current-tip/ci-run-24758431202-view.json",
+          "native-biometric-vault/native-ci-build-status-current-tip/ci-run-24758431202-jobs.json"
+        ]
+      }
+    }
+  ],
+  "statusByAssertion": {
+    "VAL-NATIVE-013": "pass"
+  },
+  "summary": {
+    "currentHead": "335762667bbf1ffad6ced0b6da7094aa405f2df8",
+    "ciRunId": 24758431202,
+    "passed": 1,
+    "failed": 0,
+    "blocked": 0,
+    "text": "VAL-NATIVE-013 passed: authoritative ci.yml run 24758431202 for current branch tip 335762667bbf1ffad6ced0b6da7094aa405f2df8 has successful build-ios job 72436636443."
+  },
+  "toolsUsed": [
+    "Read",
+    "LS",
+    "gh run list",
+    "gh run view",
+    "gh api",
+    "python3"
+  ],
+  "frictions": [],
+  "blockers": [],
+  "commands": [
+    "gh run list --workflow=ci.yml --branch mission/biometric-vault --limit 20 --json databaseId,headSha,status,conclusion,url,displayTitle,workflowName,createdAt,headBranch",
+    "gh run view 24758431202 --json databaseId,headSha,status,conclusion,url,displayTitle,jobs",
+    "gh api repos/enboxorg/mobile/actions/runs/24758431202/jobs",
+    "gh run view 24758431202 --job 72436636443 --log"
+  ],
+  "testedAt": "2026-04-22T03:41:46.095261Z"
+}
