@@ -162,5 +162,96 @@ function patchEnboxAgent() {
   }
 }
 
+/**
+ * Gate `react-native-camera-kit`'s iOS-26-only `isDeferredStartSupported` /
+ * `isDeferredStartEnabled` calls behind a runtime (KVC / `responds(to:)`)
+ * lookup so the file compiles against the CI runner's Xcode 16.4 / SDK 18.5
+ * toolchain.
+ *
+ * Upstream `RealCamera.swift` already wraps the code in
+ * `guard #available(iOS 26.0, *) else { return }`, but that is a *runtime*
+ * check — the Swift compiler still needs the iOS 26 API surface on
+ * `AVCapturePhotoOutput` / `AVCaptureMetadataOutput` to typecheck. On the
+ * CI runner (`macos-15`, Xcode 16.4, SDK 18.5), those properties don't yet
+ * exist in the framework headers, and the build fails with:
+ *
+ *     value of type 'AVCapturePhotoOutput' has no member
+ *     'isDeferredStartSupported'
+ *
+ * We sidestep the compile-time dependency by calling the APIs through
+ * Key-Value Coding. The existing `#available(iOS 26.0, *)` runtime guard
+ * above this block keeps us from invoking the selectors on older iOS
+ * versions where the underlying properties are absent.
+ *
+ * Idempotent: a unique marker line guards re-entry. Tolerates a missing
+ * target file (warns + returns). Tolerates upstream layout drift by
+ * checking for the expected original block before rewriting; if it isn't
+ * there, the file is left alone.
+ */
+function patchReactNativeCameraKit() {
+  const target = resolve(
+    process.cwd(),
+    'node_modules/react-native-camera-kit/ios/ReactNativeCameraKit/RealCamera.swift',
+  );
+  const label =
+    'react-native-camera-kit/ios/ReactNativeCameraKit/RealCamera.swift';
+
+  if (!existsSync(target)) return;
+
+  const MARKER = '// enbox-patch: camera-kit-deferred-start@v1';
+  const original = readFileSync(target, 'utf8');
+
+  // Idempotence: already patched.
+  if (original.includes(MARKER)) return;
+
+  const originalBlock =
+    '    private func applyDeferredStartConfiguration() {\n' +
+    '        guard #available(iOS 26.0, *) else { return }\n' +
+    '\n' +
+    '        let enableDeferredStart = deferredStartEnabled\n' +
+    '\n' +
+    '        if photoOutput.isDeferredStartSupported {\n' +
+    '            photoOutput.isDeferredStartEnabled = enableDeferredStart\n' +
+    '        }\n' +
+    '\n' +
+    '        if metadataOutput.isDeferredStartSupported {\n' +
+    '            metadataOutput.isDeferredStartEnabled = enableDeferredStart\n' +
+    '        }\n' +
+    '    }';
+
+  // Drift guard: if the exact upstream block is missing, leave the file
+  // untouched. Workers will catch the resulting build failure and update
+  // this patch explicitly rather than risk a half-patched file.
+  if (!original.includes(originalBlock)) {
+    return;
+  }
+
+  const replacementBlock =
+    '    ' + MARKER + '\n' +
+    '    // iOS 26-only APIs (isDeferredStartSupported / isDeferredStartEnabled)\n' +
+    '    // are accessed through KVC so this file compiles against older SDKs\n' +
+    '    // (e.g. Xcode 16.4 / SDK 18.5 on the CI runner).\n' +
+    '    private func applyDeferredStartConfiguration() {\n' +
+    '        guard #available(iOS 26.0, *) else { return }\n' +
+    '\n' +
+    '        let enableDeferredStart = deferredStartEnabled\n' +
+    '\n' +
+    '        if (photoOutput.value(forKey: "deferredStartSupported") as? Bool) == true {\n' +
+    '            photoOutput.setValue(enableDeferredStart, forKey: "deferredStartEnabled")\n' +
+    '        }\n' +
+    '\n' +
+    '        if (metadataOutput.value(forKey: "deferredStartSupported") as? Bool) == true {\n' +
+    '            metadataOutput.setValue(enableDeferredStart, forKey: "deferredStartEnabled")\n' +
+    '        }\n' +
+    '    }';
+
+  const next = original.replace(originalBlock, replacementBlock);
+  if (next !== original) {
+    writeFileSync(target, next, 'utf8');
+    console.log(`[postinstall] Patched ${label}`);
+  }
+}
+
 patchReactNativeLevelDb();
 patchEnboxAgent();
+patchReactNativeCameraKit();

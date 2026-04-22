@@ -85,6 +85,6 @@ jobs:
             -scheme EnboxMobile \
             -configuration Debug \
             -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO
         working-directory: ios
