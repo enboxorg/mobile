@@ -7,25 +7,39 @@ import { NativeModules, Platform } from 'react-native';
  */
 export const FLAG_SECURE = 0x00002000;
 
+/**
+ * Canonical JS name of the Android native module that toggles the
+ * window's FLAG_SECURE flag. Must match the module name exported by the
+ * Kotlin implementation in
+ * `android/app/src/main/java/org/enbox/mobile/nativemodules/FlagSecureModule.kt`
+ * (`FlagSecureModule.NAME = "EnboxFlagSecure"`).
+ *
+ * Exported so tests and platform-specific wiring can reference the same
+ * string without duplicating the literal.
+ */
+export const FLAG_SECURE_MODULE_NAME = 'EnboxFlagSecure';
+
 type FlagSecureModule = {
-  activate?: () => void;
-  deactivate?: () => void;
+  activate?: () => void | Promise<void>;
+  deactivate?: () => void | Promise<void>;
 };
 
 /**
- * Lazily resolve a potential native module exposing `activate()` /
- * `deactivate()` that sets/clears `Window.setFlags(FLAG_SECURE, FLAG_SECURE)`
- * on the host Activity. When the module is not yet registered the wrapper
- * silently no-ops — screens must still call `enableFlagSecure()` /
- * `disableFlagSecure()` in the same lifecycle positions so the contract
- * is met once the Android-side module lands.
+ * Lazily resolve the canonical `EnboxFlagSecure` native module. The
+ * module is registered by the Android app build (see
+ * `FlagSecureModule.kt` + `NativeModulesPackage.kt`); on iOS and in
+ * Jest the module is absent and the resolver returns `undefined` so
+ * callers silently no-op.
+ *
+ * History: earlier versions of this shim probed three candidate names
+ * (`RNFlagSecure`, `EnboxFlagSecure`, `FlagSecure`) because no native
+ * module was registered in the repo. Now that we own the native impl,
+ * we lock the probe to the single canonical name so a mis-registration
+ * fails loudly (in manual QA) rather than silently falling through.
  */
 function resolveModule(): FlagSecureModule | undefined {
   const modules = NativeModules as Record<string, unknown>;
-  const candidate =
-    modules.RNFlagSecure ??
-    modules.EnboxFlagSecure ??
-    modules.FlagSecure;
+  const candidate = modules[FLAG_SECURE_MODULE_NAME];
   if (candidate && typeof candidate === 'object') {
     return candidate as FlagSecureModule;
   }
@@ -39,9 +53,9 @@ function resolveModule(): FlagSecureModule | undefined {
  *   - the thumbnail shown in the app Recents / task-switcher list
  *
  * No-ops on any non-Android platform, and silently no-ops when the
- * backing native module has not been registered. Screens MUST still call
- * this on mount and pair it with `disableFlagSecure()` on unmount so the
- * FLAG_SECURE window flag does not leak into subsequent screens.
+ * backing native module has not been registered. Screens MUST still
+ * call this on mount and pair it with `disableFlagSecure()` on unmount
+ * so the FLAG_SECURE window flag does not leak into subsequent screens.
  *
  * See VAL-UX-043.
  */
@@ -49,9 +63,12 @@ export function enableFlagSecure(): void {
   if (Platform.OS !== 'android') return;
   try {
     const mod = resolveModule();
+    // Fire-and-forget — the native promise resolves once the UI-thread
+    // setFlags has been scheduled; we never block React render on it.
     mod?.activate?.();
   } catch {
-    // Native module present but threw; best-effort — never propagate.
+    // Native module present but threw synchronously; best-effort —
+    // never propagate so a broken bridge cannot take down the screen.
   }
 }
 

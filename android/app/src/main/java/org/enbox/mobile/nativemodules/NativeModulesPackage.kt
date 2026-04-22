@@ -12,6 +12,7 @@ class NativeModulesPackage : BaseReactPackage() {
             NativeSecureStorageModule.NAME -> NativeSecureStorageModule(reactContext)
             NativeCryptoModule.NAME -> NativeCryptoModule(reactContext)
             NativeBiometricVaultModule.NAME -> NativeBiometricVaultModule(reactContext)
+            FlagSecureModule.NAME -> FlagSecureModule(reactContext)
             else -> null
         }
 
@@ -40,6 +41,17 @@ class NativeModulesPackage : BaseReactPackage() {
                 needsEagerInit = false,
                 isCxxModule = false,
                 isTurboModule = true
+            ),
+            // FlagSecureModule is a plain ReactContextBaseJavaModule (not a
+            // TurboModule) because the surface is tiny, Android-only, and the
+            // JS shim resolves it lazily via NativeModules.EnboxFlagSecure.
+            FlagSecureModule.NAME to ReactModuleInfo(
+                name = FlagSecureModule.NAME,
+                className = FlagSecureModule.NAME,
+                canOverrideExistingModule = false,
+                needsEagerInit = false,
+                isCxxModule = false,
+                isTurboModule = false
             )
         )
     }
