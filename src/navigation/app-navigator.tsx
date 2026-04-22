@@ -107,7 +107,9 @@ export function AppNavigator() {
                 <CreatePinScreen
                   onComplete={async (pin) => {
                     await createPin(pin);
-                    await initializeFirstLaunch(pin);
+                    // Biometric-first vault: no password is passed; the
+                    // vault prompts biometrics through the native module.
+                    await initializeFirstLaunch();
                     unlockSession();
                   }}
                 />
@@ -123,16 +125,16 @@ export function AppNavigator() {
                     // 1. Verify the PIN hash
                     const valid = await unlock(pin);
                     if (!valid) return false;
-                    // 2. Unlock the agent vault with the PIN as password
+                    // 2. Unlock the biometric-first vault (prompts biometrics).
                     try {
-                      await unlockAgent(pin);
+                      await unlockAgent();
                       unlockSession();
                       return true;
                     } catch {
                       // Vault unlock failed — re-lock the session
                       lock();
                       teardownAgent();
-                      throw new Error('Wallet vault could not be opened with this PIN.');
+                      throw new Error('Wallet vault could not be opened.');
                     }
                   }}
                 />
