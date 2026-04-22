@@ -3,25 +3,63 @@ import { getInitialRoute } from '@/features/session/get-initial-route';
 describe('getInitialRoute', () => {
   it('routes first-time users to Welcome', () => {
     expect(
-      getInitialRoute({ hasCompletedOnboarding: false, hasPinSet: false, isLocked: true }),
+      getInitialRoute({ hasCompletedOnboarding: false, isLocked: true }),
     ).toBe('Welcome');
   });
 
-  it('routes users without a PIN to CreatePin', () => {
+  it('routes onboarded users to Main', () => {
     expect(
-      getInitialRoute({ hasCompletedOnboarding: true, hasPinSet: false, isLocked: true }),
-    ).toBe('CreatePin');
+      getInitialRoute({ hasCompletedOnboarding: true, isLocked: false }),
+    ).toBe('Main');
   });
 
-  it('routes locked users to Unlock', () => {
+  it('routes biometricStatus=`invalidated` to RecoveryRestore (takes precedence)', () => {
     expect(
-      getInitialRoute({ hasCompletedOnboarding: true, hasPinSet: true, isLocked: true }),
-    ).toBe('Unlock');
+      getInitialRoute({
+        hasCompletedOnboarding: true,
+        isLocked: true,
+        biometricStatus: 'invalidated',
+      }),
+    ).toBe('RecoveryRestore');
   });
 
-  it('routes unlocked users to Main', () => {
+  it('routes biometricStatus=`unavailable` to BiometricUnavailable', () => {
     expect(
-      getInitialRoute({ hasCompletedOnboarding: true, hasPinSet: true, isLocked: false }),
+      getInitialRoute({
+        hasCompletedOnboarding: true,
+        isLocked: true,
+        biometricStatus: 'unavailable',
+      }),
+    ).toBe('BiometricUnavailable');
+  });
+
+  it('routes biometricStatus=`not-enrolled` to BiometricUnavailable', () => {
+    expect(
+      getInitialRoute({
+        hasCompletedOnboarding: false,
+        isLocked: true,
+        biometricStatus: 'not-enrolled',
+      }),
+    ).toBe('BiometricUnavailable');
+  });
+
+  it('falls through to onboarding when biometricStatus=`ready` and onboarding not complete', () => {
+    expect(
+      getInitialRoute({
+        hasCompletedOnboarding: false,
+        isLocked: true,
+        biometricStatus: 'ready',
+      }),
+    ).toBe('Welcome');
+  });
+
+  it('falls through to Main when biometricStatus=`ready` and onboarding complete', () => {
+    expect(
+      getInitialRoute({
+        hasCompletedOnboarding: true,
+        isLocked: false,
+        biometricStatus: 'ready',
+      }),
     ).toBe('Main');
   });
 });

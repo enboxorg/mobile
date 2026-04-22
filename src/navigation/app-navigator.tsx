@@ -3,8 +3,6 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useCallback } from 'react';
 
-import { CreatePinScreen } from '@/features/auth/screens/create-pin-screen';
-import { UnlockScreen } from '@/features/auth/screens/unlock-screen';
 import { ConnectScreen } from '@/features/connect/screens/connect-screen';
 import { WalletConnectRequestScreen } from '@/features/connect/screens/wallet-connect-request-screen';
 import { WalletConnectScannerScreen } from '@/features/connect/screens/wallet-connect-scanner-screen';
@@ -19,8 +17,6 @@ import { createNavigationTheme, useAppTheme } from '@/theme';
 
 type RootStackParamList = {
   Welcome: undefined;
-  CreatePin: undefined;
-  Unlock: undefined;
   WalletConnectRequest: undefined;
   WalletConnectScanner: undefined;
   Main: undefined;
@@ -74,80 +70,44 @@ function MainTabs() {
 
 export function AppNavigator() {
   const theme = useAppTheme();
-  const hasCompletedOnboarding = useSessionStore((s) => s.hasCompletedOnboarding);
-  const hasPinSet = useSessionStore((s) => s.hasPinSet);
-  const isLocked = useSessionStore((s) => s.isLocked);
+  const hasCompletedOnboarding = useSessionStore(
+    (s) => s.hasCompletedOnboarding,
+  );
   const completeOnboarding = useSessionStore((s) => s.completeOnboarding);
-  const createPin = useSessionStore((s) => s.createPin);
-  const unlock = useSessionStore((s) => s.unlock);
-  const unlockSession = useSessionStore((s) => s.unlockSession);
-  const lock = useSessionStore((s) => s.lock);
-  const teardownAgent = useAgentStore((s) => s.teardown);
-  const initializeFirstLaunch = useAgentStore((s) => s.initializeFirstLaunch);
-  const unlockAgent = useAgentStore((s) => s.unlockAgent);
   const pendingWalletRequest = useWalletConnectStore((s) => s.pending);
 
-  const showOnboarding = !hasCompletedOnboarding || !hasPinSet;
-  const showUnlock = hasCompletedOnboarding && hasPinSet && isLocked;
-  const showMain = hasCompletedOnboarding && hasPinSet && !isLocked;
+  // Biometric-first navigation: the dedicated biometric setup / unlock /
+  // unavailable / recovery screens are added by subsequent features in
+  // the onboarding-ux milestone. Until those land, the navigator
+  // transitions Welcome → Main as soon as `hasCompletedOnboarding` flips
+  // so the existing main wallet surface remains reachable.
+  const showOnboarding = !hasCompletedOnboarding;
+  const showMain = hasCompletedOnboarding;
   const showWalletConnectRequest = showMain && !!pendingWalletRequest;
 
   return (
     <NavigationContainer theme={createNavigationTheme(theme)}>
-      <RootStack.Navigator screenOptions={{ headerShown: false, gestureEnabled: false }}>
+      <RootStack.Navigator
+        screenOptions={{ headerShown: false, gestureEnabled: false }}
+      >
         {showOnboarding && (
-          <>
-            {!hasCompletedOnboarding && (
-              <RootStack.Screen name="Welcome">
-                {() => <WelcomeScreen onStart={completeOnboarding} />}
-              </RootStack.Screen>
-            )}
-            <RootStack.Screen name="CreatePin">
-              {() => (
-                <CreatePinScreen
-                  onComplete={async (pin) => {
-                    await createPin(pin);
-                    // Biometric-first vault: no password is passed; the
-                    // vault prompts biometrics through the native module.
-                    await initializeFirstLaunch();
-                    unlockSession();
-                  }}
-                />
-              )}
-            </RootStack.Screen>
-          </>
-        )}
-        {showUnlock && (
-          <RootStack.Screen name="Unlock">
-            {() => (
-                <UnlockScreen
-                  onUnlock={async (pin) => {
-                    // 1. Verify the PIN hash
-                    const valid = await unlock(pin);
-                    if (!valid) return false;
-                    // 2. Unlock the biometric-first vault (prompts biometrics).
-                    try {
-                      await unlockAgent();
-                      unlockSession();
-                      return true;
-                    } catch {
-                      // Vault unlock failed — re-lock the session
-                      lock();
-                      teardownAgent();
-                      throw new Error('Wallet vault could not be opened.');
-                    }
-                  }}
-                />
-              )}
-            </RootStack.Screen>
+          <RootStack.Screen name="Welcome">
+            {() => <WelcomeScreen onStart={completeOnboarding} />}
+          </RootStack.Screen>
         )}
         {showMain && showWalletConnectRequest && (
-          <RootStack.Screen name="WalletConnectRequest" component={WalletConnectRequestScreen} />
+          <RootStack.Screen
+            name="WalletConnectRequest"
+            component={WalletConnectRequestScreen}
+          />
         )}
         {showMain && !showWalletConnectRequest && (
           <>
             <RootStack.Screen name="Main" component={MainTabs} />
-            <RootStack.Screen name="WalletConnectScanner" component={WalletConnectScannerScreen} />
+            <RootStack.Screen
+              name="WalletConnectScanner"
+              component={WalletConnectScannerScreen}
+            />
           </>
         )}
       </RootStack.Navigator>

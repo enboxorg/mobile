@@ -25,15 +25,12 @@ jest.mock('@/lib/storage/secure-storage', () => ({
   deleteSecureItem: jest.fn().mockResolvedValue(undefined),
 }));
 
-jest.mock('@/lib/auth/pin-hash', () => ({
-  hashPin: jest.fn().mockResolvedValue('salt:hash'),
-  verifyPin: jest.fn().mockResolvedValue(false),
-}));
-
 import { getSecureItem } from '@/lib/storage/secure-storage';
 import { useSessionStore } from '@/features/session/session-store';
 
-const mockedGetSecureItem = getSecureItem as jest.MockedFunction<typeof getSecureItem>;
+const mockedGetSecureItem = getSecureItem as jest.MockedFunction<
+  typeof getSecureItem
+>;
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -47,12 +44,8 @@ beforeEach(() => {
   useSessionStore.setState({
     isHydrated: false,
     hasCompletedOnboarding: false,
-    hasPinSet: false,
-    isLocked: true,
     hasIdentity: false,
-    failedAttempts: 0,
-    lockedUntil: null,
-    lockoutCycle: 0,
+    isLocked: true,
     biometricStatus: 'unknown',
   });
 });

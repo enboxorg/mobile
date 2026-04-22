@@ -1,19 +1,18 @@
 export type AppRouteName =
   | 'Welcome'
-  | 'CreatePin'
-  | 'Unlock'
   | 'Main'
   | 'BiometricUnavailable'
   | 'RecoveryRestore';
 
 export interface SessionSnapshot {
   hasCompletedOnboarding: boolean;
-  hasPinSet: boolean;
   isLocked: boolean;
   /**
-   * Optional biometric status propagated from the session store. When
-   * absent, the legacy PIN routing matrix is used (back-compat for the
-   * current PIN-era UI still present in Milestone 3).
+   * Biometric availability gate propagated from the session store. When
+   * `'invalidated'` it forces the recovery-restore flow; `'unavailable'`
+   * and `'not-enrolled'` both route to the BiometricUnavailable gate.
+   * Any other value (including `'unknown'` / `'ready'`) falls through to
+   * the onboarding → main routing based on `hasCompletedOnboarding`.
    */
   biometricStatus?:
     | 'unknown'
@@ -24,8 +23,8 @@ export interface SessionSnapshot {
 }
 
 export function getInitialRoute(snapshot: SessionSnapshot): AppRouteName {
-  // Biometric gates take precedence when a status is supplied. These
-  // gates are authoritative — they block any further routing decisions.
+  // Biometric gates take precedence. These gates are authoritative —
+  // they block any further routing decisions.
   if (snapshot.biometricStatus === 'invalidated') return 'RecoveryRestore';
   if (
     snapshot.biometricStatus === 'unavailable' ||
@@ -34,9 +33,6 @@ export function getInitialRoute(snapshot: SessionSnapshot): AppRouteName {
     return 'BiometricUnavailable';
   }
 
-  // Legacy PIN-era routing (biometric status is 'unknown' or 'ready').
   if (!snapshot.hasCompletedOnboarding) return 'Welcome';
-  if (!snapshot.hasPinSet) return 'CreatePin';
-  if (snapshot.isLocked) return 'Unlock';
   return 'Main';
 }

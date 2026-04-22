@@ -216,12 +216,8 @@ function resetSessionStore() {
   useSessionStore.setState({
     isHydrated: false,
     hasCompletedOnboarding: false,
-    hasPinSet: false,
     isLocked: true,
     hasIdentity: false,
-    failedAttempts: 0,
-    lockedUntil: null,
-    lockoutCycle: 0,
     biometricStatus: 'unknown',
   });
 }

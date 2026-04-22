@@ -1,11 +1,13 @@
-import { useSessionStore } from '@/features/session/session-store';
-import { isValidPinFormat } from '@/lib/auth/pin-format';
-import {
-  getSecureItem,
-  setSecureItem,
-  deleteSecureItem,
-} from '@/lib/storage/secure-storage';
-import { hashPin, verifyPin } from '@/lib/auth/pin-hash';
+/**
+ * Tests for the biometric-first session store. Covers the core state
+ * surface (hydrate, completeOnboarding, unlockSession, lock,
+ * setHasIdentity, setBiometricStatus, reset). Biometric-status hydration
+ * matrix is covered separately in
+ * `src/features/session/__tests__/session-store.biometric-status.test.ts`.
+ */
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const nativeBiometric = require('@specs/NativeBiometricVault').default;
 
 jest.mock('@/lib/storage/secure-storage', () => ({
   getSecureItem: jest.fn().mockResolvedValue(null),
@@ -13,61 +15,52 @@ jest.mock('@/lib/storage/secure-storage', () => ({
   deleteSecureItem: jest.fn().mockResolvedValue(undefined),
 }));
 
-jest.mock('@/lib/auth/pin-hash', () => ({
-  hashPin: jest.fn().mockResolvedValue('salt:hash'),
-  verifyPin: jest.fn().mockResolvedValue(false),
-}));
+import {
+  deleteSecureItem,
+  getSecureItem,
+  setSecureItem,
+} from '@/lib/storage/secure-storage';
+import { useSessionStore } from '@/features/session/session-store';
 
-const mockedGetSecureItem = getSecureItem as jest.MockedFunction<typeof getSecureItem>;
-const mockedSetSecureItem = setSecureItem as jest.MockedFunction<typeof setSecureItem>;
-const mockedDeleteSecureItem = deleteSecureItem as jest.MockedFunction<typeof deleteSecureItem>;
-const mockedHashPin = hashPin as jest.MockedFunction<typeof hashPin>;
-const mockedVerifyPin = verifyPin as jest.MockedFunction<typeof verifyPin>;
+const mockedGetSecureItem = getSecureItem as jest.MockedFunction<
+  typeof getSecureItem
+>;
+const mockedSetSecureItem = setSecureItem as jest.MockedFunction<
+  typeof setSecureItem
+>;
+const mockedDeleteSecureItem = deleteSecureItem as jest.MockedFunction<
+  typeof deleteSecureItem
+>;
 
 beforeEach(() => {
   jest.clearAllMocks();
   mockedGetSecureItem.mockResolvedValue(null);
   mockedSetSecureItem.mockResolvedValue(undefined);
   mockedDeleteSecureItem.mockResolvedValue(undefined);
-  mockedHashPin.mockResolvedValue('salt:hash');
-  mockedVerifyPin.mockResolvedValue(false);
+  nativeBiometric.hasSecret.mockResolvedValue(false);
+  nativeBiometric.isBiometricAvailable.mockResolvedValue({
+    available: true,
+    enrolled: true,
+    type: 'fingerprint',
+  });
   useSessionStore.setState({
     isHydrated: false,
     hasCompletedOnboarding: false,
-    hasPinSet: false,
-    isLocked: true,
     hasIdentity: false,
-    failedAttempts: 0,
-    lockedUntil: null,
-    lockoutCycle: 0,
-  });
-});
-
-describe('isValidPinFormat', () => {
-  it('accepts a 4-digit numeric string', () => {
-    expect(isValidPinFormat('1234')).toBe(true);
-    expect(isValidPinFormat('0000')).toBe(true);
-  });
-
-  it('rejects non-numeric or wrong-length strings', () => {
-    expect(isValidPinFormat('12')).toBe(false);
-    expect(isValidPinFormat('12345')).toBe(false);
-    expect(isValidPinFormat('abcd')).toBe(false);
-    expect(isValidPinFormat('')).toBe(false);
+    isLocked: true,
+    biometricStatus: 'unknown',
   });
 });
 
 describe('useSessionStore', () => {
   describe('hydrate', () => {
-    it('restores hasCompletedOnboarding/hasIdentity from secure storage (post-migration PIN fields are reset)', async () => {
-      // In the biometric-first era, the presence of `auth:pin-hash`
-      // triggers a migration wipe — hasPinSet MUST NOT be restored.
-      // The biometric-era `session:state` payload (without legacy PIN
-      // fields) is still honoured for onboarding/identity flags.
+    it('restores hasCompletedOnboarding/hasIdentity from secure storage', async () => {
       mockedGetSecureItem.mockImplementation(async (key) => {
-        if (key === 'session:state') return JSON.stringify({ hasCompletedOnboarding: true, hasIdentity: true });
-        if (key === 'auth:pin-hash') return 'salt:hash';
-        if (key === 'auth:lockout') return null;
+        if (key === 'session:state')
+          return JSON.stringify({
+            hasCompletedOnboarding: true,
+            hasIdentity: true,
+          });
         return null;
       });
 
@@ -77,85 +70,32 @@ describe('useSessionStore', () => {
       expect(state.isHydrated).toBe(true);
       expect(state.hasCompletedOnboarding).toBe(true);
       expect(state.hasIdentity).toBe(true);
-      // Legacy PIN migration wipes hasPinSet; see VAL-VAULT-029.
-      expect(state.hasPinSet).toBe(false);
     });
 
-    it('handles missing storage gracefully', async () => {
+    it('handles missing storage gracefully (fresh install)', async () => {
       await useSessionStore.getState().hydrate();
       const state = useSessionStore.getState();
       expect(state.isHydrated).toBe(true);
       expect(state.hasCompletedOnboarding).toBe(false);
-      expect(state.hasPinSet).toBe(false);
+      expect(state.hasIdentity).toBe(false);
     });
 
     it('handles corrupt storage gracefully', async () => {
       mockedGetSecureItem.mockResolvedValue('not-json');
       await useSessionStore.getState().hydrate();
       expect(useSessionStore.getState().isHydrated).toBe(true);
-    });
-
-    it('wipes legacy lockout state on hydrate (VAL-VAULT-029 migration)', async () => {
-      mockedGetSecureItem.mockImplementation(async (key) => {
-        if (key === 'auth:lockout') return JSON.stringify({ failedAttempts: 3, lockedUntil: Date.now() - 1000, lockoutCycle: 1 });
-        return null;
-      });
-
-      await useSessionStore.getState().hydrate();
-      // Presence of `auth:lockout` triggers legacy PIN-era migration;
-      // every lockout counter resets to its default.
-      expect(useSessionStore.getState().failedAttempts).toBe(0);
-      expect(useSessionStore.getState().lockedUntil).toBeNull();
-      expect(useSessionStore.getState().lockoutCycle).toBe(0);
-      // And the legacy key itself is removed from storage.
-      expect(mockedDeleteSecureItem).toHaveBeenCalledWith('auth:lockout');
+      expect(useSessionStore.getState().hasCompletedOnboarding).toBe(false);
     });
   });
 
-  describe('createPin', () => {
-    it('hashes and stores the PIN while keeping the session locked until vault init completes', async () => {
-      mockedHashPin.mockResolvedValue('newsalt:newhash');
-      await useSessionStore.getState().createPin('5678');
-
-      expect(mockedHashPin).toHaveBeenCalledWith('5678');
-      expect(mockedSetSecureItem).toHaveBeenCalledWith('auth:pin-hash', 'newsalt:newhash');
-      expect(useSessionStore.getState().hasPinSet).toBe(true);
-      expect(useSessionStore.getState().isLocked).toBe(true);
-    });
-
-    it('rejects invalid PIN format', async () => {
-      await expect(useSessionStore.getState().createPin('ab')).rejects.toThrow('Invalid PIN format');
-    });
-  });
-
-  describe('unlock', () => {
-    it('unlocks with a correct PIN', async () => {
-      mockedGetSecureItem.mockImplementation(async (key) => {
-        if (key === 'auth:pin-hash') return 'salt:hash';
-        return null;
-      });
-      mockedVerifyPin.mockResolvedValue(true);
-
-      const result = await useSessionStore.getState().unlock('1234');
-      expect(result).toBe(true);
-      expect(useSessionStore.getState().isLocked).toBe(true);
-    });
-
-    it('rejects a wrong PIN and increments failed attempts', async () => {
-      mockedGetSecureItem.mockImplementation(async (key) => {
-        if (key === 'auth:pin-hash') return 'salt:hash';
-        return null;
-      });
-
-      const result = await useSessionStore.getState().unlock('0000');
-      expect(result).toBe(false);
-      expect(useSessionStore.getState().failedAttempts).toBe(1);
-    });
-
-    it('rejects invalid PIN format without hitting storage', async () => {
-      const result = await useSessionStore.getState().unlock('ab');
-      expect(result).toBe(false);
-      expect(mockedGetSecureItem).not.toHaveBeenCalled();
+  describe('completeOnboarding', () => {
+    it('marks onboarding complete and persists the session payload', () => {
+      useSessionStore.getState().completeOnboarding();
+      expect(useSessionStore.getState().hasCompletedOnboarding).toBe(true);
+      expect(mockedSetSecureItem).toHaveBeenCalledWith(
+        'session:state',
+        expect.stringContaining('"hasCompletedOnboarding":true'),
+      );
     });
   });
 
@@ -170,25 +110,34 @@ describe('useSessionStore', () => {
     });
   });
 
-  describe('unlockSession', () => {
-    it('marks the session unlocked after the vault is ready', () => {
+  describe('unlockSession / lock', () => {
+    it('unlocks and re-locks the session', () => {
       useSessionStore.getState().unlockSession();
       expect(useSessionStore.getState().isLocked).toBe(false);
+      useSessionStore.getState().lock();
+      expect(useSessionStore.getState().isLocked).toBe(true);
     });
   });
 
   describe('reset', () => {
-    it('clears all persisted state', async () => {
+    it('clears persisted state and the biometric-state flag', async () => {
       useSessionStore.getState().completeOnboarding();
+      useSessionStore.getState().setBiometricStatus('ready');
       await useSessionStore.getState().reset();
 
       const state = useSessionStore.getState();
       expect(state.hasCompletedOnboarding).toBe(false);
-      expect(state.hasPinSet).toBe(false);
+      expect(state.hasIdentity).toBe(false);
       expect(state.isLocked).toBe(true);
-      expect(state.lockoutCycle).toBe(0);
-      expect(mockedDeleteSecureItem).toHaveBeenCalledWith('auth:pin-hash');
-      expect(mockedDeleteSecureItem).toHaveBeenCalledWith('auth:lockout');
+      expect(state.biometricStatus).toBe('unknown');
+
+      const deletedKeys = mockedDeleteSecureItem.mock.calls.map(([k]) => k);
+      expect(deletedKeys).toEqual(
+        expect.arrayContaining([
+          'session:state',
+          'enbox:enbox.vault.biometric-state',
+        ]),
+      );
     });
   });
 });
