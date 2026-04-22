@@ -2,15 +2,15 @@ import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/ui/screen';
 import { ScreenHeader } from '@/components/ui/screen-header';
+import { useSessionStore } from '@/features/session/session-store';
 import { useAgentStore } from '@/lib/enbox/agent-store';
 import { useAppTheme, type AppTheme } from '@/theme';
 
 export interface SettingsScreenProps {
   onLock: () => void;
-  onReset?: () => Promise<void>;
 }
 
-export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
+export function SettingsScreen({ onLock }: SettingsScreenProps) {
   const theme = useAppTheme();
   const agent = useAgentStore((s) => s.agent);
   const identityCount = useAgentStore((s) => s.identities.length);
@@ -18,13 +18,47 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
 
   const agentDid = agent?.agentDid?.uri;
 
+  async function performReset(): Promise<void> {
+    // Delegates to agentStore.reset which, in documented order,
+    // calls NativeBiometricVault.deleteSecret + wipes the on-disk
+    // ENBOX_AGENT LevelDB + tears down the in-memory agent store +
+    // resets the session store. This is the same primitive surfaced
+    // by the recovery-restore flow, kept as a single orchestration
+    // point so Settings cannot drift from it (VAL-UX-036).
+    try {
+      await useAgentStore.getState().reset();
+    } catch (err) {
+      console.warn('[settings] reset wallet failed (continuing):', err);
+    }
+    // sessionStore.reset() leaves biometricStatus as `'unknown'`
+    // which would route the navigator to `Loading`. Re-run hydrate
+    // so biometric hardware is re-probed and routing returns to
+    // `Welcome` (first-launch flow) per VAL-UX-036. Best-effort —
+    // any failure is logged but must not throw out of the alert
+    // confirmation handler.
+    try {
+      await useSessionStore.getState().hydrate();
+    } catch (err) {
+      console.warn('[settings] post-reset hydrate failed:', err);
+    }
+  }
+
   function handleReset() {
     Alert.alert(
       'Reset wallet',
-      'This will erase all data including your identities and PIN. This cannot be undone.',
+      'This will erase your biometric-protected wallet, the biometric secret stored on this device, and all identities. This cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Reset', style: 'destructive', onPress: () => onReset?.() },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: () => {
+            performReset().catch(() => {
+              // performReset already logs its own failures; swallow
+              // here so the alert-button handler stays synchronous.
+            });
+          },
+        },
       ],
     );
   }
@@ -67,7 +101,6 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
           Security
         </Text>
         <SettingsRow label="Lock wallet" onPress={onLock} theme={theme} />
-        <SettingsRow label="Change PIN" disabled onPress={() => {}} theme={theme} />
         <SettingsRow label="Biometric unlock" disabled onPress={() => {}} theme={theme} />
       </View>
 
@@ -79,14 +112,12 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
         <SettingsRow label="Import backup" disabled onPress={() => {}} theme={theme} />
       </View>
 
-      {onReset && (
-        <View style={[styles.section, { borderColor: theme.colors.border }]}>
-          <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
-            Danger zone
-          </Text>
-          <SettingsRow label="Reset wallet" destructive onPress={handleReset} theme={theme} />
-        </View>
-      )}
+      <View style={[styles.section, { borderColor: theme.colors.border }]}>
+        <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
+          Danger zone
+        </Text>
+        <SettingsRow label="Reset wallet" destructive onPress={handleReset} theme={theme} />
+      </View>
     </Screen>
   );
 }

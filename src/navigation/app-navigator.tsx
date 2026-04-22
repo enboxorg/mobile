@@ -76,17 +76,15 @@ function LoadingScreen() {
 function MainTabs() {
   const theme = useAppTheme();
   const lock = useSessionStore((s) => s.lock);
-  const reset = useSessionStore((s) => s.reset);
-  const teardownAgent = useAgentStore((s) => s.teardown);
 
-  const handleReset = useCallback(async () => {
-    teardownAgent();
-    await reset();
-  }, [teardownAgent, reset]);
-
+  // SettingsScreen orchestrates the full reset flow internally —
+  // `useAgentStore.getState().reset()` wipes the biometric secret,
+  // the on-disk LevelDB, the in-memory agent, and the session store,
+  // then triggers a fresh `useSessionStore.hydrate()` so the navigator
+  // routes back to `Welcome`. No wrapper needed here (VAL-UX-036).
   const renderSettings = useCallback(
-    () => <SettingsScreen onLock={lock} onReset={handleReset} />,
-    [lock, handleReset],
+    () => <SettingsScreen onLock={lock} />,
+    [lock],
   );
 
   return (
