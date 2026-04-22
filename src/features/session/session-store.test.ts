@@ -59,7 +59,11 @@ describe('isValidPinFormat', () => {
 
 describe('useSessionStore', () => {
   describe('hydrate', () => {
-    it('restores persisted state from secure storage', async () => {
+    it('restores hasCompletedOnboarding/hasIdentity from secure storage (post-migration PIN fields are reset)', async () => {
+      // In the biometric-first era, the presence of `auth:pin-hash`
+      // triggers a migration wipe — hasPinSet MUST NOT be restored.
+      // The biometric-era `session:state` payload (without legacy PIN
+      // fields) is still honoured for onboarding/identity flags.
       mockedGetSecureItem.mockImplementation(async (key) => {
         if (key === 'session:state') return JSON.stringify({ hasCompletedOnboarding: true, hasIdentity: true });
         if (key === 'auth:pin-hash') return 'salt:hash';
@@ -73,7 +77,8 @@ describe('useSessionStore', () => {
       expect(state.isHydrated).toBe(true);
       expect(state.hasCompletedOnboarding).toBe(true);
       expect(state.hasIdentity).toBe(true);
-      expect(state.hasPinSet).toBe(true);
+      // Legacy PIN migration wipes hasPinSet; see VAL-VAULT-029.
+      expect(state.hasPinSet).toBe(false);
     });
 
     it('handles missing storage gracefully', async () => {
@@ -90,16 +95,20 @@ describe('useSessionStore', () => {
       expect(useSessionStore.getState().isHydrated).toBe(true);
     });
 
-    it('clears expired lockout on hydrate', async () => {
+    it('wipes legacy lockout state on hydrate (VAL-VAULT-029 migration)', async () => {
       mockedGetSecureItem.mockImplementation(async (key) => {
         if (key === 'auth:lockout') return JSON.stringify({ failedAttempts: 3, lockedUntil: Date.now() - 1000, lockoutCycle: 1 });
         return null;
       });
 
       await useSessionStore.getState().hydrate();
+      // Presence of `auth:lockout` triggers legacy PIN-era migration;
+      // every lockout counter resets to its default.
       expect(useSessionStore.getState().failedAttempts).toBe(0);
       expect(useSessionStore.getState().lockedUntil).toBeNull();
-      expect(useSessionStore.getState().lockoutCycle).toBe(1);
+      expect(useSessionStore.getState().lockoutCycle).toBe(0);
+      // And the legacy key itself is removed from storage.
+      expect(mockedDeleteSecureItem).toHaveBeenCalledWith('auth:lockout');
     });
   });
 

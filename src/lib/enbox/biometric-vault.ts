@@ -703,6 +703,53 @@ export class BiometricVault
     this._clearInMemoryState();
   }
 
+  /**
+   * Wipe the biometric-gated native secret and all in-memory / persisted
+   * vault state. Idempotent — callable repeatedly even after the secret is
+   * already gone. Callers use this as part of "Reset wallet" flows and
+   * after recovery-phrase restore to re-arm biometric protection.
+   *
+   * Intentionally does NOT throw when the native secret is absent — the
+   * goal is to leave the vault in a clean, uninitialized state regardless
+   * of the starting point.
+   */
+  async reset(): Promise<void> {
+    // 1. Delete the biometric-gated native secret. Best-effort — if
+    //    deletion fails we still clear in-memory state below so the
+    //    caller isn't stuck holding stale data.
+    try {
+      await this._native.deleteSecret(WALLET_ROOT_KEY_ALIAS);
+    } catch {
+      // Native modules treat missing-alias deletes as success; any other
+      // error is logged by the native layer. Swallow here so reset stays
+      // idempotent.
+    }
+
+    // 2. Clear SecureStorage flags so `isInitialized()` correctly
+    //    reports `false` on the next call and so a future app launch
+    //    cannot spuriously restore a stale `invalidated` biometric state.
+    if (this._secureStorage) {
+      try {
+        await this._secureStorage.remove(INITIALIZED_STORAGE_KEY);
+      } catch {
+        // best-effort
+      }
+      try {
+        await this._secureStorage.remove(BIOMETRIC_STATE_STORAGE_KEY);
+      } catch {
+        // best-effort
+      }
+    }
+
+    // 3. Clear in-memory derived material + reset the biometric state
+    //    machine to "unknown" so the next hydrate / initialize starts
+    //    fresh.
+    this._clearInMemoryState();
+    this._biometricState = 'unknown';
+    this._lastBackup = null;
+    this._lastRestore = null;
+  }
+
   async getDid(): Promise<BearerDid> {
     if (this.isLocked() || !this._bearerDid) {
       throw new VaultError('VAULT_ERROR_LOCKED', 'Vault is locked');

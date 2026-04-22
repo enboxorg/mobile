@@ -15,11 +15,19 @@ import { create } from 'zustand';
 import type { EnboxUserAgent, BearerIdentity } from '@enbox/agent';
 import type { AuthManager } from '@enbox/auth';
 
+import NativeBiometricVault from '@specs/NativeBiometricVault';
+
 import { initializeAgent } from './agent-init';
-import type { BiometricVault } from './biometric-vault';
+import {
+  BiometricVault,
+  WALLET_ROOT_KEY_ALIAS,
+  type BiometricState,
+} from './biometric-vault';
 
 /** Error code emitted by the biometric vault when the OS cannot satisfy a biometric prompt. */
 const BIOMETRICS_UNAVAILABLE_CODE = 'VAULT_ERROR_BIOMETRICS_UNAVAILABLE';
+/** Error code emitted by the biometric vault when the key was invalidated by the OS. */
+const KEY_INVALIDATED_CODE = 'VAULT_ERROR_KEY_INVALIDATED';
 
 export interface AgentStore {
   agent: EnboxUserAgent | null;
@@ -27,6 +35,13 @@ export interface AgentStore {
   vault: BiometricVault | null;
   isInitializing: boolean;
   error: string | null;
+  /**
+   * Last observed biometric state surfaced by the native vault. Stays
+   * `null` until the vault reports a definitive state or a flow observes
+   * a key-invalidated error. Consumers gate onboarding/restore UI on
+   * `'invalidated'` / `'not-enrolled'` / `'unavailable'`.
+   */
+  biometricState: BiometricState | null;
   recoveryPhrase: string | null;
   identities: BearerIdentity[];
 
@@ -49,11 +64,29 @@ export interface AgentStore {
   /** Clear the last agent error. */
   clearError: () => void;
 
+  /**
+   * Clear the one-shot recovery phrase from the store. Must be called by
+   * the UI after the user confirms they have backed up the phrase so the
+   * 24 words are no longer resident in JS memory.
+   */
+  clearRecoveryPhrase: () => void;
+
   /** Create a new identity. */
   createIdentity: (name: string) => Promise<BearerIdentity>;
 
   /** Tear down agent (on lock or reset). */
   teardown: () => void;
+
+  /**
+   * Full wallet reset. Deletes the biometric-gated native secret, clears
+   * the in-memory agent store (`teardown`), and clears persisted session
+   * state (`useSessionStore.reset`). Idempotent — safe to call multiple
+   * times even if no vault is initialized.
+   *
+   * After reset, a subsequent `initializeFirstLaunch()` starts onboarding
+   * from scratch and will yield a new (different) mnemonic and DID.
+   */
+  reset: () => Promise<void>;
 }
 
 /**
@@ -80,6 +113,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   vault: null,
   isInitializing: false,
   error: null,
+  biometricState: null,
   recoveryPhrase: null,
   identities: [],
 
@@ -106,7 +140,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         recoveryPhrase = '';
       }
 
-      set({ agent, authManager, vault, isInitializing: false, recoveryPhrase });
+      set({
+        agent,
+        authManager,
+        vault,
+        isInitializing: false,
+        recoveryPhrase,
+        biometricState: 'ready',
+      });
       get().refreshIdentities().catch(() => {});
       return recoveryPhrase;
     } catch (err) {
@@ -117,12 +158,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       } else {
         console.error('[agent-store] first launch failed:', message);
       }
+      let nextBiometricState = get().biometricState;
+      if (code === BIOMETRICS_UNAVAILABLE_CODE) {
+        nextBiometricState = 'unavailable';
+      } else if (code === KEY_INVALIDATED_CODE) {
+        nextBiometricState = 'invalidated';
+      }
       set({
         error: message,
         isInitializing: false,
         agent: null,
         authManager: null,
         vault: null,
+        biometricState: nextBiometricState,
       });
       throw err;
     }
@@ -138,7 +186,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // upstream `AgentStartParams` TypeScript shape.
       await agent.start({ password: '' });
       console.log('[agent-store] vault started.');
-      set({ agent, authManager, vault, isInitializing: false });
+      set({
+        agent,
+        authManager,
+        vault,
+        isInitializing: false,
+        biometricState: 'ready',
+      });
 
       get().refreshIdentities().catch(() => {});
     } catch (err) {
@@ -146,8 +200,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const message = messageFromError(err, 'Agent unlock failed');
       if (code === BIOMETRICS_UNAVAILABLE_CODE) {
         console.warn('[agent-store] unlock blocked: biometrics unavailable');
+      } else if (code === KEY_INVALIDATED_CODE) {
+        console.warn('[agent-store] unlock blocked: biometric key invalidated');
       } else {
         console.error('[agent-store] unlock failed:', message);
+      }
+      let nextBiometricState = get().biometricState;
+      if (code === BIOMETRICS_UNAVAILABLE_CODE) {
+        nextBiometricState = 'unavailable';
+      } else if (code === KEY_INVALIDATED_CODE) {
+        nextBiometricState = 'invalidated';
       }
       set({
         error: message,
@@ -155,6 +217,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         agent: null,
         authManager: null,
         vault: null,
+        biometricState: nextBiometricState,
       });
       throw err;
     }
@@ -174,6 +237,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   clearError: () => {
     set({ error: null });
+  },
+
+  clearRecoveryPhrase: () => {
+    set({ recoveryPhrase: null });
   },
 
   createIdentity: async (name) => {
@@ -200,5 +267,46 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       recoveryPhrase: null,
       identities: [],
     });
+  },
+
+  reset: async () => {
+    const { vault } = get();
+
+    // 1. Wipe the biometric-gated native secret. Use the vault's own
+    //    reset() when available (also clears vault SecureStorage flags);
+    //    fall back to a direct native deleteSecret call so reset remains
+    //    useful even if the vault was never constructed (e.g. after a
+    //    corrupt-start scenario).
+    if (vault) {
+      try {
+        await vault.reset();
+      } catch (err) {
+        console.warn('[agent-store] reset: vault.reset failed:', err);
+      }
+    } else {
+      try {
+        await NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS);
+      } catch (err) {
+        console.warn(
+          '[agent-store] reset: native deleteSecret failed (ignored):',
+          err,
+        );
+      }
+    }
+
+    // 2. Tear down the in-memory agent / authManager / vault state and
+    //    null out the one-shot recovery phrase if it was still held.
+    get().teardown();
+
+    // 3. Clear persisted session state + PIN-era storage artefacts. The
+    //    import lives inside the function to avoid a circular import at
+    //    module load time (session-store ↔ agent-store).
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { useSessionStore } = require('@/features/session/session-store');
+      await useSessionStore.getState().reset();
+    } catch (err) {
+      console.warn('[agent-store] reset: session-store reset failed:', err);
+    }
   },
 }));
