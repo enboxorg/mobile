@@ -1,0 +1,248 @@
+{
+  "groupId": "recovery-reset",
+  "milestone": "biometric-vault-js",
+  "surface": "jest-local",
+  "assertions": [
+    {
+      "id": "VAL-VAULT-022",
+      "status": "pass",
+      "reason": "Targeted Jest coverage confirmed reset deletes the biometric-gated native secret, clears in-memory and persisted vault state, makes isInitialized() return false, and higher-level agent-store reset tears down session state as well.",
+      "evidence": {
+        "tests": [
+          "src/lib/enbox/__tests__/biometric-vault.reset.test.ts :: deletes the biometric-gated native secret, clears in-memory state, and flips isInitialized to false",
+          "src/lib/enbox/__tests__/biometric-vault.reset.test.ts :: is idempotent \u2014 a second reset still calls deleteSecret and does not throw",
+          "src/lib/enbox/__tests__/agent-store.recoveryPhrase.test.ts :: calls NativeBiometricVault.deleteSecret, tears down the agent, and resets the session store"
+        ],
+        "codeInspection": [
+          "src/lib/enbox/biometric-vault.ts:758-789 deletes WALLET_ROOT_KEY_ALIAS, removes initialized/biometric-state flags, and clears in-memory state.",
+          "src/lib/enbox/agent-store.ts:302-360 routes reset through vault/native deletion, LevelDB wipe, teardown, and session-store reset."
+        ],
+        "evidenceNotes": [
+          "biometric-vault-js/recovery-reset/jest-evidence.md"
+        ],
+        "commands": [
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.reset.test.ts",
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/agent-store.recoveryPhrase.test.ts -t \"VAL-VAULT-022\""
+        ]
+      }
+    },
+    {
+      "id": "VAL-VAULT-023",
+      "status": "pass",
+      "reason": "Jest invalidation coverage showed KEY_INVALIDATED persists biometricState=invalidated across vault instances without prompting again, and code inspection confirmed agent-store exposes that invalidated state to consumers on both initialize and unlock failures.",
+      "evidence": {
+        "tests": [
+          "src/lib/enbox/__tests__/biometric-vault.invalidation.test.ts :: persists the `invalidated` state via SecureStorage on KEY_INVALIDATED unlock",
+          "src/lib/enbox/__tests__/biometric-vault.invalidation.test.ts :: a fresh BiometricVault instance reads the persisted flag without prompting biometrics"
+        ],
+        "codeInspection": [
+          "src/lib/enbox/biometric-vault.ts:601-603 and 704-706 persist the invalidated state when KEY_INVALIDATED is observed.",
+          "src/lib/enbox/agent-store.ts:181-193 and 234-245 translate VAULT_ERROR_KEY_INVALIDATED into biometricState = invalidated for store consumers."
+        ],
+        "evidenceNotes": [
+          "biometric-vault-js/recovery-reset/jest-evidence.md"
+        ],
+        "commands": [
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.invalidation.test.ts"
+        ]
+      }
+    },
+    {
+      "id": "VAL-VAULT-024",
+      "status": "pass",
+      "reason": "Compile-time and runtime surface checks both passed: tsc accepted the dedicated IdentityVault fixture, and the targeted Jest suite verified the BiometricVault instance exposes the expected IdentityVault methods.",
+      "evidence": {
+        "tests": [
+          "src/lib/enbox/__tests__/biometric-vault.test.ts :: exposes every IdentityVault method",
+          "src/lib/enbox/__tests__/biometric-vault.test.ts :: VaultError propagates its .code through Promise rejections"
+        ],
+        "typeFixtures": [
+          "src/lib/enbox/__tests__/biometric-vault.types.test-d.ts"
+        ],
+        "evidenceNotes": [
+          "biometric-vault-js/recovery-reset/jest-evidence.md"
+        ],
+        "commands": [
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.test.ts -t \"mnemonic contract|IdentityVault conformance|does not persist recovery phrase through its own SecureStorage|partial-init recovery|mutex\"",
+          "cd \"/home/liran/src/enboxorg/mobile\" && bun run typecheck"
+        ]
+      }
+    },
+    {
+      "id": "VAL-VAULT-025",
+      "status": "pass",
+      "reason": "The current stores do not use zustand persist middleware, and targeted tests confirmed neither the vault nor agent-store writes the recovery phrase to storage during first launch.",
+      "evidence": {
+        "tests": [
+          "src/lib/enbox/__tests__/biometric-vault.test.ts :: never writes the recovery phrase to its SecureStorage",
+          "src/lib/enbox/__tests__/agent-store.recoveryPhrase.test.ts :: NEVER writes the mnemonic to SecureStorage during first-launch",
+          "src/lib/enbox/__tests__/agent-store.recoveryPhrase.test.ts :: zustand agent store exposes NO persistence middleware (regression guard)"
+        ],
+        "codeInspection": [
+          "No persist/partialize references were found in src/lib/enbox/agent-store.ts.",
+          "No persist/partialize references were found in src/features/session/session-store.ts."
+        ],
+        "evidenceNotes": [
+          "biometric-vault-js/recovery-reset/jest-evidence.md"
+        ],
+        "commands": [
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.test.ts -t \"mnemonic contract|IdentityVault conformance|does not persist recovery phrase through its own SecureStorage|partial-init recovery|mutex\"",
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/agent-store.recoveryPhrase.test.ts -t \"NEVER writes the mnemonic to SecureStorage during first-launch|zustand agent store exposes NO persistence middleware\""
+        ]
+      }
+    },
+    {
+      "id": "VAL-VAULT-026",
+      "status": "pass",
+      "reason": "Targeted mnemonic-contract coverage passed and showed initialize() returns a valid 24-word mnemonic on repeated derivations, matching the fixed 256-bit entropy requirement.",
+      "evidence": {
+        "tests": [
+          "src/lib/enbox/__tests__/biometric-vault.test.ts :: returns a non-empty valid BIP-39 mnemonic and leaves the vault unlocked",
+          "src/lib/enbox/__tests__/biometric-vault.test.ts :: produces a deterministic 24-word mnemonic from the stored 32-byte secret"
+        ],
+        "evidenceNotes": [
+          "biometric-vault-js/recovery-reset/jest-evidence.md"
+        ],
+        "commands": [
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.test.ts -t \"mnemonic contract|IdentityVault conformance|does not persist recovery phrase through its own SecureStorage|partial-init recovery|mutex\""
+        ]
+      }
+    },
+    {
+      "id": "VAL-VAULT-027",
+      "status": "fail",
+      "reason": "Current behavior does not match the contract: after generateAndStoreSecret succeeds, a later initialize() failure is intentionally left without rollback. The targeted Jest suite explicitly asserts deleteSecret is NOT called and isInitialized() remains true, while code comments state the vault deliberately keeps the native secret instead of deleting it.",
+      "evidence": {
+        "tests": [
+          "src/lib/enbox/__tests__/biometric-vault.test.ts :: does NOT call deleteSecret if local derivation throws after provisioning succeeded",
+          "src/lib/enbox/__tests__/biometric-vault.test.ts :: still surfaces a native-side generateAndStoreSecret failure without calling deleteSecret"
+        ],
+        "codeInspection": [
+          "src/lib/enbox/biometric-vault.ts:614-617 explicitly documents that post-provision local derivation failures deliberately do NOT call deleteSecret().",
+          "src/lib/enbox/biometric-vault.ts:760 shows deleteSecret is only called in reset(), not during initialize() rollback."
+        ],
+        "evidenceNotes": [
+          "biometric-vault-js/recovery-reset/jest-evidence.md"
+        ],
+        "commands": [
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.test.ts -t \"mnemonic contract|IdentityVault conformance|does not persist recovery phrase through its own SecureStorage|partial-init recovery|mutex\""
+        ]
+      }
+    },
+    {
+      "id": "VAL-VAULT-028",
+      "status": "pass",
+      "reason": "Targeted mutex coverage passed and confirmed overlapping initialize() and unlock() calls share a single in-flight operation, with generateAndStoreSecret/getSecret each invoked at most once.",
+      "evidence": {
+        "tests": [
+          "src/lib/enbox/__tests__/biometric-vault.test.ts :: serializes concurrent initialize() calls: generateAndStoreSecret is called at most once",
+          "src/lib/enbox/__tests__/biometric-vault.test.ts :: serializes concurrent unlock() calls: getSecret is called at most once"
+        ],
+        "evidenceNotes": [
+          "biometric-vault-js/recovery-reset/jest-evidence.md"
+        ],
+        "commands": [
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.test.ts -t \"mnemonic contract|IdentityVault conformance|does not persist recovery phrase through its own SecureStorage|partial-init recovery|mutex\""
+        ]
+      }
+    },
+    {
+      "id": "VAL-VAULT-029",
+      "status": "pass",
+      "reason": "The dedicated migration suite passed and verified hydrate() deletes legacy PIN-era keys, re-persists a clean session payload, and routes migrated users away from stale PIN screens into recovery/unavailable flows.",
+      "evidence": {
+        "tests": [
+          "src/features/session/__tests__/session-store.migration.test.ts :: wipes all three legacy storage keys when seeded with a full legacy state",
+          "src/features/session/__tests__/session-store.migration.test.ts :: re-persists a clean session payload without PIN fields after migration",
+          "src/features/session/__tests__/session-store.migration.test.ts :: routes a legacy PIN user with hasCompletedOnboarding to RecoveryRestore (not CreatePin/Unlock)"
+        ],
+        "codeInspection": [
+          "src/features/session/session-store.ts:227-246 detects legacy PIN-era state and deletes the legacy keys.",
+          "src/features/session/session-store.ts:292-296 upgrades migrated legacy users to biometricStatus = invalidated instead of silently routing to ready."
+        ],
+        "evidenceNotes": [
+          "biometric-vault-js/recovery-reset/jest-evidence.md"
+        ],
+        "commands": [
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/features/session/__tests__/session-store.migration.test.ts"
+        ]
+      }
+    },
+    {
+      "id": "VAL-VAULT-030",
+      "status": "pass",
+      "reason": "The biometric-status hydration suite passed and showed fingerprint removal maps to not-enrolled, persisted invalidation stays distinct, and reset clears the status back to unknown.",
+      "evidence": {
+        "tests": [
+          "src/features/session/__tests__/session-store.biometric-status.test.ts :: sets biometricStatus=`not-enrolled` when hardware exists but no biometrics enrolled (with existing secret)",
+          "src/features/session/__tests__/session-store.biometric-status.test.ts :: honors a persisted `invalidated` flag regardless of native probe result",
+          "src/features/session/__tests__/session-store.biometric-status.test.ts :: reset() clears biometricStatus back to `unknown` and removes the persisted flag"
+        ],
+        "codeInspection": [
+          "src/features/session/session-store.ts:265-276 distinguishes invalidated, unavailable, and not-enrolled states during hydrate.",
+          "src/features/session/session-store.ts:415-423 clears the persisted biometric-state flag during reset."
+        ],
+        "evidenceNotes": [
+          "biometric-vault-js/recovery-reset/jest-evidence.md"
+        ],
+        "commands": [
+          "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/features/session/__tests__/session-store.biometric-status.test.ts"
+        ]
+      }
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.reset.test.ts",
+      "exitCode": 0,
+      "observation": "PASS; 3 reset tests passed, confirming native secret deletion, state teardown, and idempotent repeat reset behavior."
+    },
+    {
+      "command": "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.invalidation.test.ts",
+      "exitCode": 0,
+      "observation": "PASS; 4 invalidation tests passed, confirming invalidated-state persistence, fresh-process restore, and reset clearing of the persisted flag."
+    },
+    {
+      "command": "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/biometric-vault.test.ts -t \"mnemonic contract|IdentityVault conformance|does not persist recovery phrase through its own SecureStorage|partial-init recovery|mutex\"",
+      "exitCode": 0,
+      "observation": "PASS; 10 targeted biometric-vault tests passed, covering 24-word mnemonic behavior, IdentityVault surface, no phrase persistence, current partial-init semantics, and mutex serialization."
+    },
+    {
+      "command": "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/agent-store.recoveryPhrase.test.ts -t \"NEVER writes the mnemonic to SecureStorage during first-launch|zustand agent store exposes NO persistence middleware\"",
+      "exitCode": 0,
+      "observation": "PASS; 2 targeted agent-store tests passed, confirming the mnemonic is not written to SecureStorage and no zustand persist middleware is present."
+    },
+    {
+      "command": "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/lib/enbox/__tests__/agent-store.recoveryPhrase.test.ts -t \"VAL-VAULT-022\"",
+      "exitCode": 0,
+      "observation": "PASS; 2 targeted reset orchestration tests passed, confirming useAgentStore.reset deletes the native secret, tears down store state, and resets the session store."
+    },
+    {
+      "command": "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/features/session/__tests__/session-store.migration.test.ts",
+      "exitCode": 0,
+      "observation": "PASS; 5 migration tests passed, confirming hydrate removes legacy PIN-era state and routes away from stale PIN screens."
+    },
+    {
+      "command": "cd \"/home/liran/src/enboxorg/mobile\" && bunx jest --runInBand src/features/session/__tests__/session-store.biometric-status.test.ts",
+      "exitCode": 0,
+      "observation": "PASS; 7 biometric-status tests passed, confirming not-enrolled and invalidated states stay distinct during hydrate/reset flows."
+    },
+    {
+      "command": "cd \"/home/liran/src/enboxorg/mobile\" && bun run typecheck",
+      "exitCode": 0,
+      "observation": "PASS; tsc --noEmit completed cleanly, including src/lib/enbox/__tests__/biometric-vault.types.test-d.ts."
+    }
+  ],
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "bunx jest",
+    "bun run typecheck"
+  ],
+  "frictions": [
+    "VAL-VAULT-022 contract prose still describes deleteSecret({ keyId: ... }), but the current NativeBiometricVault surface/spec and passing tests use deleteSecret('enbox.wallet.root') with a string alias.",
+    "VAL-VAULT-027 contract text expects rollback deletion after post-provision failures, but the current implementation and test suite intentionally pin the opposite behavior; this was recorded as a fail rather than treated as blocked."
+  ],
+  "blockers": [],
+  "summary": "Validated 9 recovery/reset/type/migration assertions on the jest-local surface: 8 passed (VAL-VAULT-022, 023, 024, 025, 026, 028, 029, 030) and 1 failed (VAL-VAULT-027)."
+}

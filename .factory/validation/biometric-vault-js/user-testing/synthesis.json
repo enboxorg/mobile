@@ -1,0 +1,55 @@
+{
+  "milestone": "biometric-vault-js",
+  "round": 1,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 28,
+    "passed": 27,
+    "failed": 1,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-VAULT-001",
+    "VAL-VAULT-002",
+    "VAL-VAULT-003",
+    "VAL-VAULT-004",
+    "VAL-VAULT-005",
+    "VAL-VAULT-006",
+    "VAL-VAULT-007",
+    "VAL-VAULT-008",
+    "VAL-VAULT-009",
+    "VAL-VAULT-010",
+    "VAL-VAULT-011",
+    "VAL-VAULT-012",
+    "VAL-VAULT-013",
+    "VAL-VAULT-014",
+    "VAL-VAULT-015",
+    "VAL-VAULT-016",
+    "VAL-VAULT-017",
+    "VAL-VAULT-018",
+    "VAL-VAULT-019",
+    "VAL-VAULT-022",
+    "VAL-VAULT-023",
+    "VAL-VAULT-024",
+    "VAL-VAULT-025",
+    "VAL-VAULT-026",
+    "VAL-VAULT-028",
+    "VAL-VAULT-029",
+    "VAL-VAULT-030"
+  ],
+  "failedAssertions": [
+    {
+      "id": "VAL-VAULT-027",
+      "reason": "Current behavior does not match the contract: after generateAndStoreSecret succeeds, a later initialize() failure is intentionally left without rollback. The targeted Jest suite explicitly asserts deleteSecret is NOT called and isInitialized() remains true, while code comments state the vault deliberately keeps the native secret instead of deleting it."
+    }
+  ],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Documented that biometric-vault-js VAL-VAULT evidence primarily comes from the consolidated src/lib/enbox/__tests__/biometric-vault.test.ts and its focused companion test files.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}

@@ -49,6 +49,7 @@ The contract file `validation-contract.md` labels each assertion with its `Tool:
 - **VAL-NATIVE-007..021, 037..042 (iOS / Android native)**: CI build success (`ci.yml`) + code-level grep of implementation files. No runtime biometric exercise from the validator — enforced by build + static checks.
 - **VAL-NATIVE-022..030, 033..036 (JS wrapper)**: Jest.
 - **VAL-VAULT-\***: Jest (against mocked NativeBiometricVault).
+- **biometric-vault-js note:** most local `VAL-VAULT-*` evidence currently lives in the consolidated `src/lib/enbox/__tests__/biometric-vault.test.ts` plus focused companions like `biometric-vault.lock.test.ts`, `biometric-vault.reset.test.ts`, and `biometric-vault.invalidation.test.ts`, even where the contract prose names split test files.
 - **VAL-UX-\***: Jest component tests (`@testing-library/react-native`).
 - **VAL-CI-\***: CI emulator + artifact inspection (milestone 5 only).
 - **VAL-CROSS-001..010, 013, 014**: Jest RTL integration tests + file grep.
