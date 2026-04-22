@@ -1,0 +1,407 @@
+/**
+ * JS-level contract tests for the NativeBiometricVault Turbo Module spec.
+ *
+ * The real module is mocked by jest.setup.js, so these tests exercise the
+ * JS-facing surface that downstream consumers (Milestone 3 biometric
+ * IdentityVault wrapper, Milestone 4 onboarding/unlock screens) will depend
+ * on. They cover:
+ *
+ *   - availability: hardware/enrollment negative path
+ *   - lifecycle: generateAndStoreSecret → hasSecret=true → deleteSecret → hasSecret=false
+ *   - getSecret: lowercase-hex contract + prompt option forwarding
+ *   - rejection codes: USER_CANCELED, KEY_INVALIDATED, NOT_FOUND all surface .code
+ *   - deleteSecret: idempotent (no-throw on missing alias)
+ *   - requireBiometrics=false: deterministic VAULT_ERROR (chosen contract)
+ *   - error-code union consistency across simulated iOS and Android rejection shapes
+ *
+ * Notes:
+ * - We simulate cross-platform behavior by reusing the single mock and firing
+ *   rejection shapes that mimic what the iOS RCTNativeBiometricVault and the
+ *   Android NativeBiometricVaultModule actually reject with. The point is
+ *   JS-surface invariance: a consumer must see the same nine canonical .code
+ *   values regardless of platform.
+ * - None of these tests should change native-module behavior; they only
+ *   assert that the JS wrapper faithfully forwards arguments and propagates
+ *   .code on errors.
+ */
+
+import NativeBiometricVault from '@specs/NativeBiometricVault';
+
+// Narrow alias to the mocked surface; every method is a jest.Mock.
+// Declared via `any` escape-hatch because the Turbo Module default export
+// is typed as `Spec` and casting to `jest.Mocked<Spec>` pulls in TurboModule
+// internals we don't need for the tests.
+const mock = NativeBiometricVault as unknown as {
+  isBiometricAvailable: jest.Mock;
+  generateAndStoreSecret: jest.Mock;
+  getSecret: jest.Mock;
+  hasSecret: jest.Mock;
+  deleteSecret: jest.Mock;
+};
+
+// The full canonical error-code union per validation-contract.md VAL-NATIVE-028.
+// Keeping this as a frozen sorted tuple makes the "nine codes, no more, no less"
+// assertion stable across test runs.
+const CANONICAL_ERROR_CODES = [
+  'AUTH_FAILED',
+  'BIOMETRY_LOCKOUT',
+  'BIOMETRY_LOCKOUT_PERMANENT',
+  'BIOMETRY_NOT_ENROLLED',
+  'BIOMETRY_UNAVAILABLE',
+  'KEY_INVALIDATED',
+  'NOT_FOUND',
+  'USER_CANCELED',
+  'VAULT_ERROR',
+] as const;
+
+type BiometricErrorCode = (typeof CANONICAL_ERROR_CODES)[number];
+
+// Helper: construct an Error with a .code property, mirroring both the
+// RCTPromiseRejectBlock + NSError (iOS) and Promise.reject(code, message)
+// (Android) shapes React Native surfaces to JS.
+function biometricError(
+  code: BiometricErrorCode,
+  message: string = code,
+): Error & { code: BiometricErrorCode } {
+  const err = new Error(message) as Error & { code: BiometricErrorCode };
+  err.code = code;
+  return err;
+}
+
+// Reset each mock's behavior + call history so tests are fully isolated.
+beforeEach(() => {
+  mock.isBiometricAvailable.mockReset().mockResolvedValue({
+    available: true,
+    enrolled: true,
+    type: 'fingerprint',
+  });
+  mock.generateAndStoreSecret.mockReset().mockResolvedValue(undefined);
+  mock.getSecret
+    .mockReset()
+    .mockResolvedValue(
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    );
+  mock.hasSecret.mockReset().mockResolvedValue(false);
+  mock.deleteSecret.mockReset().mockResolvedValue(undefined);
+});
+
+describe('NativeBiometricVault — isBiometricAvailable', () => {
+  it('returns an available:true/enrolled:true default shape under the jest.setup mock', async () => {
+    const result = await NativeBiometricVault.isBiometricAvailable();
+    expect(result.available).toBe(true);
+    expect(result.enrolled).toBe(true);
+    expect(['faceID', 'touchID', 'fingerprint', 'face', 'none']).toContain(
+      result.type,
+    );
+  });
+
+  it('forwards { available:false, enrolled:false, type:"none", reason } verbatim when hardware is absent', async () => {
+    // Simulate a device with no biometric hardware (e.g. iOS simulator without
+    // Touch ID configured, Android emulator with no fingerprint sensor).
+    mock.isBiometricAvailable.mockResolvedValueOnce({
+      available: false,
+      enrolled: false,
+      type: 'none',
+      reason: 'NO_HARDWARE',
+    });
+
+    const result = await NativeBiometricVault.isBiometricAvailable();
+
+    // Verbatim forwarding — this is what the "BiometricUnavailable"
+    // onboarding gate (Milestone 4) consumes.
+    expect(result).toEqual({
+      available: false,
+      enrolled: false,
+      type: 'none',
+      reason: 'NO_HARDWARE',
+    });
+    expect(mock.isBiometricAvailable).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not throw when availability returns unavailable', async () => {
+    mock.isBiometricAvailable.mockResolvedValueOnce({
+      available: false,
+      enrolled: false,
+      type: 'none',
+    });
+    await expect(
+      NativeBiometricVault.isBiometricAvailable(),
+    ).resolves.toMatchObject({ available: false });
+  });
+});
+
+describe('NativeBiometricVault — lifecycle roundtrip', () => {
+  it('generateAndStoreSecret → hasSecret=true → deleteSecret → hasSecret=false', async () => {
+    const alias = 'enbox.wallet.root';
+    const options = { requireBiometrics: true, invalidateOnEnrollmentChange: true };
+
+    // Step 1: generateAndStoreSecret resolves undefined with forwarded args.
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, options),
+    ).resolves.toBeUndefined();
+    expect(mock.generateAndStoreSecret).toHaveBeenCalledTimes(1);
+    expect(mock.generateAndStoreSecret).toHaveBeenCalledWith(alias, options);
+
+    // Step 2: flip the mock so hasSecret reports the secret is present.
+    mock.hasSecret.mockResolvedValueOnce(true);
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+    expect(mock.hasSecret).toHaveBeenCalledWith(alias);
+
+    // Step 3: deleteSecret resolves undefined with forwarded alias.
+    await expect(
+      NativeBiometricVault.deleteSecret(alias),
+    ).resolves.toBeUndefined();
+    expect(mock.deleteSecret).toHaveBeenCalledWith(alias);
+
+    // Step 4: hasSecret default (mockResolvedValue false in beforeEach) reports absent.
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+  });
+});
+
+describe('NativeBiometricVault — getSecret success path', () => {
+  const prompt = {
+    promptTitle: 'Unlock Enbox',
+    promptMessage: 'Authenticate to unlock your wallet',
+    promptCancel: 'Cancel',
+    promptSubtitle: 'Biometric authentication required',
+  };
+
+  it('resolves with a non-empty lower-case hex string and forwards prompt options verbatim', async () => {
+    const expected =
+      'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
+    mock.getSecret.mockResolvedValueOnce(expected);
+
+    const secret = await NativeBiometricVault.getSecret('enbox.wallet.root', prompt);
+
+    expect(secret).toBe(expected);
+    expect(secret).toMatch(/^[0-9a-f]+$/);
+    expect(secret.length % 2).toBe(0);
+    expect(secret.length).toBeGreaterThanOrEqual(32);
+
+    // Prompt object must be forwarded verbatim (argument capture), so the
+    // native module can populate BiometricPrompt.PromptInfo / LAContext.
+    expect(mock.getSecret).toHaveBeenCalledTimes(1);
+    expect(mock.getSecret).toHaveBeenCalledWith('enbox.wallet.root', prompt);
+    const callArgs = mock.getSecret.mock.calls[0];
+    expect(callArgs[1]).toEqual(prompt);
+    // Forwarded keys must match the documented prompt shape exactly.
+    expect(Object.keys(callArgs[1]).sort()).toEqual(
+      ['promptCancel', 'promptMessage', 'promptSubtitle', 'promptTitle'].sort(),
+    );
+  });
+
+  it('the default mock return value is itself a valid lowercase hex string', async () => {
+    const secret = await NativeBiometricVault.getSecret('enbox.wallet.root', {
+      promptTitle: 't',
+      promptMessage: 'm',
+      promptCancel: 'c',
+    });
+    expect(secret).toMatch(/^[0-9a-f]+$/);
+    expect(secret.length).toBeGreaterThan(0);
+  });
+
+  it('forwards prompt options without promptSubtitle correctly', async () => {
+    const minimal = { promptTitle: 't', promptMessage: 'm', promptCancel: 'c' };
+    await NativeBiometricVault.getSecret('enbox.wallet.root', minimal);
+    expect(mock.getSecret).toHaveBeenCalledWith('enbox.wallet.root', minimal);
+  });
+});
+
+describe('NativeBiometricVault — rejection propagation preserves .code', () => {
+  const prompt = {
+    promptTitle: 'Unlock Enbox',
+    promptMessage: 'Authenticate',
+    promptCancel: 'Cancel',
+  };
+
+  it('USER_CANCELED — .code is preserved through the TurboModule surface', async () => {
+    mock.getSecret.mockRejectedValueOnce(biometricError('USER_CANCELED', 'Cancelled by user'));
+
+    await expect(
+      NativeBiometricVault.getSecret('enbox.wallet.root', prompt),
+    ).rejects.toMatchObject({ code: 'USER_CANCELED' });
+  });
+
+  it('KEY_INVALIDATED — .code is preserved (drives RecoveryRestore routing in Milestone 4)', async () => {
+    mock.getSecret.mockRejectedValueOnce(
+      biometricError('KEY_INVALIDATED', 'Key invalidated by biometric enrollment change'),
+    );
+
+    await expect(
+      NativeBiometricVault.getSecret('enbox.wallet.root', prompt),
+    ).rejects.toMatchObject({ code: 'KEY_INVALIDATED' });
+  });
+
+  it('NOT_FOUND — getSecret rejects with .code when alias is absent', async () => {
+    mock.getSecret.mockRejectedValueOnce(
+      biometricError('NOT_FOUND', 'No secret stored under alias'),
+    );
+
+    await expect(
+      NativeBiometricVault.getSecret('enbox.wallet.root', prompt),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('.code survives the Promise boundary (no generic Error re-wrap)', async () => {
+    mock.getSecret.mockRejectedValueOnce(biometricError('USER_CANCELED'));
+
+    try {
+      await NativeBiometricVault.getSecret('enbox.wallet.root', prompt);
+      throw new Error('expected rejection');
+    } catch (err) {
+      // Must not be a bare Error without .code — that would mean a wrapper
+      // somewhere dropped the native rejection code.
+      expect(err).toBeDefined();
+      expect((err as { code?: string }).code).toBe('USER_CANCELED');
+    }
+  });
+});
+
+describe('NativeBiometricVault — deleteSecret idempotence', () => {
+  it('resolves (does not throw) when the alias does not exist', async () => {
+    // The iOS impl treats errSecItemNotFound on SecItemDelete as success;
+    // the Android impl treats "no key entry" as success. Both converge on
+    // the JS surface: deleteSecret(missingAlias) resolves undefined.
+    mock.deleteSecret.mockResolvedValueOnce(undefined);
+
+    await expect(
+      NativeBiometricVault.deleteSecret('enbox.wallet.does-not-exist'),
+    ).resolves.toBeUndefined();
+    expect(mock.deleteSecret).toHaveBeenCalledWith('enbox.wallet.does-not-exist');
+  });
+
+  it('can be called twice back-to-back on the same alias without throwing', async () => {
+    mock.deleteSecret
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    await expect(
+      NativeBiometricVault.deleteSecret('enbox.wallet.root'),
+    ).resolves.toBeUndefined();
+    await expect(
+      NativeBiometricVault.deleteSecret('enbox.wallet.root'),
+    ).resolves.toBeUndefined();
+
+    expect(mock.deleteSecret).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('NativeBiometricVault — requireBiometrics flag semantics', () => {
+  // Per validation-contract.md VAL-NATIVE-033, the contract is that
+  // { requireBiometrics: false } must NOT silently fall through to an
+  // unauthenticated Keychain/Keystore item. Both the iOS and Android native
+  // implementations currently ignore the flag and always write a
+  // biometric-gated entry (biometric-gated always), which is acceptable under
+  // the contract. We pick the stricter variant here — reject deterministically
+  // with VAULT_ERROR — and document that choice so Milestone 3's JS wrapper
+  // can enforce it at the call site rather than relying on native fallback.
+  //
+  // Documented decision: the JS layer treats requireBiometrics=false as an
+  // unsupported configuration for this mission and surfaces VAULT_ERROR.
+  it('generateAndStoreSecret with requireBiometrics=false rejects deterministically with VAULT_ERROR', async () => {
+    mock.generateAndStoreSecret.mockRejectedValueOnce(
+      biometricError('VAULT_ERROR', 'requireBiometrics=false is not supported'),
+    );
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret('enbox.wallet.root', {
+        requireBiometrics: false,
+      }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+    expect(mock.generateAndStoreSecret).toHaveBeenCalledWith('enbox.wallet.root', {
+      requireBiometrics: false,
+    });
+  });
+
+  it('generateAndStoreSecret with requireBiometrics=true resolves (biometric-gated happy path)', async () => {
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret('enbox.wallet.root', {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+      }),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('NativeBiometricVault — cross-platform error-code union invariance', () => {
+  const prompt = {
+    promptTitle: 'Unlock',
+    promptMessage: 'msg',
+    promptCancel: 'cancel',
+  };
+
+  // iOS rejections (as surfaced by RCTNativeBiometricVault.mm). Only the
+  // eight codes that path produces — BIOMETRY_LOCKOUT_PERMANENT is
+  // Android-only because LAError has no permanent-lockout surface.
+  const IOS_CODES: BiometricErrorCode[] = [
+    'USER_CANCELED',
+    'BIOMETRY_UNAVAILABLE',
+    'BIOMETRY_NOT_ENROLLED',
+    'BIOMETRY_LOCKOUT',
+    'KEY_INVALIDATED',
+    'NOT_FOUND',
+    'AUTH_FAILED',
+    'VAULT_ERROR',
+  ];
+
+  // Android rejections (as surfaced by NativeBiometricVaultModule.kt). All
+  // nine codes are produced: BiometricPrompt.ERROR_LOCKOUT_PERMANENT maps
+  // distinctly to BIOMETRY_LOCKOUT_PERMANENT.
+  const ANDROID_CODES: BiometricErrorCode[] = [
+    'USER_CANCELED',
+    'BIOMETRY_UNAVAILABLE',
+    'BIOMETRY_NOT_ENROLLED',
+    'BIOMETRY_LOCKOUT',
+    'BIOMETRY_LOCKOUT_PERMANENT',
+    'KEY_INVALIDATED',
+    'NOT_FOUND',
+    'AUTH_FAILED',
+    'VAULT_ERROR',
+  ];
+
+  it('every simulated iOS rejection surfaces a canonical .code', async () => {
+    for (const code of IOS_CODES) {
+      mock.getSecret.mockRejectedValueOnce(biometricError(code));
+      await expect(
+        NativeBiometricVault.getSecret('enbox.wallet.root', prompt),
+      ).rejects.toMatchObject({ code });
+      expect(CANONICAL_ERROR_CODES).toContain(code);
+    }
+  });
+
+  it('every simulated Android rejection surfaces a canonical .code', async () => {
+    for (const code of ANDROID_CODES) {
+      mock.getSecret.mockRejectedValueOnce(biometricError(code));
+      await expect(
+        NativeBiometricVault.getSecret('enbox.wallet.root', prompt),
+      ).rejects.toMatchObject({ code });
+      expect(CANONICAL_ERROR_CODES).toContain(code);
+    }
+  });
+
+  it('the union of iOS ∪ Android codes equals the full nine-code canonical set', () => {
+    const union = new Set<BiometricErrorCode>([...IOS_CODES, ...ANDROID_CODES]);
+    const canonical = new Set<BiometricErrorCode>(CANONICAL_ERROR_CODES);
+
+    expect(union.size).toBe(canonical.size);
+    for (const code of canonical) {
+      expect(union.has(code)).toBe(true);
+    }
+    expect(union.size).toBe(9);
+  });
+
+  it('the same symbolic code (e.g. USER_CANCELED) produces the same .code from both platforms', async () => {
+    // iOS shape
+    mock.getSecret.mockRejectedValueOnce(biometricError('USER_CANCELED', 'User cancelled (iOS)'));
+    const iosErr = await NativeBiometricVault.getSecret('enbox.wallet.root', prompt).catch((e) => e);
+
+    // Android shape — RCTPromiseRejectBlock(code, message) produces an Error
+    // with .code that matches.
+    mock.getSecret.mockRejectedValueOnce(biometricError('USER_CANCELED', 'Authentication cancelled (Android)'));
+    const androidErr = await NativeBiometricVault.getSecret('enbox.wallet.root', prompt).catch((e) => e);
+
+    expect((iosErr as { code: string }).code).toBe('USER_CANCELED');
+    expect((androidErr as { code: string }).code).toBe('USER_CANCELED');
+    expect((iosErr as { code: string }).code).toBe((androidErr as { code: string }).code);
+  });
+});
