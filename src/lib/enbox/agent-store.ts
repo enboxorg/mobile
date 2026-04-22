@@ -474,3 +474,51 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
   },
 }));
+
+/**
+ * Dev-only helper that produces a JSON-serialized snapshot of the agent
+ * store's state suitable for sending to a devtools inspector (Flipper,
+ * redux-devtools, …) or an ad-hoc debug log line. The helper MUST be
+ * used by every dev-time logger that wants to inspect agent-store state
+ * — inlining `JSON.stringify(useAgentStore.getState())` bypasses this
+ * sanitizer and would leak the memory-only `recoveryPhrase` field.
+ *
+ * Sanitization rules (VAL-CROSS-013):
+ *   - `recoveryPhrase` is replaced with `'<redacted>'` when non-null
+ *     (kept as `null` when already cleared).
+ *   - `agent` / `authManager` / `vault` instances are reduced to
+ *     opaque `'<agent>' | '<authManager>' | '<vault>'` placeholders so
+ *     arbitrary internal fields on those objects (e.g. cached
+ *     BearerDid key material on the vault) cannot leak via
+ *     serialization.
+ *   - Scalar / plain-object fields (`error`, `identities`,
+ *     `biometricState`, `isInitializing`) are kept verbatim.
+ *   - Any string field whose value matches a ≥32-char hex blob is
+ *     defensively redacted so a future addition (e.g. a raw seed hex)
+ *     cannot silently leak either.
+ *
+ * The callable surface is intentionally zero-arg (reads
+ * `useAgentStore.getState()` directly) so it can be wired into a
+ * zustand `devtools` middleware `serialize` option or invoked ad-hoc
+ * from a debug screen without plumbing state through a parameter.
+ */
+export function serializeAgentStoreForDevtools(): string {
+  const state = useAgentStore.getState();
+  const redactLikelySecret = (value: unknown): unknown => {
+    if (typeof value === 'string' && /^[0-9a-f]{32,}$/i.test(value)) {
+      return '<redacted>';
+    }
+    return value;
+  };
+  const snapshot = {
+    agent: state.agent ? '<agent>' : null,
+    authManager: state.authManager ? '<authManager>' : null,
+    vault: state.vault ? '<vault>' : null,
+    isInitializing: state.isInitializing,
+    error: redactLikelySecret(state.error),
+    biometricState: state.biometricState,
+    recoveryPhrase: state.recoveryPhrase === null ? null : '<redacted>',
+    identities: state.identities,
+  };
+  return JSON.stringify(snapshot);
+}

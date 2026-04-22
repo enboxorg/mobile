@@ -50,11 +50,30 @@ jest.mock(
 
     const identityList = jest.fn(async () => [] as unknown[]);
     const firstLaunch = jest.fn(async () => true);
-    const initialize = jest.fn(
-      async () =>
-        'abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual',
-    );
-    const start = jest.fn(async () => undefined);
+    // `initialize` + `start` delegate to the injected `agentVault` so
+    // test scenarios that rely on the REAL `BiometricVault.initialize`
+    // code path (VAL-UX-049 offline-first-launch) actually exercise
+    // biometric-sealing + HD-seed derivation against the product
+    // implementation. Tests that need a trivial resolution can still
+    // swap these out via `mockImplementationOnce`.
+    const initialize = jest.fn(async function (
+      this: { vault?: { initialize?: (p: unknown) => Promise<string> } },
+      params: Record<string, unknown> = {},
+    ) {
+      if (this?.vault?.initialize) {
+        return this.vault.initialize(params);
+      }
+      return 'abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual';
+    });
+    const start = jest.fn(async function (
+      this: { vault?: { unlock?: (p: unknown) => Promise<void> } },
+      params: Record<string, unknown> = {},
+    ) {
+      if (this?.vault?.unlock) {
+        await this.vault.unlock(params);
+      }
+      return undefined;
+    });
 
     class EnboxUserAgent {
       public vault: unknown;
@@ -246,12 +265,32 @@ beforeEach(() => {
   resetAgentStore();
   resetSessionStore();
   mockAgentFirstLaunch.mockReset().mockResolvedValue(true);
+  // Preserve the delegation-to-vault implementation across resets so
+  // VAL-UX-049 exercises the REAL `BiometricVault.initialize` code
+  // path. Tests that want a trivial resolution can still use
+  // `mockAgentInitialize.mockResolvedValueOnce(...)`.
   mockAgentInitialize
     .mockReset()
-    .mockResolvedValue(
-      'abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual',
-    );
-  mockAgentStart.mockReset().mockResolvedValue(undefined);
+    .mockImplementation(async function (
+      this: { vault?: { initialize?: (p: unknown) => Promise<string> } },
+      params: Record<string, unknown> = {},
+    ) {
+      if (this?.vault?.initialize) {
+        return this.vault.initialize(params);
+      }
+      return 'abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual';
+    });
+  mockAgentStart
+    .mockReset()
+    .mockImplementation(async function (
+      this: { vault?: { unlock?: (p: unknown) => Promise<void> } },
+      params: Record<string, unknown> = {},
+    ) {
+      if (this?.vault?.unlock) {
+        await this.vault.unlock(params);
+      }
+      return undefined;
+    });
   (globalThis as unknown as Record<string, unknown>).__enboxMobilePatchedAgentDwnApi =
     false;
 });
@@ -493,12 +532,30 @@ describe('VAL-UX-049 — offline first-launch succeeds', () => {
     });
     (globalThis as { fetch?: unknown }).fetch = failingFetch;
 
+    // Expose the native biometric mock to assert its sealing primitive
+    // actually fired. Without the REAL `BiometricVault.initialize`
+    // running, `generateAndStoreSecret` would never be called (a
+    // pre-mocked agent.initialize would just return a hardcoded string
+    // without touching the native layer). Asserting on this call proves
+    // the test is no longer trivially satisfied.
+    const mockNative = (
+      global as unknown as {
+        __enboxBiometricVaultMock: {
+          generateAndStoreSecret: jest.Mock;
+          getSecret: jest.Mock;
+        };
+      }
+    ).__enboxBiometricVaultMock;
+    mockNative.generateAndStoreSecret.mockClear();
+
     try {
       const phrase = await useAgentStore.getState().initializeFirstLaunch();
 
-      // initializeFirstLaunch resolves to a non-empty phrase.
+      // initializeFirstLaunch resolves to a non-empty 24-word BIP-39
+      // phrase — proves we ran through the real entropy → mnemonic
+      // derivation rather than echoing a pre-mocked string.
       expect(typeof phrase).toBe('string');
-      expect(phrase.length).toBeGreaterThan(0);
+      expect(phrase.trim().split(/\s+/).length).toBe(24);
 
       const state = useAgentStore.getState();
       expect(state.agent).not.toBeNull();
@@ -508,6 +565,22 @@ describe('VAL-UX-049 — offline first-launch succeeds', () => {
       // biometricState is set to 'ready' after a successful init so the
       // navigator can advance past the Welcome/Setup gates.
       expect(state.biometricState).toBe('ready');
+
+      // The native sealing primitive must have fired exactly once with
+      // a valid 64-char lower-case hex `secretHex`. This is the
+      // contract the real `BiometricVault.initialize` establishes with
+      // the native Turbo Module — a trivial mock that skipped
+      // biometric sealing entirely would NOT produce this call shape.
+      expect(mockNative.generateAndStoreSecret).toHaveBeenCalledTimes(1);
+      const [alias, options] = mockNative.generateAndStoreSecret.mock.calls[0];
+      expect(alias).toBe('enbox.wallet.root');
+      expect(options).toEqual(
+        expect.objectContaining({
+          requireBiometrics: true,
+          invalidateOnEnrollmentChange: true,
+          secretHex: expect.stringMatching(/^[0-9a-f]{64}$/),
+        }),
+      );
     } finally {
       if (origFetch === undefined) {
         delete (globalThis as { fetch?: unknown }).fetch;

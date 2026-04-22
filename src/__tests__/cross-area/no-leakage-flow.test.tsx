@@ -30,20 +30,51 @@ jest.mock(
   () => {
     const NativeBiometricVault =
       require('@specs/NativeBiometricVault').default;
+
+    const DEFAULT_MNEMONIC =
+      'abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual';
+
     class EnboxUserAgent {
       public vault: unknown;
+      // Per-instance identity API. `create` returns a minimal
+      // BearerIdentity-shaped object so the store's `createIdentity`
+      // path has something deterministic to return to the caller (and
+      // so VAL-CROSS-011's log-spy scan actually runs through the full
+      // createIdentity code path rather than short-circuiting on a
+      // missing return value).
       public identity = {
         list: jest.fn(async () => [] as unknown[]),
-        create: jest.fn(),
+        create: jest.fn(
+          async (params: { metadata?: { name?: string }; didMethod?: string } = {}) => ({
+            metadata: {
+              uri: 'did:dht:identity-stub',
+              name: params?.metadata?.name ?? 'Unnamed',
+            },
+            did: { uri: 'did:dht:identity-stub' },
+            didMethod: params?.didMethod ?? 'dht',
+          }),
+        ),
       };
-      public firstLaunch = jest.fn(async () => true);
-      public initialize = jest.fn(async () => {
-        await NativeBiometricVault.generateAndStoreSecret(
-          'enbox.wallet.root',
-          { requireBiometrics: true, invalidateOnEnrollmentChange: true },
-        );
-        return 'abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual';
+      public firstLaunch = jest.fn(async () => {
+        // Return `true` only while no native secret has been provisioned
+        // so the lifecycle driver below can distinguish first-launch
+        // from unlock without juggling explicit mockResolvedValue calls.
+        return !(await NativeBiometricVault.hasSecret('enbox.wallet.root'));
       });
+      public initialize = jest.fn(
+        async (params: { recoveryPhrase?: string } = {}) => {
+          const mnemonic =
+            typeof params?.recoveryPhrase === 'string' &&
+            params.recoveryPhrase.length > 0
+              ? params.recoveryPhrase
+              : DEFAULT_MNEMONIC;
+          await NativeBiometricVault.generateAndStoreSecret(
+            'enbox.wallet.root',
+            { requireBiometrics: true, invalidateOnEnrollmentChange: true },
+          );
+          return mnemonic;
+        },
+      );
       public start = jest.fn(async () => {
         await NativeBiometricVault.getSecret('enbox.wallet.root', {
           promptTitle: 'Unlock Enbox',
@@ -159,7 +190,10 @@ import { RecoveryRestoreScreen } from '@/features/auth/screens/recovery-restore-
 import { SettingsScreen } from '@/features/settings/screens/settings-screen';
 import { WelcomeScreen } from '@/features/onboarding/screens/welcome-screen';
 import { useSessionStore } from '@/features/session/session-store';
-import { useAgentStore } from '@/lib/enbox/agent-store';
+import {
+  serializeAgentStoreForDevtools,
+  useAgentStore,
+} from '@/lib/enbox/agent-store';
 import NativeSecureStorage from '@specs/NativeSecureStorage';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
@@ -322,7 +356,7 @@ describe('VAL-CROSS-008 — no PIN/password copy in rendered UI or session paylo
 // ---------------------------------------------------------------------
 
 describe('VAL-CROSS-011 — no mnemonic/secret in any console log across the full flow', () => {
-  it('spies on console.{log,warn,error} record zero mnemonic/hex leaks across a full lifecycle', async () => {
+  it('spies on console.{log,warn,error} record zero mnemonic/hex leaks across a full lifecycle (init → createIdentity → lock → unlock → restore)', async () => {
     // Real console spies — we do NOT replace them with a no-op so
     // internal warn/log statements are actually captured for scanning.
     const logSpy = jest.spyOn(console, 'log');
@@ -351,7 +385,8 @@ describe('VAL-CROSS-011 — no mnemonic/secret in any console log across the ful
       (globalThis as unknown as Record<string, unknown>)
         .__enboxMobilePatchedAgentDwnApi = false;
 
-      // Exercise the full lifecycle.
+      // ----- Phase 1: initializeFirstLaunch -----
+      // Covers first-launch biometric sealing + mnemonic derivation.
       const mnemonic = await useAgentStore
         .getState()
         .initializeFirstLaunch();
@@ -360,7 +395,6 @@ describe('VAL-CROSS-011 — no mnemonic/secret in any console log across the ful
       useSessionStore.getState().setHasIdentity(true);
       useSessionStore.getState().completeOnboarding();
       useSessionStore.getState().unlockSession();
-      useAgentStore.getState().clearRecoveryPhrase();
 
       // Render sensitive screens so their mount-time logs are captured.
       render(
@@ -368,6 +402,45 @@ describe('VAL-CROSS-011 — no mnemonic/secret in any console log across the ful
       );
       render(<RecoveryRestoreScreen onRestored={() => {}} />);
 
+      // ----- Phase 2: createIdentity -----
+      // Drives the store-wired agent.identity.create path. The mock
+      // returns a BearerIdentity-shaped object — we assert logs stay
+      // clean across this code path too.
+      const createdIdentity = await useAgentStore
+        .getState()
+        .createIdentity('Cross-area Test Identity');
+      expect(createdIdentity).toBeTruthy();
+
+      // Clear the one-shot mnemonic before locking to simulate the
+      // real user flow (user acknowledges the RecoveryPhrase screen).
+      useAgentStore.getState().clearRecoveryPhrase();
+
+      // ----- Phase 3: lock (teardown) -----
+      useAgentStore.getState().teardown();
+      useSessionStore.getState().lock();
+      expect(useAgentStore.getState().agent).toBeNull();
+
+      // ----- Phase 4: unlockAgent -----
+      // Exercises the unlock-path biometric prompt via
+      // `NativeBiometricVault.getSecret`. The mock stub returns the
+      // previously-stored secret — logs across unlock must stay clean.
+      await useAgentStore.getState().unlockAgent();
+      useSessionStore.getState().unlockSession();
+      expect(useAgentStore.getState().agent).not.toBeNull();
+
+      // ----- Phase 5: restoreFromMnemonic -----
+      // Exercises the recovery code path (re-seals the vault with the
+      // caller-provided phrase). We pass a valid 24-word BIP-39 phrase
+      // distinct from the previously-issued mnemonic so the store must
+      // NOT merely echo `recoveryPhrase` back into its log output.
+      const restoreMnemonic =
+        'legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth title';
+      useSessionStore.getState().lock();
+      useAgentStore.getState().teardown();
+      await useAgentStore.getState().restoreFromMnemonic(restoreMnemonic);
+      useSessionStore.getState().unlockSession();
+
+      // Final teardown.
       useAgentStore.getState().teardown();
       useSessionStore.getState().lock();
 
@@ -391,11 +464,20 @@ describe('VAL-CROSS-011 — no mnemonic/secret in any console log across the ful
       const joined = captured.join('\n');
 
       // --- Mnemonic substring check ---
-      // Direct mnemonic substring: zero matches (strongest claim).
+      // Direct mnemonic substring: zero matches (strongest claim) —
+      // neither the first-launch mnemonic NOR the restored mnemonic
+      // may surface in log output.
       expect(joined).not.toContain(mnemonic);
+      expect(joined).not.toContain(restoreMnemonic);
       // A 4-word sub-sequence from the known wallet mnemonic:
       expect(joined).not.toMatch(
         /\babandon\s+ability\s+able\s+about\b/i,
+      );
+      // A 4-word sub-sequence from the restore mnemonic (distinct
+      // wordlist slice so the log scanner can't be fooled by a
+      // single mnemonic-specific false-negative).
+      expect(joined).not.toMatch(
+        /\blegal\s+winner\s+thank\s+year\b/i,
       );
 
       // --- Hex blob check (≥ 40 contiguous hex chars) ---
@@ -434,22 +516,43 @@ describe('VAL-CROSS-012 — no crash reporter SDK is wired', () => {
     }
   });
 
-  it('no crash-reporter SDK is imported from src/', () => {
-    // Walk `src/` and assert none of the source files imports a crash
-    // reporter SDK. This guards against someone wiring one up without
-    // adding it to package.json (symlinked / vendored etc.).
+  it('no crash-reporter SDK is imported from src/, ios/, or android/', () => {
+    // Walk `src/`, `ios/`, and `android/` and assert none of the
+    // source files reference a crash-reporter SDK. This guards against
+    // someone wiring one up at the JS layer OR at the native layer
+    // (e.g. a CocoaPods / Gradle dependency) without adding it to
+    // `package.json` (symlinked, vendored, statically linked, etc.).
+    //
+    // Excludes:
+    //   - `node_modules/**` — upstream packages; our manifest check
+    //     already covers those via `package.json`.
+    //   - `**/Pods/**`     — CocoaPods build outputs; would match
+    //     every vendored pod even though we never imported one.
+    //   - `**/build/**`    — Android/iOS build directories.
+    //   - `**/DerivedData/**` — Xcode build artefacts.
+    //   - `**/.gradle/**`  — Gradle cache.
+    //   - `**/vendor/**`   — bundler / cocoapods gem caches.
+    //   - This test file itself (it references the SDK names as
+    //     literal search strings).
     const { execSync } = require('node:child_process');
-    // `rg` is available on the host (see environment), fall back to a
-    // basic fs scan if the binary isn't present so this test remains
-    // portable.
     let matches = '';
     try {
       matches = execSync(
-        'rg -l -i "sentry|bugsnag|crashlytics" src/ || true',
+        [
+          'rg -l -i "sentry|bugsnag|crashlytics"',
+          'src/ ios/ android/',
+          "--glob '!**/node_modules/**'",
+          "--glob '!**/Pods/**'",
+          "--glob '!**/build/**'",
+          "--glob '!**/DerivedData/**'",
+          "--glob '!**/.gradle/**'",
+          "--glob '!**/vendor/**'",
+          '|| true',
+        ].join(' '),
         { cwd: REPO_ROOT, encoding: 'utf-8' },
       );
     } catch {
-      // rg missing or non-zero: fall back to inspecting all .ts/.tsx.
+      // rg missing or non-zero: leave matches empty and fall through.
       matches = '';
     }
     // Allow this test file itself to reference the SDK names.
@@ -470,7 +573,7 @@ describe('VAL-CROSS-012 — no crash reporter SDK is wired', () => {
 // ---------------------------------------------------------------------
 
 describe('VAL-CROSS-013 — __DEV__ devtools snapshot redaction', () => {
-  it('agent store exposes no zustand persist middleware and a JSON snapshot of its state contains no mnemonic / raw secret', async () => {
+  it('serializeAgentStoreForDevtools redacts recoveryPhrase / raw secrets in a __DEV__ snapshot', async () => {
     // Mutate __DEV__ for the duration of this test.
     const originalDev = (globalThis as { __DEV__?: boolean }).__DEV__;
     (globalThis as { __DEV__?: boolean }).__DEV__ = true;
@@ -485,13 +588,21 @@ describe('VAL-CROSS-013 — __DEV__ devtools snapshot redaction', () => {
 
       // Set up a store state that exercises the redaction invariant:
       // `recoveryPhrase` is present in memory (pre-ack), alongside a
-      // live (mocked) agent + vault + authManager.
+      // hex-blob-shaped `error` field that would look like a raw secret
+      // if it ever reached an inspector.
       const fakeMnemonic = KNOWN_MNEMONIC;
+      const fakeSecretHex =
+        '0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20';
       useAgentStore.setState({
         recoveryPhrase: fakeMnemonic,
         agent: null,
         authManager: null,
         vault: null,
+        // A pathological code path could end up stashing a raw hex
+        // secret in `error`; the dev-tools serializer redacts these
+        // defensively. Pinning the behavior here guards against a
+        // future regression that would leak via this field.
+        error: fakeSecretHex,
       });
 
       // The raw zustand state DOES include recoveryPhrase by design
@@ -499,18 +610,24 @@ describe('VAL-CROSS-013 — __DEV__ devtools snapshot redaction', () => {
       const raw = useAgentStore.getState();
       expect(raw.recoveryPhrase).toBe(fakeMnemonic);
 
-      // VAL-CROSS-013 requires that ANY serializer sending store state
-      // to a devtools target (Flipper, redux-devtools, ...) must
-      // exclude or redact the mnemonic. We pin the contract by
-      // demonstrating a safe serializer that callers (if they ever
-      // wire a devtools middleware) must use:
-      const safeSerialize = (state: {
-        recoveryPhrase: string | null;
-      }): string =>
-        JSON.stringify({ ...state, recoveryPhrase: '<redacted>' });
-
-      const serialized = safeSerialize(raw);
+      // --- Real dev-time helper ---
+      // VAL-CROSS-013 requires that the sanctioned dev-tools snapshot
+      // path redacts the mnemonic + raw secret. `serializeAgentStoreForDevtools`
+      // is the product-code helper any devtools/logger integration must
+      // call; we drive it here and pin its redaction contract.
+      const serialized = serializeAgentStoreForDevtools();
       expect(serialized).not.toContain(fakeMnemonic);
+      // A 4-word sub-sequence from the known mnemonic must also be
+      // absent (defense-in-depth against a partial leak).
+      expect(serialized).not.toMatch(
+        /\babandon\s+ability\s+able\s+about\b/i,
+      );
+      // The raw hex secret MUST be redacted (either the exact string
+      // is gone, or any substring of length ≥40 is gone — both must
+      // hold because the helper's redactor targets both).
+      expect(serialized).not.toContain(fakeSecretHex);
+      expect(serialized).not.toMatch(/[0-9a-f]{40,}/i);
+      // And the redaction sentinel must appear for `recoveryPhrase`.
       expect(serialized).toContain('<redacted>');
 
       // The session store never carries a mnemonic / seed / raw
@@ -521,9 +638,9 @@ describe('VAL-CROSS-013 — __DEV__ devtools snapshot redaction', () => {
       expect(sessSerialized).not.toMatch(/[0-9a-f]{40,}/i);
     } finally {
       (globalThis as { __DEV__?: boolean }).__DEV__ = originalDev;
-      // Clean up the memory-only recoveryPhrase so no subsequent test
-      // observes it.
-      useAgentStore.setState({ recoveryPhrase: null });
+      // Clean up the memory-only recoveryPhrase + fake error so no
+      // subsequent test observes them.
+      useAgentStore.setState({ recoveryPhrase: null, error: null });
     }
   });
 
