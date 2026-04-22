@@ -11,6 +11,7 @@ class NativeModulesPackage : BaseReactPackage() {
         when (name) {
             NativeSecureStorageModule.NAME -> NativeSecureStorageModule(reactContext)
             NativeCryptoModule.NAME -> NativeCryptoModule(reactContext)
+            NativeBiometricVaultModule.NAME -> NativeBiometricVaultModule(reactContext)
             else -> null
         }
 
@@ -27,6 +28,14 @@ class NativeModulesPackage : BaseReactPackage() {
             NativeCryptoModule.NAME to ReactModuleInfo(
                 name = NativeCryptoModule.NAME,
                 className = NativeCryptoModule.NAME,
+                canOverrideExistingModule = false,
+                needsEagerInit = false,
+                isCxxModule = false,
+                isTurboModule = true
+            ),
+            NativeBiometricVaultModule.NAME to ReactModuleInfo(
+                name = NativeBiometricVaultModule.NAME,
+                className = NativeBiometricVaultModule.NAME,
                 canOverrideExistingModule = false,
                 needsEagerInit = false,
                 isCxxModule = false,
