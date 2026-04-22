@@ -1,0 +1,28 @@
+{
+  "featureId": "navigation-gating",
+  "reviewedAt": "2026-04-22T22:53:48.523688+00:00",
+  "commitId": "7c269ecc873355be244f30aaa789e622a8436fab",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The biometric gate matrix and route renames are implemented, but the deep-link queueing behavior is incomplete: queued WalletConnect failures are silently dropped once the gate clears.",
+    "issues": [
+      {
+        "file": "src/navigation/app-navigator.tsx",
+        "line": 179,
+        "severity": "blocking",
+        "description": "`showWalletConnectRequest` only checks `pending`, but `handleIncomingUrl()` records parse/fetch failures as `phase: 'error'` with `pending: null` (`src/lib/enbox/wallet-connect-store.ts:59-74`). If a deep link arrives while the app is gated and fails before unlock, the gate hides the request screen as intended, but once the user reaches `Main` the navigator falls straight through to `Main` and never renders `WalletConnectRequestScreen`'s error state. That silently drops the queued deep link without any user visibility, which violates VAL-UX-050's requirement that gated deep links be queued or otherwise surfaced rather than silently discarded. The navigator/test logic should gate on the wallet-connect phase/error state as well, and add coverage for the queued-error path (`src/navigation/app-navigator.test.tsx:614-670` only exercises a truthy `pending` request)."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `mobile-feature-worker` skill requires a red->green test sequence before implementation, but this run's transcript shows only a baseline green test run before the file edits and then green runs after the implementation. The handoff still marked `skillFeedback.followedProcedure: true`.",
+      "evidence": "In `worker-transcripts.jsonl` for session `6237f8cb-9d5c-4b1a-aadc-c5b282b4c892`, `bun run test` appears before the Create calls for `src/features/session/get-initial-route.ts`, `src/features/session/get-initial-route.test.ts`, `src/navigation/app-navigator.tsx`, and `src/navigation/app-navigator.test.tsx`; afterward the transcript shows only passing runs (`bun run test -- ...`, `bun run verify`). No red run of the newly added tests appears before implementation."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed: the navigator only surfaces queued WalletConnect work when `pending` is truthy, so a gated deep link that lands in the wallet-connect store's `error` state is silently lost after unlock instead of being shown to the user. I also noted a skill-procedure mismatch in the worker transcript around the required red->green test flow."
+}

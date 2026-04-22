@@ -1,0 +1,28 @@
+{
+  "featureId": "biometric-unlock-screen",
+  "reviewedAt": "2026-04-22T22:52:39Z",
+  "commitId": "9a22d5cf1826c5762ad687cbf44a53500ca2670a",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature adds the unlock screen and a broad Jest suite, but the lockout path is wired against the wrong error codes. In production, `unlockAgent()` rethrows `VAULT_ERROR` for native lockout failures, so this screen falls back to the generic error path instead of showing the required clear lockout message.",
+    "issues": [
+      {
+        "file": "src/features/auth/screens/biometric-unlock-screen.tsx",
+        "line": 203,
+        "severity": "blocking",
+        "description": "The lockout branch only matches raw `BIOMETRY_LOCKOUT` / `BIOMETRY_LOCKOUT_PERMANENT` plus a non-existent `VAULT_ERROR_BIOMETRY_LOCKOUT` code (`biometric-unlock-screen.tsx:35-38,203-204`). The real unlock flow goes through `BiometricVault.mapNativeErrorToVaultError()`, which normalizes both native lockout codes to `VAULT_ERROR` (`src/lib/enbox/biometric-vault.ts:433-437`). As a result, an actual OS lockout from `useAgentStore.unlockAgent()` will render the generic error message instead of the required clear lockout UX. The tests miss this because they only mock raw lockout codes / repeated `AUTH_FAILED` (`biometric-unlock-screen.test.tsx:207-245`)."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker marked `skillFeedback.followedProcedure: true`, but the transcript skeleton does not show the required `.factory/library/architecture.md` or `.factory/library/user-testing.md` reads before implementation, even though this feature touches the vault/store boundary and relies on the `Unlock with` UI anchor.",
+      "evidence": "`mobile-feature-worker/SKILL.md:20-22,28` requires reading `architecture.md` for vault/store work and `user-testing.md` for user-facing anchors. The transcript skeleton lists reads for `mission.md`, `validation-contract.md`, `AGENTS.md`, `.factory/services.yaml`, screen files, `session-store.ts`, `agent-store.ts`, etc., but no read of those library files before coding; the handoff still reports `skillFeedback.followedProcedure: true`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed. The screen/test addition is substantial, but real lockout errors from the vault are normalized to `VAULT_ERROR`, so the implemented screen does not satisfy the required lockout UX on the production unlock path."
+}

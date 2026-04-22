@@ -1,0 +1,33 @@
+{
+  "featureId": "recovery-phrase-screen",
+  "reviewedAt": "2026-04-22T22:53:08Z",
+  "commitId": "cbadbff",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The screen UI, iOS cover, and navigation wiring are mostly aligned with the feature, but the Android screenshot-protection requirement is not actually implemented. The new FLAG_SECURE helper silently no-ops unless a native module exists, and this repo does not define or register any such module, so RecoveryPhraseScreen will still allow screenshots and Recents thumbnails on Android.",
+    "issues": [
+      {
+        "file": "src/lib/native/flag-secure.ts",
+        "line": 23,
+        "severity": "blocking",
+        "description": "Android FLAG_SECURE is not enforced in production. `resolveModule()` only looks for optional `RNFlagSecure`/`EnboxFlagSecure`/`FlagSecure` native modules and `enableFlagSecure()`/`disableFlagSecure()` then silently no-op when none is present (`mod?.activate?.()` / `mod?.deactivate?.()`). There is no matching module implementation or registration under `android/`, and `android/app/src/main/java/org/enbox/mobile/nativemodules/NativeModulesPackage.kt` only registers `NativeSecureStorageModule`, `NativeCryptoModule`, and `NativeBiometricVaultModule`. As shipped, `RecoveryPhraseScreen` never reaches `Window.setFlags(FLAG_SECURE, FLAG_SECURE)`, violating the feature requirement and VAL-UX-043."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `mobile-feature-worker` skill requires reading `.factory/library/user-testing.md` for features that depend on user-facing anchors / biometric-flow assertions, but this worker session did not read it even though the handoff marked `skillFeedback.followedProcedure: true`.",
+      "evidence": "Transcript skeleton for worker session `1fdc396f-83b0-4b27-8a15-e31351c39d92` contains no `Read` of `/home/liran/src/enboxorg/mobile/.factory/library/user-testing.md` (`READ_USER_TESTING_MD: False` from transcript extraction), while the handoff file `handoffs/2026-04-22T21-17-59-451Z__recovery-phrase-screen__1fdc396f-83b0-4b27-8a15-e31351c39d92.json` reports `skillFeedback.followedProcedure: true`."
+    },
+    {
+      "area": "knowledge",
+      "observation": "Shared mission guidance documents the requirement to use Android FLAG_SECURE, but it does not document any existing project-approved implementation path. That gap let this feature land a placeholder JS shim whose own comment says the contract will only be met 'once the Android-side module lands.'",
+      "evidence": "`.factory/library/architecture.md` requires FLAG_SECURE for recovery screens, but `src/lib/native/flag-secure.ts:16-20` explicitly describes the helper as a silent no-op until a native module exists; no `RNFlagSecure`/`EnboxFlagSecure`/`FlagSecure` implementation exists under `android/` or `ios/`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed the handoff, transcript skeleton, skill, and commit `cbadbff`. The feature fails review because Android screenshot protection is stubbed behind a missing native module, so the recovery phrase is still exposable on Android despite the tests passing."
+}

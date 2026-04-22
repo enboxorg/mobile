@@ -1,0 +1,33 @@
+{
+  "featureId": "settings-reset-flow",
+  "reviewedAt": "2026-04-22T22:53:25+00:00",
+  "commitId": "d02c495e60e7ba5f72834824af33c23b05185b32",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The implementation removes the PIN-era Settings UI and routes reset through the existing biometric-era store reset flow plus a post-reset hydrate, which is consistent with the feature intent. I did not find a blocking functional bug in the shipped code, but the new test coverage does not fully exercise the real reset integration.",
+    "issues": [
+      {
+        "file": "src/features/settings/screens/settings-screen.test.tsx",
+        "line": 35,
+        "severity": "non_blocking",
+        "description": "The new spec replaces `useAgentStore.reset()` and `useSessionStore.hydrate()` with bespoke mocks and then asserts against those mocks, so it never exercises the real reset implementation that wipes LevelDB or proves the navigator actually lands on `Welcome`. Add either a real store-level reset test that asserts `destroyAgentLevelDatabases()` is invoked, or an integration-style navigator test that covers the full post-reset route transition."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The shared architecture doc's reset summary is incomplete for the current app behavior: returning to `Welcome` after reset also requires a post-reset `sessionStore.hydrate()` because `sessionStore.reset()` leaves `biometricStatus: 'unknown'`.",
+      "evidence": ".factory/library/architecture.md:355-358 documents reset as deleteSecret + LevelDB wipe + `sessionStore.reset()` + `agentStore.teardown()` only, while `src/features/settings/screens/settings-screen.tsx:21-42` adds an explicit `useSessionStore.getState().hydrate()` to avoid staying on `Loading` and to route back to `Welcome`."
+    },
+    {
+      "area": "skills",
+      "observation": "The worker marked `skillFeedback.followedProcedure: true`, but the session transcript does not show the required `.factory/library/*.md` reads for this vault/store-touching feature or a red test run before implementation. Either compliance checks are missing, or the skill needs stronger enforcement around the honesty gate.",
+      "evidence": ".factory/skills/mobile-feature-worker/SKILL.md:20-29 and :66-73 require reading `architecture.md`/`environment.md`/`user-testing.md` as relevant and observing tests RED before coding. `worker-transcripts.jsonl:36` for session `d5c7bf14-8e56-4118-b75d-a63bc41256f2` shows reads of mission/validation/AGENTS and target source files, then edits; the first settings-specific test run appears only after `settings-screen.test.tsx` was created."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed handoff, transcript skeleton, skill instructions, and commit `d02c495e60e7ba5f72834824af33c23b05185b32`. The shipped reset flow looks functionally aligned with the feature requirements, with one non-blocking gap in test coverage and two shared-state observations (architecture reset docs and mobile-feature-worker honesty-gate enforcement)."
+}

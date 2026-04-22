@@ -1,0 +1,34 @@
+{
+  "featureId": "pin-removal-and-session-state",
+  "reviewedAt": "2026-04-22T22:54:42Z",
+  "commitId": "52dc95ac787466dc7f9e87c896263bd544fa2faa",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The diff completes the mechanical PIN cleanup: the legacy PIN screens/helpers are deleted, the banned PIN-era symbols are gone from `src/`, and `src/features/session/session-store.ts` is rewritten around `biometricStatus`. But the feature does not fully complete the biometric-first session migration it claims: `src/hooks/use-auto-lock.ts` still depends on `AUTO_LOCK_TIMEOUT_MS`, and the reviewed routing changes intentionally bypass the new locked/biometric state and send any onboarded user straight to `Main`. Because that leaves no enforced biometric gate after lock/relaunch and misses the feature's promised auto-lock cleanup, I cannot accept this feature as complete.",
+    "issues": [
+      {
+        "file": "src/hooks/use-auto-lock.ts",
+        "line": 4,
+        "severity": "blocking",
+        "description": "The feature claims the PIN-era auth constants were removed, but this commit leaves `use-auto-lock.ts` importing and branching on `AUTO_LOCK_TIMEOUT_MS` from `@/constants/auth` (`src/hooks/use-auto-lock.ts:4,10,23,31` in commit `52dc95a`). That directly violates the mission contract for the PIN-removal step (`VAL-UX-003`) and means the last `src/` dependency on `src/constants/auth.ts` is still live after this feature lands."
+      },
+      {
+        "file": "src/navigation/app-navigator.tsx",
+        "line": 79,
+        "severity": "blocking",
+        "description": "This navigator intentionally ignores `isLocked` and the normal `'ready'` biometric state once onboarding is complete: it computes `showMain = hasCompletedOnboarding` and renders `Main` for every onboarded session (`src/navigation/app-navigator.tsx:79-110`). `getInitialRoute()` mirrors the same behavior by returning `Main` for any onboarded snapshot that is not `invalidated`/`unavailable` (`src/features/session/get-initial-route.ts:25-37`). As a result, the newly introduced `isLocked` session field is dead state and a locked/relaunched wallet can still land in the main app instead of a biometric unlock gate."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker handoff says `skillFeedback.followedProcedure: true`, but the transcript skeleton does not show the required red-test-first flow for this non-trivial feature.",
+      "evidence": "`.factory/skills/mobile-feature-worker/SKILL.md:26-32,66-68` requires relevant library reads and failing tests before implementation. The transcript skeleton for session `b9150e22-0cae-4ae2-b6e6-43fe03083e47` (`/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/worker-transcripts.jsonl:28`) shows green baseline `bun run lint` / `bun run test` runs followed by file deletions and creates (`session-store.ts`, `get-initial-route.ts`, `app-navigator.tsx`, etc.), then later verification runs; the handoff still records `followedProcedure: true` with no deviations (`/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-22T20-48-10-992Z__pin-removal-and-session-state__b9150e22-0cae-4ae2-b6e6-43fe03083e47.json:123-125`)."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed. The PIN files/tokens were removed, but the feature still leaves `use-auto-lock.ts` coupled to `AUTO_LOCK_TIMEOUT_MS` and rewrites routing so locked/onboarded sessions go straight to `Main` instead of a biometric unlock gate."
+}
