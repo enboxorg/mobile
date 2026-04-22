@@ -35,9 +35,14 @@ import javax.crypto.spec.GCMParameterSpec
  *   key automatically via setInvalidatedByBiometricEnrollment(true), which
  *   maps to KEY_INVALIDATED at decrypt time.
  * - The wallet secret itself (32 random bytes) is wrapped with the Keystore
- *   key and stored, together with its per-call 96-bit random GCM IV, inside
- *   a private SharedPreferences file. The IV is never reused — each
- *   generateAndStoreSecret call uses a fresh IV produced by SecureRandom.
+ *   key and stored, together with its per-call GCM IV, inside a private
+ *   SharedPreferences file. The IV is never reused — AndroidKeyStore AES/GCM
+ *   keys created with setRandomizedEncryptionRequired(true) REQUIRE the
+ *   Keystore provider to generate the IV itself on every encrypt, so we
+ *   initialise the encrypt cipher without an IV parameter and read
+ *   `cipher.iv` post-init before persisting alongside the ciphertext. The
+ *   decrypt path continues to pass the stored IV via GCMParameterSpec to
+ *   `Cipher.init(DECRYPT_MODE, key, ...)`.
  * - getSecret uses BiometricPrompt.CryptoObject(cipher) with a Cipher
  *   initialized in DECRYPT_MODE so that the biometric authentication
  *   unlocks the cipher for exactly one decrypt.
@@ -56,7 +61,6 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         private const val PREFS_NAME = "org.enbox.mobile.biometric.prefs"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
-        private const val GCM_IV_BYTES = 12
         private const val SECRET_BYTES = 32
 
         // Canonical error codes surfaced to JS. Must match the iOS file and
@@ -256,12 +260,20 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             SecureRandom().nextBytes(secret)
             secretBuf = secret
 
-            // Fresh per-call 96-bit random IV — never reused (VAL-NATIVE-040).
-            val iv = ByteArray(GCM_IV_BYTES)
-            SecureRandom().nextBytes(iv)
-
+            // AndroidKeyStore AES/GCM requirement: when the key was created
+            // with setRandomizedEncryptionRequired(true) (see createKeyGenSpec
+            // above — required by the mission's security contract), the
+            // Keystore provider MUST generate the GCM IV itself. Supplying a
+            // caller-generated IV via GCMParameterSpec at ENCRYPT_MODE is
+            // rejected by the provider with an InvalidAlgorithmParameterException
+            // on several Android versions / OEM implementations. Initialise
+            // without an IV parameter here, then read `cipher.iv` after init
+            // to persist the provider-generated IV alongside the ciphertext.
+            // The DECRYPT_MODE path below is unaffected by this requirement
+            // and continues to supply the stored IV via GCMParameterSpec.
             val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val iv = cipher.iv
             val ciphertext = cipher.doFinal(secret)
 
             // Persist ciphertext + IV side-by-side under alias-scoped keys.

@@ -97,6 +97,18 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
     case errSecUserCanceled:
       return kErrUserCanceled;
     case errSecAuthFailed:
+      // NOTE: errSecAuthFailed is ambiguous on a biometry-current-set
+      // ACL item. It can mean a retryable authentication mismatch (e.g.
+      // presented biometric did not match the enrolled template, but the
+      // key itself is still valid), OR it can mean the underlying
+      // biometry set has been invalidated (enrollment changed) and the
+      // item can no longer be unwrapped. Default to the retryable AUTH_FAILED
+      // here; the biometry-invalidation path is disambiguated by
+      // `codeForGetSecretOSStatus:laContext:` below which surfaces
+      // KEY_INVALIDATED when LAContext confirms the failure is not a
+      // BiometryLockout / BiometryNotAvailable / BiometryNotEnrolled
+      // condition (i.e. the user presented a biometric successfully but
+      // the stored ACL was no longer valid).
       return kErrAuthFailed;
     case errSecInvalidData:
     case errSecDecode:
@@ -110,6 +122,46 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
     default:
       return kErrVault;
   }
+}
+
+// Disambiguate the ambiguous errSecAuthFailed on a getSecret call against a
+// biometry-current-set ACL item:
+//
+//   - If LAContext.canEvaluatePolicy reports BiometryLockout,
+//     BiometryNotAvailable, or BiometryNotEnrolled, the failure is NOT due
+//     to ACL invalidation — the biometric subsystem simply could not evaluate
+//     the policy, so keep the retryable AUTH_FAILED mapping.
+//   - Otherwise (canEvaluatePolicy returns YES, meaning the user's
+//     biometrics are enrolled and usable), errSecAuthFailed on a
+//     biometry-current-set item indicates that the current biometric set has
+//     been invalidated relative to the one recorded at item-creation time —
+//     the item can never be unwrapped again. Surface as KEY_INVALIDATED so
+//     the JS vault can route to RecoveryRestore.
+- (NSString *)codeForGetSecretOSStatus:(OSStatus)status
+                              laContext:(LAContext *)laContext {
+  if (status != errSecAuthFailed) {
+    return [self codeForOSStatus:status];
+  }
+
+  LAContext *probe = laContext ?: [[LAContext alloc] init];
+  NSError *laError = nil;
+  BOOL canEvaluate = [probe canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
+                                        error:&laError];
+  if (!canEvaluate && laError != nil) {
+    switch (laError.code) {
+      case LAErrorBiometryLockout:
+      case LAErrorBiometryNotAvailable:
+      case LAErrorBiometryNotEnrolled:
+        // The biometry subsystem itself could not evaluate — treat as a
+        // retryable auth failure rather than an invalidated key.
+        return kErrAuthFailed;
+      default:
+        break;
+    }
+  }
+  // Biometrics usable, yet Keychain still rejected auth: the stored
+  // biometry-current-set ACL no longer matches the current enrolled set.
+  return kErrKeyInvalidated;
 }
 
 - (void)rejectFromOSStatus:(OSStatus)status
@@ -299,7 +351,13 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
       resolve([hex copy]);
     } else {
       if (dataRef != NULL) CFRelease(dataRef);
-      [self rejectFromOSStatus:status where:@"getSecret" rejecter:reject];
+      // Use the getSecret-specific OSStatus mapping which disambiguates
+      // errSecAuthFailed against the current LAContext so that an invalidated
+      // biometry-current-set ACL surfaces as KEY_INVALIDATED (driving
+      // RecoveryRestore routing) rather than a retryable AUTH_FAILED.
+      NSString *code = [self codeForGetSecretOSStatus:status laContext:context];
+      NSString *message = [NSString stringWithFormat:@"getSecret failed (OSStatus %d)", (int)status];
+      reject(code, message, nil);
     }
   });
 }

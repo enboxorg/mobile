@@ -68,22 +68,14 @@ function biometricError(
   return err;
 }
 
-// Reset each mock's behavior + call history so tests are fully isolated.
-beforeEach(() => {
-  mock.isBiometricAvailable.mockReset().mockResolvedValue({
-    available: true,
-    enrolled: true,
-    type: 'fingerprint',
-  });
-  mock.generateAndStoreSecret.mockReset().mockResolvedValue(undefined);
-  mock.getSecret
-    .mockReset()
-    .mockResolvedValue(
-      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-    );
-  mock.hasSecret.mockReset().mockResolvedValue(false);
-  mock.deleteSecret.mockReset().mockResolvedValue(undefined);
-});
+// The default mock behaviors (plus the per-test Map-backed coherent store)
+// are installed by `jest.setup.js`'s top-level `beforeEach`, which runs
+// before this file's own hooks. We therefore do NOT call `mockReset()` here
+// — doing so would drop the store-backed implementations and regress the
+// mock to the old incoherent "hasSecret=false but getSecret resolves a
+// secret" shape. Per-test overrides via `mockResolvedValueOnce` /
+// `mockRejectedValueOnce` still work because they sit on top of the
+// default implementations installed by the setup hook.
 
 describe('NativeBiometricVault — isBiometricAvailable', () => {
   it('returns an available:true/enrolled:true default shape under the jest.setup mock', async () => {
@@ -131,21 +123,47 @@ describe('NativeBiometricVault — isBiometricAvailable', () => {
 });
 
 describe('NativeBiometricVault — lifecycle roundtrip', () => {
+  // This test exercises the actual coherent Map-backed default installed by
+  // jest.setup.js — it does NOT manually flip hasSecret. That is the whole
+  // point of the coherent mock: hasSecret / getSecret / deleteSecret all
+  // agree on the same internal store, so a test can't observe the
+  // impossible "hasSecret === false yet getSecret resolves a secret" state
+  // that caused the BLOCKER 4 scrutiny finding.
   it('generateAndStoreSecret → hasSecret=true → deleteSecret → hasSecret=false', async () => {
     const alias = 'enbox.wallet.root';
     const options = { requireBiometrics: true, invalidateOnEnrollmentChange: true };
 
-    // Step 1: generateAndStoreSecret resolves undefined with forwarded args.
+    // Step 0: a pristine store reports no secret for this alias.
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+    // And getSecret rejects with NOT_FOUND when the alias is absent.
+    await expect(
+      NativeBiometricVault.getSecret(alias, {
+        promptTitle: 'Unlock',
+        promptMessage: 'Authenticate',
+        promptCancel: 'Cancel',
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+    // Step 1: generateAndStoreSecret populates the internal store and
+    // resolves undefined with forwarded args.
     await expect(
       NativeBiometricVault.generateAndStoreSecret(alias, options),
     ).resolves.toBeUndefined();
     expect(mock.generateAndStoreSecret).toHaveBeenCalledTimes(1);
     expect(mock.generateAndStoreSecret).toHaveBeenCalledWith(alias, options);
 
-    // Step 2: flip the mock so hasSecret reports the secret is present.
-    mock.hasSecret.mockResolvedValueOnce(true);
+    // Step 2: hasSecret now reflects store state (no manual flip required).
     await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
     expect(mock.hasSecret).toHaveBeenCalledWith(alias);
+
+    // Step 2b: getSecret resolves the stored secret (lower-case hex).
+    const storedSecret = await NativeBiometricVault.getSecret(alias, {
+      promptTitle: 'Unlock',
+      promptMessage: 'Authenticate',
+      promptCancel: 'Cancel',
+    });
+    expect(storedSecret).toMatch(/^[0-9a-f]+$/);
+    expect(storedSecret.length).toBeGreaterThan(0);
 
     // Step 3: deleteSecret resolves undefined with forwarded alias.
     await expect(
@@ -153,8 +171,16 @@ describe('NativeBiometricVault — lifecycle roundtrip', () => {
     ).resolves.toBeUndefined();
     expect(mock.deleteSecret).toHaveBeenCalledWith(alias);
 
-    // Step 4: hasSecret default (mockResolvedValue false in beforeEach) reports absent.
+    // Step 4: after delete the store is empty — hasSecret observes that
+    // directly through the Map-backed default (no manual override needed).
     await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+    await expect(
+      NativeBiometricVault.getSecret(alias, {
+        promptTitle: 'Unlock',
+        promptMessage: 'Authenticate',
+        promptCancel: 'Cancel',
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });
 
@@ -190,7 +216,13 @@ describe('NativeBiometricVault — getSecret success path', () => {
     );
   });
 
-  it('the default mock return value is itself a valid lowercase hex string', async () => {
+  it('getSecret resolves a valid lowercase hex string once the alias has been provisioned', async () => {
+    // Populate the coherent store first (BLOCKER 4 fix): the default mock
+    // rejects with NOT_FOUND when the alias is absent.
+    await NativeBiometricVault.generateAndStoreSecret('enbox.wallet.root', {
+      requireBiometrics: true,
+      invalidateOnEnrollmentChange: true,
+    });
     const secret = await NativeBiometricVault.getSecret('enbox.wallet.root', {
       promptTitle: 't',
       promptMessage: 'm',
@@ -201,9 +233,66 @@ describe('NativeBiometricVault — getSecret success path', () => {
   });
 
   it('forwards prompt options without promptSubtitle correctly', async () => {
+    // Populate the coherent store first so getSecret resolves rather than
+    // rejecting with NOT_FOUND.
+    await NativeBiometricVault.generateAndStoreSecret('enbox.wallet.root', {
+      requireBiometrics: true,
+      invalidateOnEnrollmentChange: true,
+    });
     const minimal = { promptTitle: 't', promptMessage: 'm', promptCancel: 'c' };
     await NativeBiometricVault.getSecret('enbox.wallet.root', minimal);
     expect(mock.getSecret).toHaveBeenCalledWith('enbox.wallet.root', minimal);
+  });
+});
+
+describe('NativeBiometricVault — default mock is internally coherent (BLOCKER 4 fix)', () => {
+  const prompt = {
+    promptTitle: 'Unlock',
+    promptMessage: 'msg',
+    promptCancel: 'cancel',
+  };
+
+  it('hasSecret and getSecret agree: absent alias → hasSecret=false AND getSecret rejects NOT_FOUND', async () => {
+    // Regression guard: the previous shipped default had hasSecret=false
+    // while getSecret still resolved a hex string, letting consumers
+    // "unlock" an uninitialized vault. The coherent default must surface
+    // NOT_FOUND in lock-step with hasSecret=false.
+    await expect(NativeBiometricVault.hasSecret('nope')).resolves.toBe(false);
+    await expect(
+      NativeBiometricVault.getSecret('nope', prompt),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('hasSecret and getSecret agree: provisioned alias → hasSecret=true AND getSecret resolves', async () => {
+    await NativeBiometricVault.generateAndStoreSecret('enbox.wallet.root', {
+      requireBiometrics: true,
+      invalidateOnEnrollmentChange: true,
+    });
+    await expect(
+      NativeBiometricVault.hasSecret('enbox.wallet.root'),
+    ).resolves.toBe(true);
+    const secret = await NativeBiometricVault.getSecret('enbox.wallet.root', prompt);
+    expect(secret).toMatch(/^[0-9a-f]+$/);
+  });
+
+  it('deleteSecret is idempotent even when the alias is absent', async () => {
+    // No prior generate → delete must still resolve (not reject).
+    await expect(
+      NativeBiometricVault.deleteSecret('never-stored'),
+    ).resolves.toBeUndefined();
+    // Second delete on the same missing alias must also resolve.
+    await expect(
+      NativeBiometricVault.deleteSecret('never-stored'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('store is reset between tests (no leakage of previously-provisioned aliases)', async () => {
+    // This test runs AFTER the previous ones have provisioned
+    // 'enbox.wallet.root'. If the reset in jest.setup.js beforeEach works
+    // correctly, the alias must no longer be present here.
+    await expect(
+      NativeBiometricVault.hasSecret('enbox.wallet.root'),
+    ).resolves.toBe(false);
   });
 });
 
