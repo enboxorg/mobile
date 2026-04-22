@@ -15,7 +15,10 @@ export function WelcomeScreen({ onStart }: WelcomeScreenProps) {
     <Screen contentContainerStyle={styles.content}>
       <View style={styles.hero}>
         <Text style={[styles.kicker, { color: theme.colors.accent }]}>Enbox</Text>
-        <Text style={[styles.title, { color: theme.colors.text }]}>
+        <Text
+          accessibilityRole="header"
+          style={[styles.title, { color: theme.colors.text }]}
+        >
           Your identities, your devices, your control.
         </Text>
         <Text style={[styles.subtitle, { color: theme.colors.textMuted }]}>
@@ -27,7 +30,7 @@ export function WelcomeScreen({ onStart }: WelcomeScreenProps) {
         <Feature
           icon="01"
           title="Secure by default"
-          description="Your wallet is protected by a PIN and stored in your device's secure enclave."
+          description="Your wallet is sealed behind your device biometrics and stored in the secure enclave. Only you can unlock."
           theme={theme}
         />
         <Feature
@@ -44,7 +47,11 @@ export function WelcomeScreen({ onStart }: WelcomeScreenProps) {
         />
       </View>
 
-      <AppButton label="Get started" onPress={onStart} />
+      <AppButton
+        accessibilityLabel="Get started"
+        label="Get started"
+        onPress={onStart}
+      />
     </Screen>
   );
 }
