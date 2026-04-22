@@ -21,6 +21,16 @@ You are a feature worker on the biometric-vault mission. Your session has been p
 - `.factory/library/environment.md` — tool versions and host constraints
 - `.factory/library/user-testing.md` — testing surface and anchor strings
 
+## Honesty gate (read first)
+
+Before you set `skillFeedback.followedProcedure: true` in your handoff, you MUST have actually done all of the following in this session:
+
+1. Read (not skimmed; actually parsed) `mission.md`, `AGENTS.md`, the specific assertions listed in your `fulfills` from `validation-contract.md`, and every `.factory/library/*.md` file relevant to your feature's area (at minimum `architecture.md`; plus `environment.md` if you'll run install/test flows; plus `user-testing.md` if your tests assert user-facing anchors or biometric flows).
+2. Wrote failing tests FIRST for every non-trivial behavior and observed them RED before implementing, then GREEN after. If this wasn't possible (pure config/native/Xcode change), you wrote a file-parsing / grep-based test that verifies the artifact instead.
+3. Confirmed every assertion you claim in `assertionsFulfilled` is actually covered by a committed test OR a committed artifact check (not "I reviewed it by eye").
+
+If any of the above is untrue, set `skillFeedback.followedProcedure: false`, enumerate the skipped step(s) in `skillFeedback.deviations[]`, and keep going — honesty is always preferred over a falsely-clean handoff. Subsequent scrutiny WILL catch skipped steps; surface them yourself.
+
 ## Core principles
 
 1. **Test-driven.** For every non-trivial behavior, write the test BEFORE the implementation (red → green). If the feature is a file-system or configuration change (e.g., AndroidManifest edit, codegen registration), prove it by grep or by parsing the file in a test — not by "I looked at it".
