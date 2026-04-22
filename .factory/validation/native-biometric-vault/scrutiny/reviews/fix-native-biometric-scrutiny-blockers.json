@@ -1,0 +1,26 @@
+{
+  "featureId": "fix-native-biometric-scrutiny-blockers",
+  "reviewedAt": "2026-04-22T02:05:25Z",
+  "commitId": "08a6b2481df4862f842d93261e929d0f8b3a7cf7",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass: the rerun fix resolves the four round-1 blockers together without introducing a new high-confidence blocker in the touched files. `project.pbxproj` now includes `RCTNativeBiometricVault.mm` in the app target sources, `RCTNativeBiometricVault.mm` routes `getSecret`'s ambiguous `errSecAuthFailed` through a dedicated `KEY_INVALIDATED` disambiguation helper, the Android encrypt path now lets Android Keystore generate the AES/GCM IV before persisting it, and the default Jest mock is now internally coherent with regression coverage for the missing-secret path.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The fix worker still marked `skillFeedback.followedProcedure: true` even though the transcript skeleton skipped all three library reads required by `mobile-feature-worker` (`architecture.md`, `environment.md`, `user-testing.md`) and started editing before the first targeted red test run. The skill or its handoff rubric is not catching its own required-read / test-first deviations reliably.",
+      "evidence": "`/home/liran/src/enboxorg/mobile/.factory/skills/mobile-feature-worker/SKILL.md` requires those three reads in the `Context you must load` section. A transcript check over session `6ae166eb-6e30-402f-b3bc-bfd8b9993b40` reported `/home/liran/src/enboxorg/mobile/.factory/library/architecture.md MISSING`, `/home/liran/src/enboxorg/mobile/.factory/library/environment.md MISSING`, and `/home/liran/src/enboxorg/mobile/.factory/library/user-testing.md MISSING`; the first edit to `jest.setup.js` appears earlier in the skeleton than the first targeted `bun run test -- src/lib/enbox/__tests__/native-biometric-vault.test.ts`, while the handoff still records `skillFeedback.followedProcedure: true`."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The mission's shared state still does not explain why `NativeBiometricVault` now has explicit `project.pbxproj` entries while `NativeSecureStorage` and `NativeCrypto` do not. Future iOS-native work can still get tripped up by this asymmetry unless the repo documents whether the older modules rely purely on codegen/Pods target membership or should also gain explicit pbxproj entries.",
+      "evidence": "`package.json:27-30` registers `NativeSecureStorage`, `NativeCrypto`, and `NativeBiometricVault` in `codegenConfig.ios.modulesProvider`, but `ios/EnboxMobile.xcodeproj/project.pbxproj` only contains `NativeBiometricVault` references (`14-15`, `29-30`, `53-65`, `263`) and `rg 'NativeSecureStorage|NativeCrypto' ios/EnboxMobile.xcodeproj/project.pbxproj` returns no matches. The worker handoff also surfaced this as an out-of-scope consistency/documentation gap."
+    }
+  ],
+  "addressesFailureFrom": "/home/liran/src/enboxorg/mobile/.factory/validation/native-biometric-vault/scrutiny/synthesis.json",
+  "summary": "Pass: I reviewed the fix commit, the fix worker transcript skeleton, the prior failed reviews, and the touched code. The four original blocking scrutiny findings are adequately addressed, I did not find a new blocking or non-blocking code defect in the fix itself, and I recorded two shared-state observations worth triaging around skill-procedure enforcement and the remaining iOS target-membership knowledge gap."
+}
