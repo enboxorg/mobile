@@ -33,9 +33,12 @@ const USER_CANCELED_CODES = new Set<string>([
   'VAULT_ERROR_USER_CANCELED',
 ]);
 const LOCKOUT_CODES = new Set<string>([
+  'VAULT_ERROR_BIOMETRY_LOCKOUT',
+  // Defensive fallbacks for non-mapped paths (e.g. a test or native
+  // layer that throws with the raw code without going through
+  // `BiometricVault.mapNativeErrorToVaultError`).
   'BIOMETRY_LOCKOUT',
   'BIOMETRY_LOCKOUT_PERMANENT',
-  'VAULT_ERROR_BIOMETRY_LOCKOUT',
 ]);
 const INVALIDATED_CODES = new Set<string>([
   'KEY_INVALIDATED',

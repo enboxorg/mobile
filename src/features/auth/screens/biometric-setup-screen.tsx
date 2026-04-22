@@ -8,14 +8,14 @@ import { useAgentStore } from '@/lib/enbox/agent-store';
 import { useAppTheme } from '@/theme';
 
 /**
- * Canonical error-code matrix for the native biometric vault. The raw
- * codes (USER_CANCELED, BIOMETRY_NOT_ENROLLED, BIOMETRY_LOCKOUT,
- * BIOMETRY_LOCKOUT_PERMANENT, etc.) flow straight through when a test or
- * native call throws with `.code`; the `VAULT_ERROR_*` aliases cover the
- * JS-layer mapping performed by `BiometricVault.mapNativeErrorToVaultError`
- * so this screen works both with a directly-mocked
- * `initializeFirstLaunch` (unit tests) and with the real store that
- * re-throws the mapped `VaultError`.
+ * Canonical error-code matrix for the native biometric vault. The
+ * `VAULT_ERROR_*` codes are the canonical codes produced by
+ * `BiometricVault.mapNativeErrorToVaultError` — real unlock/init flows
+ * throw with these codes. The raw native codes (USER_CANCELED,
+ * BIOMETRY_NOT_ENROLLED, BIOMETRY_LOCKOUT, BIOMETRY_LOCKOUT_PERMANENT,
+ * etc.) are retained as defensive fallbacks so the screen also works
+ * when a test or a non-mapped native path throws with `.code` set to the
+ * raw native string.
  */
 const USER_CANCELED_CODES = new Set([
   'USER_CANCELED',
@@ -29,6 +29,10 @@ const NOT_ENROLLED_CODES = new Set([
   'VAULT_ERROR_BIOMETRICS_UNAVAILABLE',
 ]);
 const LOCKOUT_CODES = new Set([
+  'VAULT_ERROR_BIOMETRY_LOCKOUT',
+  // Defensive fallbacks for non-mapped paths (e.g. a test or native
+  // layer that throws with the raw code without going through
+  // `BiometricVault.mapNativeErrorToVaultError`).
   'BIOMETRY_LOCKOUT',
   'BIOMETRY_LOCKOUT_PERMANENT',
 ]);

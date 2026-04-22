@@ -418,6 +418,35 @@ describe('BiometricVault.unlock()', () => {
     });
     expect(native.getSecret).not.toHaveBeenCalled();
   });
+
+  it('re-throws a native BIOMETRY_LOCKOUT as VaultError with code VAULT_ERROR_BIOMETRY_LOCKOUT (does not collapse to generic VAULT_ERROR)', async () => {
+    const vault = new BiometricVault();
+    await vault.initialize({});
+    await vault.lock();
+
+    native.getSecret.mockRejectedValueOnce(withErrorCode('BIOMETRY_LOCKOUT'));
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      name: 'VaultError',
+      code: 'VAULT_ERROR_BIOMETRY_LOCKOUT',
+    });
+    // Biometric state must NOT be flipped to invalidated by a lockout —
+    // lockout is a transient device state and the vault stays valid.
+    expect((await vault.getStatus()).biometricState).not.toBe('invalidated');
+  });
+
+  it('re-throws a native BIOMETRY_LOCKOUT_PERMANENT as VaultError with code VAULT_ERROR_BIOMETRY_LOCKOUT', async () => {
+    const vault = new BiometricVault();
+    await vault.initialize({});
+    await vault.lock();
+
+    native.getSecret.mockRejectedValueOnce(
+      withErrorCode('BIOMETRY_LOCKOUT_PERMANENT'),
+    );
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      name: 'VaultError',
+      code: 'VAULT_ERROR_BIOMETRY_LOCKOUT',
+    });
+  });
 });
 
 // ===========================================================================
@@ -742,7 +771,8 @@ describe('mapNativeErrorToVaultError', () => {
     ['BIOMETRY_UNAVAILABLE', 'VAULT_ERROR_BIOMETRICS_UNAVAILABLE'],
     ['BIOMETRY_NOT_ENROLLED', 'VAULT_ERROR_BIOMETRICS_UNAVAILABLE'],
     ['NOT_FOUND', 'VAULT_ERROR_NOT_INITIALIZED'],
-    ['BIOMETRY_LOCKOUT', 'VAULT_ERROR'],
+    ['BIOMETRY_LOCKOUT', 'VAULT_ERROR_BIOMETRY_LOCKOUT'],
+    ['BIOMETRY_LOCKOUT_PERMANENT', 'VAULT_ERROR_BIOMETRY_LOCKOUT'],
     ['AUTH_FAILED', 'VAULT_ERROR'],
   ])('maps %s to %s', (nativeCode, vaultCode) => {
     const err = withErrorCode(nativeCode);

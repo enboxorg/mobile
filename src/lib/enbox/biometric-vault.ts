@@ -85,6 +85,7 @@ export const VAULT_ERROR_CODES = [
   'VAULT_ERROR_NOT_INITIALIZED',
   'VAULT_ERROR_LOCKED',
   'VAULT_ERROR_BIOMETRICS_UNAVAILABLE',
+  'VAULT_ERROR_BIOMETRY_LOCKOUT',
   'VAULT_ERROR_USER_CANCELED',
   'VAULT_ERROR_KEY_INVALIDATED',
   'VAULT_ERROR_UNSUPPORTED',
@@ -430,9 +431,10 @@ export function mapNativeErrorToVaultError(err: unknown): VaultError | null {
       return new VaultError('VAULT_ERROR_BIOMETRICS_UNAVAILABLE', message ?? code);
     case 'NOT_FOUND':
       return new VaultError('VAULT_ERROR_NOT_INITIALIZED', message ?? code);
-    case 'AUTH_FAILED':
     case 'BIOMETRY_LOCKOUT':
     case 'BIOMETRY_LOCKOUT_PERMANENT':
+      return new VaultError('VAULT_ERROR_BIOMETRY_LOCKOUT', message ?? code);
+    case 'AUTH_FAILED':
     case 'VAULT_ERROR':
       return new VaultError('VAULT_ERROR', message ?? code);
     default:

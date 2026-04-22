@@ -203,8 +203,18 @@ describe('BiometricUnlockScreen', () => {
 
   // ------------------------------------------------------------------
   // VAL-UX-018: BIOMETRY_LOCKOUT → clear lockout message; no PIN.
+  //
+  // Also asserts the canonical VaultError code path
+  // (`VAULT_ERROR_BIOMETRY_LOCKOUT`) that `BiometricVault.mapNativeError
+  // ToVaultError` re-throws for both native lockout codes — the real
+  // unlock flow surfaces this canonical code, so the screen MUST render
+  // the lockout UX (not the generic error branch) when it is observed.
   // ------------------------------------------------------------------
-  it.each([['BIOMETRY_LOCKOUT'], ['BIOMETRY_LOCKOUT_PERMANENT']])(
+  it.each([
+    ['BIOMETRY_LOCKOUT'],
+    ['BIOMETRY_LOCKOUT_PERMANENT'],
+    ['VAULT_ERROR_BIOMETRY_LOCKOUT'],
+  ])(
     'renders a clear lockout message with no PIN fallback on %s',
     async (code) => {
       const onUnlock = jest.fn();

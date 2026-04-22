@@ -246,6 +246,44 @@ describe('BiometricSetupScreen', () => {
   });
 
   // ------------------------------------------------------------------
+  // Canonical VaultError mapping: when the real store re-throws a
+  // VaultError whose `.code === 'VAULT_ERROR_BIOMETRY_LOCKOUT'` (the
+  // code produced by BiometricVault.mapNativeErrorToVaultError for both
+  // native BIOMETRY_LOCKOUT and BIOMETRY_LOCKOUT_PERMANENT), the screen
+  // must render the lockout UX — NOT the generic error branch.
+  // ------------------------------------------------------------------
+  it('renders the lockout UX (not the generic error) on a VaultError with code VAULT_ERROR_BIOMETRY_LOCKOUT', async () => {
+    mockInitializeFirstLaunch.mockRejectedValueOnce(
+      makeNativeError(
+        'VAULT_ERROR_BIOMETRY_LOCKOUT',
+        'too many attempts',
+      ),
+    );
+
+    const onInitialized = jest.fn();
+    const screen = render(
+      <BiometricSetupScreen onInitialized={onInitialized} />,
+    );
+
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Enable biometric unlock'));
+    });
+
+    expect(onInitialized).not.toHaveBeenCalled();
+    // Lockout UX is shown.
+    expect(screen.getByText(/lock(ed|out)/i)).toBeTruthy();
+    // The generic error message ("too many attempts") must NOT be
+    // rendered — that would mean we fell into the generic branch.
+    expect(screen.queryByText(/too many attempts/i)).toBeNull();
+    // No PIN / passcode / skip fallback.
+    expect(screen.queryByText(/PIN/i)).toBeNull();
+    expect(screen.queryByText(/passcode/i)).toBeNull();
+    expect(screen.queryByText(/skip/i)).toBeNull();
+    // Session state untouched.
+    expect(useSessionStore.getState().biometricStatus).toBe('ready');
+  });
+
+  // ------------------------------------------------------------------
   // Rapid-tap debounce: two synchronous presses invoke the initializer
   // once (VAL-UX-046 style affordance while a setup attempt is in-flight).
   // ------------------------------------------------------------------
