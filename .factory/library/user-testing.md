@@ -68,6 +68,7 @@ The contract file `validation-contract.md` labels each assertion with its `Tool:
 - The CI emulator runner has finite disk; the workflow already frees `/usr/share/dotnet` + Android NDK ghosts before building. Do not add large artifact steps that break this budget.
 - For `VAL-PATCH-007`, avoid a plain `grep "IdentityVault"` on the ESM bundle because it also matches the valid `HdIdentityVault` fallback symbol as a substring; use an exact-word regex or import-specific guard instead.
 - For local `VAL-PATCH-001` reruns on Bun 1.3.11, a plain fresh repo copy is not enough once the host has installed before: Bun reuses postinstall-mutated cache entries for `@enbox/agent` and `react-native-leveldb`. To reproduce the expected `[postinstall] Patched ...` lines, validate in a temp repo copy **and** temporarily move only those package cache entries out of `~/.bun/install/cache/`, then restore them after the install completes.
+- For build-only assertions backed by GitHub Actions (`VAL-NATIVE-013`, `VAL-NATIVE-021`, and later CI assertions), compare the successful run's `headSha` to the local branch tip before treating the run as authoritative. If local `HEAD` is ahead of `origin/<branch>`, existing green runs do not cover the newer commits and the assertion should stay blocked until CI runs on the newer tip.
 
 ## Validation Concurrency
 
@@ -86,6 +87,14 @@ The contract file `validation-contract.md` labels each assertion with its `Tool:
 - Keep execution single-threaded: do not enable parallel Jest workers and do not spawn nested validators.
 - Do not edit product code while validating. Only write the assigned flow report and evidence artifacts.
 - For patch-injection assertions, prefer the real local user-facing validation surface defined by the contract: `bun install --frozen-lockfile`, `bun run verify`, shell greps, and smoke scripts against the patched `@enbox/agent` package.
+
+## Flow Validator Guidance: native-biometric-vault-local
+
+- Isolation boundary: the shared repository checkout at `/home/liran/src/enboxorg/mobile`, using only read-only repo inspection commands plus validation artifact writes under `.factory/validation/native-biometric-vault/user-testing/` and the mission evidence directory.
+- Allowed tools: `bun run verify`, targeted Jest invocations, `rg`/file reads, and read-only `gh` inspection of existing GitHub Actions runs needed for `VAL-NATIVE-013` and `VAL-NATIVE-021`.
+- Do not dispatch new workflows, push commits, start emulators, or run Gradle/Xcode locally. For this milestone, CI build validation comes from inspecting already-completed `ci.yml` runs on `mission/biometric-vault`.
+- Keep execution single-threaded: at most one validator at a time and no nested validators.
+- Do not edit product code while validating. Only write the assigned flow report and any evidence notes/artifacts.
 
 ## Update policy
 

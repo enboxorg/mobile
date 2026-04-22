@@ -1,0 +1,285 @@
+{
+  "groupId": "native-static-spec-source",
+  "testedAt": "2026-04-22T02:17:51.525224+00:00",
+  "surface": "native-biometric-vault-local",
+  "assignedAssertions": [
+    "VAL-NATIVE-001",
+    "VAL-NATIVE-002",
+    "VAL-NATIVE-003",
+    "VAL-NATIVE-004",
+    "VAL-NATIVE-005",
+    "VAL-NATIVE-006",
+    "VAL-NATIVE-007",
+    "VAL-NATIVE-008",
+    "VAL-NATIVE-009",
+    "VAL-NATIVE-010",
+    "VAL-NATIVE-011",
+    "VAL-NATIVE-012",
+    "VAL-NATIVE-014",
+    "VAL-NATIVE-015",
+    "VAL-NATIVE-016",
+    "VAL-NATIVE-017",
+    "VAL-NATIVE-018",
+    "VAL-NATIVE-019",
+    "VAL-NATIVE-020",
+    "VAL-NATIVE-031",
+    "VAL-NATIVE-032",
+    "VAL-NATIVE-037",
+    "VAL-NATIVE-038",
+    "VAL-NATIVE-039",
+    "VAL-NATIVE-040",
+    "VAL-NATIVE-041",
+    "VAL-NATIVE-042"
+  ],
+  "isolation": {
+    "repoRoot": "/home/liran/src/enboxorg/mobile",
+    "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+    "evidenceDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "Execute",
+    "rg",
+    "node",
+    "bun run verify"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-NATIVE-001",
+      "status": "pass",
+      "reason": "`specs/NativeBiometricVault.ts` exists at the canonical `specs/` path scanned by codegen.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-001)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-002",
+      "status": "pass",
+      "reason": "The spec imports `TurboModule` and `TurboModuleRegistry` and exposes exactly `isBiometricAvailable`, `generateAndStoreSecret`, `getSecret`, `hasSecret`, and `deleteSecret` on the interface.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-002)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-003",
+      "status": "pass",
+      "reason": "The spec default export is `TurboModuleRegistry.getEnforcing<Spec>('NativeBiometricVault')`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-003)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-004",
+      "status": "pass",
+      "reason": "`package.json` maps `NativeBiometricVault` to `RCTNativeBiometricVault` in `codegenConfig.ios.modulesProvider` while preserving the existing secure-storage and crypto entries.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-004 / VAL-NATIVE-005)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-005",
+      "status": "pass",
+      "reason": "`codegenConfig.android.javaPackageName` remains `org.enbox.mobile.nativemodules`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-004 / VAL-NATIVE-005)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-006",
+      "status": "pass",
+      "reason": "`bun run verify` exited 0 and its `tsc --noEmit` phase completed without TypeScript errors, so the new spec typechecks cleanly.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/verify.log"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-007",
+      "status": "pass",
+      "reason": "`RCTNativeBiometricVault.h` imports `EnboxNativeModulesSpec/EnboxNativeModulesSpec.h` and declares `RCTNativeBiometricVault : NSObject <NativeBiometricVaultSpec>`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-007 / 008 / 009 / 010 / 011 / 031 / 032 / 037 / 038 / 042 (iOS source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-008",
+      "status": "pass",
+      "reason": "The iOS implementation returns `@\"NativeBiometricVault\"` from `moduleName` and constructs `NativeBiometricVaultSpecJSI` in `getTurboModule:`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-007 / 008 / 009 / 010 / 011 / 031 / 032 / 037 / 038 / 042 (iOS source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-009",
+      "status": "pass",
+      "reason": "The iOS Keychain write path uses `SecAccessControlCreateWithFlags` with `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly` and `kSecAccessControlBiometryCurrentSet`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-007 / 008 / 009 / 010 / 011 / 031 / 032 / 037 / 038 / 042 (iOS source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-010",
+      "status": "pass",
+      "reason": "The iOS source imports `Security` and `LocalAuthentication`, creates `LAContext`, and calls `canEvaluatePolicy(LAPolicyDeviceOwnerAuthenticationWithBiometrics, ...)` for availability.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-007 / 008 / 009 / 010 / 011 / 031 / 032 / 037 / 038 / 042 (iOS source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-011",
+      "status": "pass",
+      "reason": "The iOS implementation defines and routes the canonical error-code tokens for user-cancel, unavailable, not-enrolled, lockout, auth-failed, key-invalidated, not-found, and vault-fallback paths.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-007 / 008 / 009 / 010 / 011 / 031 / 032 / 037 / 038 / 042 (iOS source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-012",
+      "status": "pass",
+      "reason": "`ios/EnboxMobile/Info.plist` contains a non-empty `NSFaceIDUsageDescription` string.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-012)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-014",
+      "status": "pass",
+      "reason": "`NativeBiometricVaultModule.kt` extends `NativeBiometricVaultSpec`, exposes `const val NAME = \"NativeBiometricVault\"`, and `getName()` returns `NAME`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-014 / 015 / 016 / 017 / 018 / 019 / 020 / 031 / 039 / 040 / 041 / 042 (Android source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-015",
+      "status": "pass",
+      "reason": "The Android keystore spec sets authentication required, invalidation on biometric enrollment change, `AUTH_BIOMETRIC_STRONG`, GCM/NoPadding, and 256-bit key size.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-014 / 015 / 016 / 017 / 018 / 019 / 020 / 031 / 039 / 040 / 041 / 042 (Android source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-016",
+      "status": "pass",
+      "reason": "The Android implementation uses `BiometricManager.Authenticators.BIOMETRIC_STRONG`, `BiometricPrompt`, and `BiometricPrompt.CryptoObject(cipher)` on the decrypt path.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-014 / 015 / 016 / 017 / 018 / 019 / 020 / 031 / 039 / 040 / 041 / 042 (Android source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-017",
+      "status": "pass",
+      "reason": "The Android source maps documented biometric prompt and keystore failures to the canonical JS codes, including lockout, permanent lockout, not enrolled, unavailable, key invalidated, auth failed, not found, and vault fallback.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-014 / 015 / 016 / 017 / 018 / 019 / 020 / 031 / 039 / 040 / 041 / 042 (Android source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-018",
+      "status": "pass",
+      "reason": "`NativeModulesPackage.kt` registers `NativeBiometricVaultModule` in both `getModule` and `getReactModuleInfoProvider` with `isTurboModule=true`, `isCxxModule=false`, `canOverrideExistingModule=false`, and `needsEagerInit=false`, while preserving the existing native modules.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: NativeModulesPackage registration)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-019",
+      "status": "pass",
+      "reason": "`AndroidManifest.xml` includes `USE_BIOMETRIC`, `USE_FINGERPRINT`, `INTERNET`, and `CAMERA` permissions.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: AndroidManifest permissions/backup)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-020",
+      "status": "pass",
+      "reason": "`android/app/build.gradle` declares a pinned `androidx.biometric:biometric:1.1.0` dependency.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: build.gradle biometric dependency)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-031",
+      "status": "pass",
+      "reason": "The string `NativeBiometricVault` is consistent across the spec, iOS implementation, Android implementation, `package.json` codegen mapping, and the Jest mock registration.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-031 jest mock consistency)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-032",
+      "status": "pass",
+      "reason": "The iOS biometric vault uses the distinct namespaced service `org.enbox.mobile.biometric`, while secure storage continues to use `org.enbox.mobile.secure`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (sections: iOS source, distinct secure-storage service)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-037",
+      "status": "pass",
+      "reason": "The iOS Keychain query explicitly sets `kSecAttrSynchronizable` to `kCFBooleanFalse`, so the biometric vault item is not iCloud-synchronizable.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-007 / 008 / 009 / 010 / 011 / 031 / 032 / 037 / 038 / 042 (iOS source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-038",
+      "status": "pass",
+      "reason": "No disallowed iOS passcode/device-credential fallback tokens were found; the biometric vault source only references `LAPolicyDeviceOwnerAuthenticationWithBiometrics` and `kSecAccessControlBiometryCurrentSet`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (sections: iOS source, disallowed iOS fallback/log tokens)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-039",
+      "status": "pass",
+      "reason": "`AndroidManifest.xml` sets `android:allowBackup=\"false\"`, preventing vault data from being included in device/ADB backup.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: AndroidManifest permissions/backup)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-040",
+      "status": "pass",
+      "reason": "The Android seal path generates a fresh random 32-byte secret, initializes encryption with `Cipher.ENCRYPT_MODE` without a caller-supplied IV, persists the provider-generated `cipher.iv`, and reuses that stored IV only for decrypt via `GCMParameterSpec`; no dedicated local IV-difference test matched on this source-only surface.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (sections: VAL-NATIVE-014 / 015 / 016 / 017 / 018 / 019 / 020 / 031 / 039 / 040 / 041 / 042 (Android source), VAL-NATIVE-040 supporting test search)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-041",
+      "status": "pass",
+      "reason": "`createKeyGenSpec()` calls `setRandomizedEncryptionRequired(true)` on the Android keystore key spec.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (section: VAL-NATIVE-014 / 015 / 016 / 017 / 018 / 019 / 020 / 031 / 039 / 040 / 041 / 042 (Android source))"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-042",
+      "status": "pass",
+      "reason": "No native `NSLog`, `os_log`, `Log.*`, `println`, or `System.out` calls were found in the biometric vault iOS/Android implementation files.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/source-audit.log (sections: disallowed iOS fallback/log tokens, disallowed Android native logs)"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "`bun run verify` exits successfully, but its log still includes six ESLint warnings and one intentional `console.error` from unrelated existing tests, so the validator had to use exit status plus the clean `tsc --noEmit` phase instead of assuming a warning-free log.",
+      "resolved": true,
+      "resolution": "Reviewed `verify.log`: lint reported warnings only, typecheck was clean, and all 12 Jest suites passed, so VAL-NATIVE-006 remains a pass.",
+      "affectedAssertions": [
+        "VAL-NATIVE-006"
+      ]
+    },
+    {
+      "description": "The contract's VAL-NATIVE-040 evidence example mentions a dedicated IV-difference test, but the local source-only surface did not expose a matching test artifact.",
+      "resolved": true,
+      "resolution": "Validated VAL-NATIVE-040 from static source evidence instead: provider-generated `cipher.iv`, no caller-supplied encrypt IV, stored IV only reused for decrypt, plus a saved test search showing no local IV-specific match.",
+      "affectedAssertions": [
+        "VAL-NATIVE-040"
+      ]
+    }
+  ],
+  "blockers": [],
+  "summary": "Tested 27 assertions: 27 passed, 0 failed, 0 blocked. Static/source checks confirmed the NativeBiometricVault spec, iOS/Android native wiring, security flags, backup exclusion, and absence of native secret logging; `bun run verify` exited 0 with only non-blocking warnings/noisy test output."
+}

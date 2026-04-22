@@ -1,0 +1,165 @@
+{
+  "groupId": "native-js-tests",
+  "testedAt": "2026-04-22T02:22:35.846911+00:00",
+  "surface": "native-biometric-vault-local",
+  "assignedAssertions": [
+    "VAL-NATIVE-022",
+    "VAL-NATIVE-023",
+    "VAL-NATIVE-024",
+    "VAL-NATIVE-025",
+    "VAL-NATIVE-026",
+    "VAL-NATIVE-027",
+    "VAL-NATIVE-028",
+    "VAL-NATIVE-029",
+    "VAL-NATIVE-030",
+    "VAL-NATIVE-033",
+    "VAL-NATIVE-034",
+    "VAL-NATIVE-035",
+    "VAL-NATIVE-036"
+  ],
+  "isolation": {
+    "repoRoot": "/home/liran/src/enboxorg/mobile",
+    "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+    "evidenceDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "Execute",
+    "rg",
+    "git diff",
+    "bun run test -- src/lib/enbox/__tests__/native-biometric-vault.test.ts",
+    "bun run verify"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-NATIVE-022",
+      "status": "pass",
+      "reason": "`jest.setup.js` registers a default-export `./specs/NativeBiometricVault` mock with `isBiometricAvailable`, `generateAndStoreSecret`, `getSecret`, `hasSecret`, and `deleteSecret`, plus coherent default implementations.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-static-audit.log (section: VAL-NATIVE-022 jest.setup NativeBiometricVault mock)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-023",
+      "status": "pass",
+      "reason": "Targeted Jest coverage verifies the unavailable-hardware path is forwarded verbatim as `{ available: false, enrolled: false, type: 'none', reason: 'NO_HARDWARE' }` and does not throw.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-targeted-jest.log (tests: `forwards { available:false... } verbatim`, `does not throw when availability returns unavailable`)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-024",
+      "status": "pass",
+      "reason": "The targeted Jest file exercises the full lifecycle roundtrip: absent alias \u2192 `generateAndStoreSecret(alias, { requireBiometrics: true, invalidateOnEnrollmentChange: true })` \u2192 `hasSecret === true` \u2192 `deleteSecret(alias)` \u2192 `hasSecret === false`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-targeted-jest.log (test: `generateAndStoreSecret \u2192 hasSecret=true \u2192 deleteSecret \u2192 hasSecret=false`)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-025",
+      "status": "pass",
+      "reason": "Targeted Jest coverage asserts `getSecret` resolves a non-empty lower-case hex string with even length and forwards the prompt parameters verbatim, both with and without `promptSubtitle`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-targeted-jest.log (tests under `NativeBiometricVault \u2014 getSecret success path`)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-026",
+      "status": "pass",
+      "reason": "The targeted Jest suite simulates `getSecret` rejecting with `USER_CANCELED` and confirms the surfaced error preserves `.code === 'USER_CANCELED'`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-targeted-jest.log (test: `USER_CANCELED \u2014 .code is preserved through the TurboModule surface`)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-027",
+      "status": "pass",
+      "reason": "The targeted Jest suite simulates `getSecret` rejecting with `KEY_INVALIDATED` and confirms the surfaced error preserves `.code === 'KEY_INVALIDATED'`.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-targeted-jest.log (test: `KEY_INVALIDATED \u2014 .code is preserved`)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-028",
+      "status": "pass",
+      "reason": "Targeted Jest coverage proves the simulated iOS/Android rejection union equals the canonical nine-code JS contract, and the focused source audit shows those canonical tokens are enumerated in the dedicated JS test file.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-targeted-jest.log (tests under `NativeBiometricVault \u2014 cross-platform error-code union invariance`)",
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-static-audit.log (sections: VAL-NATIVE-028 canonical error code references, VAL-NATIVE-028 focused JS test references)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-029",
+      "status": "pass",
+      "reason": "Satisfied via the aggregate `bun run verify` gate: ESLint exited successfully with warnings only and no lint errors.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-verify.log"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-030",
+      "status": "pass",
+      "reason": "Satisfied by the aggregate `bun run verify` test phase plus `git diff` evidence: the full Jest suite passed 12/12 suites and 87/87 tests, including the pre-existing `secure-storage.test.ts` and `pin-hash.test.ts`, while `master...HEAD` test-file diff shows additions/new vault coverage rather than modifications to those pre-existing tests.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-verify.log",
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-static-audit.log (section: VAL-NATIVE-030 changed test files vs master...HEAD)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-033",
+      "status": "pass",
+      "reason": "Targeted Jest coverage asserts `generateAndStoreSecret(..., { requireBiometrics: false })` rejects deterministically with `VAULT_ERROR`, and both native implementations reference `requireBiometrics` and explicitly guard the unsupported false case.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-targeted-jest.log (tests under `NativeBiometricVault \u2014 requireBiometrics flag semantics`)",
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-static-audit.log (section: VAL-NATIVE-033 requireBiometrics native references)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-034",
+      "status": "pass",
+      "reason": "The targeted Jest suite shows `deleteSecret` resolves `undefined` for an absent alias and remains safe on back-to-back deletes, confirming idempotence.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-targeted-jest.log (tests under `NativeBiometricVault \u2014 deleteSecret idempotence` and `default mock is internally coherent`)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-035",
+      "status": "pass",
+      "reason": "The targeted Jest suite verifies `getSecret` rejects with `.code === 'NOT_FOUND'` when the alias is absent, both in the lifecycle/default-mock path and with an explicit rejection mock.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-targeted-jest.log (tests: absent-alias `NOT_FOUND` assertions)"
+      ]
+    },
+    {
+      "id": "VAL-NATIVE-036",
+      "status": "pass",
+      "reason": "Satisfied via the aggregate `bun run verify` gate: lint, typecheck, and the full Jest suite all completed successfully with exit code 0.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/native-biometric-vault/local-jest-static/native-js-verify.log"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "`bun run verify` still prints six existing ESLint warnings and one intentional `console.error` from an unrelated wallet-connect test, so pass/fail had to be determined from exit status plus the completed lint/typecheck/test phases rather than from a perfectly clean log.",
+      "resolved": true,
+      "resolution": "Used the successful exit code and reviewed `native-js-verify.log` to confirm lint had warnings only, `tsc --noEmit` passed, and the full Jest suite finished 12/12 suites and 87/87 tests.",
+      "affectedAssertions": [
+        "VAL-NATIVE-029",
+        "VAL-NATIVE-030",
+        "VAL-NATIVE-036"
+      ]
+    },
+    {
+      "description": "A broad canonical-code ripgrep also matched unrelated `LEVEL_NOT_FOUND` references because the contract token list includes `NOT_FOUND`.",
+      "resolved": true,
+      "resolution": "Appended a focused `native-biometric-vault.test.ts` grep section to the audit log and used the dedicated cross-platform Jest tests as the primary VAL-NATIVE-028 evidence.",
+      "affectedAssertions": [
+        "VAL-NATIVE-028"
+      ]
+    }
+  ],
+  "blockers": [],
+  "summary": "Tested 13 assertions: 13 passed, 0 failed, 0 blocked. Targeted NativeBiometricVault Jest coverage passed 23/23 tests, and the aggregate `bun run verify` gate passed with only pre-existing warnings/noisy console output in unrelated tests."
+}

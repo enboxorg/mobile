@@ -1,0 +1,83 @@
+{
+  "milestone": "native-biometric-vault",
+  "round": 1,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 42,
+    "passed": 40,
+    "failed": 0,
+    "blocked": 2
+  },
+  "passedAssertions": [
+    "VAL-NATIVE-001",
+    "VAL-NATIVE-002",
+    "VAL-NATIVE-003",
+    "VAL-NATIVE-004",
+    "VAL-NATIVE-005",
+    "VAL-NATIVE-006",
+    "VAL-NATIVE-007",
+    "VAL-NATIVE-008",
+    "VAL-NATIVE-009",
+    "VAL-NATIVE-010",
+    "VAL-NATIVE-011",
+    "VAL-NATIVE-012",
+    "VAL-NATIVE-014",
+    "VAL-NATIVE-015",
+    "VAL-NATIVE-016",
+    "VAL-NATIVE-017",
+    "VAL-NATIVE-018",
+    "VAL-NATIVE-019",
+    "VAL-NATIVE-020",
+    "VAL-NATIVE-022",
+    "VAL-NATIVE-023",
+    "VAL-NATIVE-024",
+    "VAL-NATIVE-025",
+    "VAL-NATIVE-026",
+    "VAL-NATIVE-027",
+    "VAL-NATIVE-028",
+    "VAL-NATIVE-029",
+    "VAL-NATIVE-030",
+    "VAL-NATIVE-031",
+    "VAL-NATIVE-032",
+    "VAL-NATIVE-033",
+    "VAL-NATIVE-034",
+    "VAL-NATIVE-035",
+    "VAL-NATIVE-036",
+    "VAL-NATIVE-037",
+    "VAL-NATIVE-038",
+    "VAL-NATIVE-039",
+    "VAL-NATIVE-040",
+    "VAL-NATIVE-041",
+    "VAL-NATIVE-042"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [
+    {
+      "id": "VAL-NATIVE-013",
+      "blockedBy": "GitHub Actions shows successful `build-ios` jobs on runs 24753819737 (head `7e86221`) and 24754326012 (head `c931605`), but the current local branch is ahead of `origin/mission/biometric-vault` by 5 commits, including build-affecting fix commit `08a6b24` that modified `ios/EnboxMobile.xcodeproj/project.pbxproj` and `RCTNativeBiometricVault.mm`. Because no `ci.yml` run exists after those fixes landed and this task forbids dispatching a new workflow, the current milestone state cannot be confirmed for VAL-NATIVE-013."
+    },
+    {
+      "id": "VAL-NATIVE-021",
+      "blockedBy": "GitHub Actions run 24754326012 proves `build-android` succeeded for remote head `c931605` and uploaded artifact `android-debug-apk` containing `app-debug.apk`, but the current local branch is ahead of origin by 5 commits, including build-affecting fix commit `08a6b24` that modified `android/app/src/main/java/org/enbox/mobile/nativemodules/NativeBiometricVaultModule.kt`. With no existing `ci.yml` run for the post-fix commits and no permission to dispatch one, the current milestone state remains unverified for VAL-NATIVE-021."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added a native-biometric-vault-local flow-validator guidance section covering read-only GH inspection, no local native builds, and single-concurrency local validation.",
+      "source": "setup"
+    },
+    {
+      "target": "user-testing.md",
+      "description": "Documented that build-only GitHub Actions assertions must compare a successful run head SHA with the local branch tip; if local HEAD is ahead of origin, existing green runs are not authoritative.",
+      "source": "flow-report"
+    }
+  ],
+  "flowReports": [
+    ".factory/validation/native-biometric-vault/user-testing/flows/native-static-spec-source.json",
+    ".factory/validation/native-biometric-vault/user-testing/flows/native-js-tests.json",
+    ".factory/validation/native-biometric-vault/user-testing/flows/native-ci-build-status.json"
+  ],
+  "generatedAt": "2026-04-22T02:28:35.173804+00:00",
+  "previousRound": null
+}
