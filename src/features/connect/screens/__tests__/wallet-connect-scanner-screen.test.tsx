@@ -1,47 +1,33 @@
 /**
  * WalletConnectScannerScreen regression tests (VAL-UX-051).
  *
- * The biometric-first refactor must not change this surface: the
- * scanner still renders, requests camera permission on mount, and
- * forwards scanned URLs to `walletConnectStore.handleIncomingUrl`.
+ * The biometric-first refactor must not change this surface: the scanner
+ * still renders, requests camera permission on mount, and forwards
+ * scanned URLs to `walletConnectStore.handleIncomingUrl`.
  *
- * ## Testing notes
+ * History / context:
+ * Before `fix-scanner-permission-flow` the screen probed camera
+ * permission inside `setTimeout(50)` and read `cameraRef.current` before
+ * the `<Camera>` element was ever rendered — which meant the ref was
+ * always `null`, the probe early-returned, and `hasPermission` stayed
+ * `null` forever, trapping the user on the "Requesting camera access…"
+ * placeholder.
  *
- * The scanner's permission probe reads `cameraRef.current` AFTER a
- * `setTimeout(50)` but BEFORE the Camera component has been rendered
- * into the tree (Camera only mounts when `hasPermission === true`).
- * On a real device the ref is attached synchronously via a native
- * module side-channel; in Jest the ref stays `null` through the probe,
- * which means the screen is stuck on the "Requesting camera access…"
- * placeholder for the lifetime of the test.
- *
- * Rather than hack React internals to force the ref, these tests pin
- * the following deterministic regressions for VAL-UX-051:
- *
- *   1. The screen mounts and renders the requesting-access placeholder.
- *   2. The screen mounts without throwing and without any PIN copy.
- *   3. The screen imports and wires `useWalletConnectStore` — the
- *      scan callback path is tested directly through the store module
- *      (which owns `handleIncomingUrl`) so the regression bar is met
- *      without fighting React's ref lifecycle.
- *   4. Scanner error handling (the `onError` path) is exercised by
- *      calling the Camera mock's captured `onError` handler once the
- *      Camera has been rendered — in loading state this never mounts,
- *      so we pin the behavior via the structural wiring instead.
- *
- * Notes on what's not covered here:
- *   - A true end-to-end "user scans a QR → store dispatches" requires
- *     either patching React's useRef globally (which breaks other
- *     components like Pressable) or mounting the Camera outside the
- *     permission gate (which would require source changes). Both were
- *     rejected; see the mission's `discoveredIssues` handoff.
+ * This suite now exercises the real permission-grant → `<Camera>`
+ * render transition end-to-end: the probe is driven by a mocked
+ * `requestCameraPermission()` helper that does not depend on the
+ * `<Camera>` component being mounted, and the Camera mock captures its
+ * props so we can drive the `onReadCode` / `onError` callbacks
+ * directly.
  */
 
 /* eslint-disable @typescript-eslint/no-var-requires */
 
 // ---------------------------------------------------------------------------
 // Mock react-native-camera-kit so the scanner component mounts in Jest
-// without spinning up native camera bridges.
+// without spinning up native camera bridges. The mock captures the props
+// handed to <Camera> so tests can drive the onReadCode / onError
+// callbacks directly.
 // ---------------------------------------------------------------------------
 jest.mock('react-native-camera-kit', () => {
   const React = require('react');
@@ -51,8 +37,6 @@ jest.mock('react-native-camera-kit', () => {
     props: Record<string, unknown>,
     _ref: unknown,
   ) {
-    // Expose props so tests that can reach this render path may drive
-    // scan / error callbacks without touching the ref chain.
     (globalThis as Record<string, unknown>).__scannerCameraProps = props;
     return React.createElement(View, { testID: 'mock-camera-kit' });
   });
@@ -65,11 +49,30 @@ jest.mock('react-native-camera-kit', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Mock the camera-permission helper. The factory wires in jest mock
+// functions internally (Jest hoists `jest.mock` above top-level
+// `const`s, so we cannot reference outer variables at factory
+// evaluation time). Tests reach for the mocks via the module require
+// handles below.
+// ---------------------------------------------------------------------------
+jest.mock('@/lib/native/camera-permission', () => ({
+  __esModule: true,
+  requestCameraPermission: jest.fn(async () => ({
+    granted: true,
+    blocked: false,
+  })),
+  openCameraPermissionSettings: jest.fn(async () => undefined),
+}));
+
+// ---------------------------------------------------------------------------
 // Mock @react-navigation/native so `useNavigation()` works in isolation.
 // ---------------------------------------------------------------------------
 jest.mock('@react-navigation/native', () => ({
   __esModule: true,
-  useNavigation: () => ({ goBack: jest.fn() }),
+  useNavigation: () => ({
+    goBack: (globalThis as unknown as Record<string, jest.Mock>)
+      .__scannerGoBack,
+  }),
 }));
 
 // ---------------------------------------------------------------------------
@@ -88,10 +91,9 @@ jest.mock('@/lib/enbox/wallet-connect-store', () => {
   };
 });
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { Alert } from 'react-native';
 
-import { render } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 
 import { WalletConnectScannerScreen } from '@/features/connect/screens/wallet-connect-scanner-screen';
 
@@ -100,32 +102,66 @@ const walletConnectStoreMock = require('@/lib/enbox/wallet-connect-store') as {
   __mockHandleIncomingUrl: jest.Mock;
 };
 
-const SCANNER_SOURCE_PATH = resolve(
-  __dirname,
-  '..',
-  'wallet-connect-scanner-screen.tsx',
-);
+const cameraPermissionMock = require('@/lib/native/camera-permission') as {
+  requestCameraPermission: jest.Mock;
+  openCameraPermissionSettings: jest.Mock;
+};
+
+const mockGoBack = jest.fn();
+(globalThis as unknown as Record<string, jest.Mock>).__scannerGoBack =
+  mockGoBack;
+
+function resetPermissionDefaults() {
+  cameraPermissionMock.requestCameraPermission
+    .mockReset()
+    .mockResolvedValue({ granted: true, blocked: false });
+  cameraPermissionMock.openCameraPermissionSettings
+    .mockReset()
+    .mockResolvedValue(undefined);
+}
 
 describe('WalletConnectScannerScreen — VAL-UX-051 regression', () => {
   beforeEach(() => {
+    resetPermissionDefaults();
     walletConnectStoreMock.__mockHandleIncomingUrl.mockReset();
     walletConnectStoreMock.__mockHandleIncomingUrl.mockResolvedValue(undefined);
+    mockGoBack.mockReset();
     (globalThis as Record<string, unknown>).__scannerCameraProps = undefined;
   });
 
   // --------------------------------------------------------------
   // Render + copy regression
   // --------------------------------------------------------------
-  it('mounts without throwing and renders the "Requesting camera access" placeholder on first paint', () => {
-    const screen = render(<WalletConnectScannerScreen />);
+  it('renders the "Requesting camera access" placeholder on first paint', async () => {
+    // Use a deferred promise so we can observe the `probing` phase
+    // before the permission helper resolves.
+    let resolvePermission: (value: {
+      granted: boolean;
+      blocked: boolean;
+    }) => void = () => undefined;
+    cameraPermissionMock.requestCameraPermission.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePermission = resolve;
+      }),
+    );
 
-    // The initial `hasPermission === null` branch renders a
-    // non-interactive loading view with the camera-access copy.
+    const screen = render(<WalletConnectScannerScreen />);
     expect(screen.getByText(/Requesting camera access/i)).toBeTruthy();
+
+    // Resolve so the effect cleanup in afterEach doesn't leave a
+    // dangling promise in this test, and wait for the subsequent
+    // re-render to settle before the suite unmounts the screen.
+    await act(async () => {
+      resolvePermission({ granted: false, blocked: false });
+    });
   });
 
-  it('does not render any PIN-era copy (regression guard)', () => {
+  it('does not render any PIN-era copy (regression guard)', async () => {
     const screen = render(<WalletConnectScannerScreen />);
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('mock-camera-kit')).toBeTruthy(),
+    );
 
     expect(screen.queryByText(/\bPIN\b/i)).toBeNull();
     expect(screen.queryByText(/passcode/i)).toBeNull();
@@ -133,55 +169,176 @@ describe('WalletConnectScannerScreen — VAL-UX-051 regression', () => {
   });
 
   // --------------------------------------------------------------
-  // Structural wiring regression (source-level greps)
-  //
-  // VAL-UX-051 requires the scanner to forward scanned URLs to
-  // `walletConnectStore.handleIncomingUrl`. Because the screen's
-  // Camera ref lifecycle prevents mounting in Jest (see file-level
-  // docstring), we pin the wiring via grep — any refactor that
-  // removes the import or renames the action fails here.
+  // Core behavior: permission-grant → <Camera> render transition.
+  // This is the behavior the prior implementation was unable to
+  // exercise because the permission probe depended on the Camera
+  // ref being attached.
   // --------------------------------------------------------------
-  it('imports useWalletConnectStore and selects handleIncomingUrl', () => {
-    const src = readFileSync(SCANNER_SOURCE_PATH, 'utf8');
+  it('transitions from the loading placeholder to <Camera> once permission is granted', async () => {
+    cameraPermissionMock.requestCameraPermission.mockResolvedValueOnce({
+      granted: true,
+      blocked: false,
+    });
 
-    expect(src).toMatch(
-      /import \{[^}]*useWalletConnectStore[^}]*\} from ['"]@\/lib\/enbox\/wallet-connect-store['"]/,
+    const screen = render(<WalletConnectScannerScreen />);
+
+    // Initially the screen is probing permission.
+    expect(screen.queryByTestId('mock-camera-kit')).toBeNull();
+    expect(screen.getByText(/Requesting camera access/i)).toBeTruthy();
+
+    // Once the helper resolves we mount the Camera and hide the loader.
+    await waitFor(() =>
+      expect(screen.queryByTestId('mock-camera-kit')).toBeTruthy(),
     );
-    expect(src).toMatch(
-      /useWalletConnectStore\(\s*\(\s*s\s*\)\s*=>\s*s\.handleIncomingUrl\s*\)/,
-    );
+    expect(screen.queryByText(/Requesting camera access/i)).toBeNull();
+    expect(
+      cameraPermissionMock.requestCameraPermission,
+    ).toHaveBeenCalledTimes(1);
   });
 
-  it('renders the Camera component with an onReadCode handler wired (via source grep)', () => {
-    const src = readFileSync(SCANNER_SOURCE_PATH, 'utf8');
+  it('wires the Camera element with scanBarcode + allowedBarcodeTypes=[qr] and an onReadCode handler', async () => {
+    const screen = render(<WalletConnectScannerScreen />);
 
-    // The screen imports Camera/CameraType from react-native-camera-kit.
-    expect(src).toMatch(
-      /import \{[^}]*Camera[^}]*\} from ['"]react-native-camera-kit['"]/,
+    await waitFor(() =>
+      expect(screen.queryByTestId('mock-camera-kit')).toBeTruthy(),
     );
-    // Camera element in the render tree receives onReadCode={handleReadCode}.
-    expect(src).toMatch(/onReadCode\s*=\s*\{handleReadCode\}/);
-    // Camera element requests QR scanning with scanBarcode enabled.
-    expect(src).toMatch(/scanBarcode/);
-    expect(src).toMatch(/allowedBarcodeTypes={\['qr'\]}/);
-  });
 
-  it('calls `cameraRef.current.checkDeviceCameraAuthorizationStatus` via the permission-probe effect (via source grep)', () => {
-    const src = readFileSync(SCANNER_SOURCE_PATH, 'utf8');
-
-    expect(src).toMatch(/checkDeviceCameraAuthorizationStatus\(\)/);
-    expect(src).toMatch(/requestDeviceCameraAuthorization\(\)/);
+    const cameraProps = (globalThis as Record<string, unknown>)
+      .__scannerCameraProps as Record<string, unknown>;
+    expect(cameraProps).toBeTruthy();
+    expect(cameraProps.scanBarcode).toBe(true);
+    expect(cameraProps.allowedBarcodeTypes).toEqual(['qr']);
+    expect(typeof cameraProps.onReadCode).toBe('function');
+    expect(typeof cameraProps.onError).toBe('function');
   });
 
   // --------------------------------------------------------------
-  // handleIncomingUrl dispatch — tested directly on the store.
-  //
-  // The scan path goes scanner → handleReadCode → handleIncomingUrl.
-  // Because the Camera ref lifecycle prevents mounting in Jest, we
-  // pin the terminal step at the store level. Any refactor that
-  // removes the store action or changes its signature fails the
-  // existing `wallet-connect-store.test.ts` suite — and the grep
-  // tests above ensure the scanner continues to call into it.
+  // Denied-permission flow: user-friendly message + Open Settings.
+  // --------------------------------------------------------------
+  it('surfaces the camera-unavailable message when permission is denied', async () => {
+    cameraPermissionMock.requestCameraPermission.mockResolvedValueOnce({
+      granted: false,
+      blocked: false,
+    });
+
+    const screen = render(<WalletConnectScannerScreen />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/Camera unavailable/i)).toBeTruthy(),
+    );
+    expect(screen.queryByTestId('mock-camera-kit')).toBeNull();
+    expect(
+      screen.getByText(/Enable camera access to scan an Enbox connect QR code/i),
+    ).toBeTruthy();
+    // When the permission is not yet blocked we do NOT offer a Settings
+    // deep link — re-entering the screen will simply re-prompt.
+    expect(screen.queryByLabelText('Open Settings')).toBeNull();
+  });
+
+  it('shows an "Open Settings" deep link when permission is permanently blocked', async () => {
+    cameraPermissionMock.requestCameraPermission.mockResolvedValueOnce({
+      granted: false,
+      blocked: true,
+    });
+
+    const screen = render(<WalletConnectScannerScreen />);
+
+    const openSettings = await screen.findByLabelText('Open Settings');
+    expect(openSettings).toBeTruthy();
+
+    fireEvent.press(openSettings);
+    await waitFor(() =>
+      expect(
+        cameraPermissionMock.openCameraPermissionSettings,
+      ).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  it('falls back to the denial state and surfaces the error message if the probe rejects', async () => {
+    cameraPermissionMock.requestCameraPermission.mockRejectedValueOnce(
+      new Error('Permission probe crashed'),
+    );
+
+    const screen = render(<WalletConnectScannerScreen />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/Camera unavailable/i)).toBeTruthy(),
+    );
+    expect(screen.getByText(/Permission probe crashed/i)).toBeTruthy();
+    expect(screen.queryByTestId('mock-camera-kit')).toBeNull();
+  });
+
+  // --------------------------------------------------------------
+  // Scan → handleIncomingUrl dispatch — exercised through the mocked
+  // Camera's captured `onReadCode` prop now that it actually mounts.
+  // --------------------------------------------------------------
+  it('forwards scanned URLs to walletConnectStore.handleIncomingUrl and navigates back', async () => {
+    const screen = render(<WalletConnectScannerScreen />);
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('mock-camera-kit')).toBeTruthy(),
+    );
+
+    const cameraProps = (globalThis as Record<string, unknown>)
+      .__scannerCameraProps as {
+      onReadCode: (event: {
+        nativeEvent: { codeStringValue: string };
+      }) => Promise<void>;
+    };
+
+    await act(async () => {
+      await cameraProps.onReadCode({
+        nativeEvent: { codeStringValue: '  enbox://connect?x=1  ' },
+      });
+    });
+
+    expect(
+      walletConnectStoreMock.__mockHandleIncomingUrl,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      walletConnectStoreMock.__mockHandleIncomingUrl,
+    ).toHaveBeenCalledWith('enbox://connect?x=1');
+    expect(mockGoBack).toHaveBeenCalledTimes(1);
+  });
+
+  it('alerts the user and does not navigate back when handleIncomingUrl rejects', async () => {
+    walletConnectStoreMock.__mockHandleIncomingUrl.mockRejectedValueOnce(
+      new Error('bad QR'),
+    );
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+
+    const screen = render(<WalletConnectScannerScreen />);
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('mock-camera-kit')).toBeTruthy(),
+    );
+
+    const cameraProps = (globalThis as Record<string, unknown>)
+      .__scannerCameraProps as {
+      onReadCode: (event: {
+        nativeEvent: { codeStringValue: string };
+      }) => Promise<void>;
+    };
+
+    await act(async () => {
+      await cameraProps.onReadCode({
+        nativeEvent: { codeStringValue: 'not-a-valid-uri' },
+      });
+    });
+
+    expect(
+      walletConnectStoreMock.__mockHandleIncomingUrl,
+    ).toHaveBeenCalledTimes(1);
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy.mock.calls[0][0]).toMatch(/Invalid QR code/);
+    expect(mockGoBack).not.toHaveBeenCalled();
+
+    alertSpy.mockRestore();
+  });
+
+  // --------------------------------------------------------------
+  // Direct store sanity — kept from the previous regression suite
+  // so a rename of `handleIncomingUrl` still fails fast.
   // --------------------------------------------------------------
   it('invokes the mocked handleIncomingUrl when called directly (sanity check for the wired store)', async () => {
     await walletConnectStoreMock.useWalletConnectStore
