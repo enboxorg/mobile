@@ -1,0 +1,44 @@
+{
+  "groupId": "rollback-rerun",
+  "milestone": "biometric-vault-js",
+  "surface": "jest-local",
+  "assertions": [
+    {
+      "id": "VAL-VAULT-027",
+      "status": "pass",
+      "reason": "The rerun matched the contract: after generateAndStoreSecret succeeds, post-provision failures trigger NativeBiometricVault.deleteSecret('enbox.wallet.root') before the original error is surfaced, and the targeted test confirms isInitialized() returns false afterward.",
+      "evidence": {
+        "notesFile": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/biometric-vault-js/rollback-rerun/assertion-evidence.json",
+        "testFile": "src/lib/enbox/__tests__/biometric-vault.test.ts",
+        "matchedTests": [
+          "rolls back the orphan native secret when local derivation throws after provisioning succeeded",
+          "still bubbles the ORIGINAL derivation error and logs a warning when deleteSecret itself rejects",
+          "still surfaces a native-side generateAndStoreSecret failure without calling deleteSecret"
+        ],
+        "sourceRefs": [
+          "src/lib/enbox/biometric-vault.ts:493-507",
+          "src/lib/enbox/biometric-vault.ts:594-600",
+          "src/lib/enbox/biometric-vault.ts:613-677"
+        ],
+        "observedBehavior": "Targeted Jest rerun passed 3/3 partial-init recovery tests; the main assertion verified a single deleteSecret rollback call and false from isInitialized() after the rejected initialize() attempt."
+      }
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "cd \"/home/liran/src/enboxorg/mobile\" && bun run test -- src/lib/enbox/__tests__/biometric-vault.test.ts -t \"partial-init recovery\"",
+      "exitCode": 0,
+      "observation": "PASS: 3 targeted tests ran and passed for rollback-on-derivation-failure, original-error preservation when deleteSecret rejects, and no rollback when generateAndStoreSecret itself fails before provisioning."
+    }
+  ],
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "Jest"
+  ],
+  "frictions": [
+    "validation-contract.md names `src/lib/enbox/__tests__/biometric-vault.initialize.test.ts`, but the authoritative local coverage for this assertion lives in the consolidated `src/lib/enbox/__tests__/biometric-vault.test.ts`, consistent with `.factory/library/user-testing.md`."
+  ],
+  "blockers": [],
+  "summary": "Validated VAL-VAULT-027 on the jest-local surface; the rollback rerun passed and confirms partial initialize failures delete the orphaned native secret and leave the vault uninitialized."
+}
