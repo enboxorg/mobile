@@ -1,10 +1,23 @@
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/ui/screen';
 import { ScreenHeader } from '@/components/ui/screen-header';
 import { useSessionStore } from '@/features/session/session-store';
 import { useAgentStore } from '@/lib/enbox/agent-store';
 import { useAppTheme, type AppTheme } from '@/theme';
+
+// Sourced from package.json so the About row always mirrors the shipped
+// app's declared version (VAL-UX-053). Importing the field directly keeps
+// tests honest — they read the same constant — without pulling in any
+// runtime-only dependency.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const APP_VERSION: string = require('../../../../package.json').version;
+
+// External-link targets surfaced in the About section. Hardcoded so the
+// URLs are reviewable in source and stable across builds (VAL-UX-053
+// requires `Linking.openURL` to be invoked with the exact URL on press).
+const PRIVACY_POLICY_URL = 'https://enbox.org/privacy';
+const TERMS_OF_SERVICE_URL = 'https://enbox.org/terms';
 
 export interface SettingsScreenProps {
   onLock: () => void;
@@ -110,6 +123,36 @@ export function SettingsScreen({ onLock }: SettingsScreenProps) {
         </Text>
         <SettingsRow label="Export backup" disabled onPress={() => {}} theme={theme} />
         <SettingsRow label="Import backup" disabled onPress={() => {}} theme={theme} />
+      </View>
+
+      <View style={[styles.section, { borderColor: theme.colors.border }]}>
+        <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
+          About
+        </Text>
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: theme.colors.textMuted }]}>App version</Text>
+          <Text
+            accessibilityLabel={`App version ${APP_VERSION}`}
+            style={[styles.infoValue, { color: theme.colors.text }]}
+            selectable
+          >
+            {APP_VERSION}
+          </Text>
+        </View>
+        <SettingsRow
+          label="Privacy policy"
+          onPress={() => {
+            void Linking.openURL(PRIVACY_POLICY_URL);
+          }}
+          theme={theme}
+        />
+        <SettingsRow
+          label="Terms of service"
+          onPress={() => {
+            void Linking.openURL(TERMS_OF_SERVICE_URL);
+          }}
+          theme={theme}
+        />
       </View>
 
       <View style={[styles.section, { borderColor: theme.colors.border }]}>

@@ -74,9 +74,16 @@ jest.mock('@/features/session/session-store', () => {
   };
 });
 
+import { Linking } from 'react-native';
 import { fireEvent, render } from '@testing-library/react-native';
 
 import { SettingsScreen } from '@/features/settings/screens/settings-screen';
+
+// Import the package.json version the SettingsScreen About row sources
+// its string from, so the test and the screen share a single source of
+// truth for the asserted version string (VAL-UX-053).
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const PACKAGE_VERSION: string = require('../../../../../package.json').version;
 
 const agentStoreMocks = require('@/lib/enbox/agent-store') as {
   __mockTeardown: jest.Mock;
@@ -94,12 +101,19 @@ const nativeBiometricVaultMock = (
 ).__enboxBiometricVaultMock;
 
 describe('SettingsScreen — non-reset rows regression (VAL-UX-053)', () => {
+  let openURLSpy: jest.SpyInstance;
+
   beforeEach(() => {
     agentStoreMocks.__mockTeardown.mockClear();
     agentStoreMocks.__mockReset.mockClear();
     sessionStoreMocks.__mockSessionReset.mockClear();
     sessionStoreMocks.__mockSessionHydrate.mockClear();
     nativeBiometricVaultMock.deleteSecret.mockClear();
+    openURLSpy = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    openURLSpy.mockRestore();
   });
 
   it('renders the Agent DID row without any PIN references', () => {
@@ -156,11 +170,12 @@ describe('SettingsScreen — non-reset rows regression (VAL-UX-053)', () => {
     expect(nativeBiometricVaultMock.deleteSecret).not.toHaveBeenCalled();
   });
 
-  it('renders the Security + Data + Danger-zone section headers (none of which reference PIN)', () => {
+  it('renders the Security + Data + About + Danger-zone section headers (none of which reference PIN)', () => {
     const screen = render(<SettingsScreen onLock={() => {}} />);
 
     expect(screen.getByText('Security')).toBeTruthy();
     expect(screen.getByText('Data')).toBeTruthy();
+    expect(screen.getByText('About')).toBeTruthy();
     expect(screen.getByText('Danger zone')).toBeTruthy();
 
     // None of the headers reference PIN / passcode.
@@ -174,6 +189,59 @@ describe('SettingsScreen — non-reset rows regression (VAL-UX-053)', () => {
     }
   });
 
+  // --------------------------------------------------------------
+  // About row + version string (VAL-UX-053)
+  // --------------------------------------------------------------
+  it('renders the About section with the package.json version string', () => {
+    const screen = render(<SettingsScreen onLock={() => {}} />);
+
+    // The section header.
+    expect(screen.getByText('About')).toBeTruthy();
+    // The "App version" label that anchors the version row.
+    expect(screen.getByText('App version')).toBeTruthy();
+    // The actual version value — sourced from the same package.json the
+    // component imports, so drift is impossible.
+    expect(PACKAGE_VERSION).toMatch(/^[0-9]+\.[0-9]+\.[0-9]+/);
+    expect(screen.getByText(PACKAGE_VERSION)).toBeTruthy();
+    // And the same version is exposed via an accessibilityLabel for
+    // assistive tech consumers.
+    expect(
+      screen.getByLabelText(`App version ${PACKAGE_VERSION}`),
+    ).toBeTruthy();
+  });
+
+  // --------------------------------------------------------------
+  // External-link rows invoke Linking.openURL (VAL-UX-053)
+  // --------------------------------------------------------------
+  it('renders the "Privacy policy" row and invokes Linking.openURL with the exact URL on press', () => {
+    const screen = render(<SettingsScreen onLock={() => {}} />);
+
+    expect(screen.getByText('Privacy policy')).toBeTruthy();
+
+    fireEvent.press(screen.getByText('Privacy policy'));
+
+    expect(openURLSpy).toHaveBeenCalledTimes(1);
+    expect(openURLSpy).toHaveBeenCalledWith('https://enbox.org/privacy');
+    // And the external-link press must not trigger any reset primitive.
+    expect(agentStoreMocks.__mockReset).not.toHaveBeenCalled();
+    expect(agentStoreMocks.__mockTeardown).not.toHaveBeenCalled();
+    expect(nativeBiometricVaultMock.deleteSecret).not.toHaveBeenCalled();
+  });
+
+  it('renders the "Terms of service" row and invokes Linking.openURL with the exact URL on press', () => {
+    const screen = render(<SettingsScreen onLock={() => {}} />);
+
+    expect(screen.getByText('Terms of service')).toBeTruthy();
+
+    fireEvent.press(screen.getByText('Terms of service'));
+
+    expect(openURLSpy).toHaveBeenCalledTimes(1);
+    expect(openURLSpy).toHaveBeenCalledWith('https://enbox.org/terms');
+    expect(agentStoreMocks.__mockReset).not.toHaveBeenCalled();
+    expect(agentStoreMocks.__mockTeardown).not.toHaveBeenCalled();
+    expect(nativeBiometricVaultMock.deleteSecret).not.toHaveBeenCalled();
+  });
+
   it('pressing non-reset rows never dispatches deleteSecret or reset primitives', () => {
     const screen = render(<SettingsScreen onLock={() => {}} />);
 
@@ -182,6 +250,8 @@ describe('SettingsScreen — non-reset rows regression (VAL-UX-053)', () => {
       'Biometric unlock',
       'Export backup',
       'Import backup',
+      'Privacy policy',
+      'Terms of service',
     ]) {
       fireEvent.press(screen.getByText(label));
     }
@@ -189,5 +259,9 @@ describe('SettingsScreen — non-reset rows regression (VAL-UX-053)', () => {
     expect(nativeBiometricVaultMock.deleteSecret).not.toHaveBeenCalled();
     expect(agentStoreMocks.__mockReset).not.toHaveBeenCalled();
     expect(agentStoreMocks.__mockTeardown).not.toHaveBeenCalled();
+    // The two external-link rows were pressed — expect two openURL invocations.
+    expect(openURLSpy).toHaveBeenCalledTimes(2);
+    expect(openURLSpy).toHaveBeenNthCalledWith(1, 'https://enbox.org/privacy');
+    expect(openURLSpy).toHaveBeenNthCalledWith(2, 'https://enbox.org/terms');
   });
 });
