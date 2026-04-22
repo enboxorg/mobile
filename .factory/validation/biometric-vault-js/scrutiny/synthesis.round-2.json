@@ -1,6 +1,6 @@
 {
   "milestone": "biometric-vault-js",
-  "round": 3,
+  "round": 2,
   "status": "fail",
   "validatorsRun": {
     "test": {
@@ -34,7 +34,7 @@
     {
       "featureId": "auto-lock-vault-primitives",
       "severity": "blocking",
-      "description": "Current HEAD still leaves useAutoLock on the old behavior: it depends on AUTO_LOCK_TIMEOUT_MS and only calls session.lock() on background/inactive. It never calls useAgentStore.getState().teardown(), and the repo still has no dedicated src/hooks/use-auto-lock test coverage proving teardown-on-background or fresh-biometric-after-auto-lock behavior, so VAL-VAULT-020 and VAL-VAULT-021 remain unmet."
+      "description": "src/hooks/use-auto-lock.ts still depends on AUTO_LOCK_TIMEOUT_MS and only calls session.lock() on background/inactive. It never calls useAgentStore.getState().teardown(), there is still no dedicated hook test coverage under src/hooks/, and VAL-VAULT-020/021 therefore remain unmet. Review of fix-biometric-vault-js-scrutiny-blockers confirmed the four scoped vault/reset fixes landed, but this prior blocker remains real and unresolved."
     }
   ],
   "appliedUpdates": [],
@@ -50,11 +50,7 @@
     {
       "observation": "Mission feature metadata says auto-lock-vault-primitives only pins primitives, but its fulfills list claims hook-level VAL-VAULT-020/021 assertions.",
       "reason": "The code gap is real, but the metadata mismatch itself is mission-specific rather than an additive services.yaml/library/AGENTS.md/skill update to apply from scrutiny synthesis."
-    },
-    {
-      "observation": "No new completed biometric-vault-js fix feature exists after round 2; current HEAD is still the prior scrutiny rerun commit.",
-      "reason": "This explains why round 3 only re-validated the unresolved blocker, but it is not an additive services.yaml/library/AGENTS.md/skill update candidate."
     }
   ],
-  "previousRound": ".factory/validation/biometric-vault-js/scrutiny/synthesis.round-2.json"
+  "previousRound": ".factory/validation/biometric-vault-js/scrutiny/synthesis.round-1.json"
 }

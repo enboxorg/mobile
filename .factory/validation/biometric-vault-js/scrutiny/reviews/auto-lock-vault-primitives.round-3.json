@@ -1,0 +1,22 @@
+{
+  "featureId": "auto-lock-vault-primitives",
+  "reviewedAt": "2026-04-22T20:05:37Z",
+  "commitId": "be76e53",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "On current HEAD, the primitive contract from be76e53 still holds: useAgentStore.teardown() clears in-memory agent state and BiometricVault.lock() clears only in-memory vault state, with focused primitive tests still covering those behaviors. The previously synthesized blocker remains valid, though, because the actual auto-lock hook is still the old timer-based lock-only implementation and there is still no hook-level coverage for teardown-on-background or fresh-biometric-after-auto-lock.",
+    "issues": [
+      {
+        "file": "src/hooks/use-auto-lock.ts",
+        "line": 22,
+        "severity": "blocking",
+        "description": "Current HEAD still leaves useAutoLock on the old behavior: it depends on AUTO_LOCK_TIMEOUT_MS (src/hooks/use-auto-lock.ts:4,23,31) and only calls session.lock() (src/hooks/use-auto-lock.ts:24,32). It never calls useAgentStore.getState().teardown(), so VAL-VAULT-020's required teardown-on-background behavior is still missing. There is also still no dedicated use-auto-lock test file under src/hooks/, so VAL-VAULT-021's requirement that the next unlock re-prompts biometrics after auto-lock remains unverified at the hook layer even though the lower-level primitive tests exist in src/lib/enbox/__tests__/biometric-vault.lock.test.ts:196-210 and src/lib/enbox/__tests__/agent-store.teardown.test.ts:222-290."
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": ".factory/validation/biometric-vault-js/scrutiny/reviews/auto-lock-vault-primitives.json",
+  "summary": "Re-reviewed the prior report, original feature handoff/diff, transcript skeleton, and current HEAD hook/store/vault code. The primitive implementations and primitive tests still look correct, but the blocker is still valid because useAutoLock still never tears down the agent on background/inactive and the repo still lacks hook-level coverage proving a fresh biometric prompt after auto-lock."
+}
