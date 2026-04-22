@@ -1,8 +1,8 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { useCallback } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { useCallback, useEffect, useRef } from 'react';
+import { ActivityIndicator, Alert, StyleSheet, View } from 'react-native';
 
 import { BiometricSetupScreen } from '@/features/auth/screens/biometric-setup-screen';
 import { BiometricUnavailableScreen } from '@/features/auth/screens/biometric-unavailable-screen';
@@ -130,6 +130,17 @@ export function AppNavigator() {
 
   // --- Wallet-connect deep-link signals -----------------------------
   const pendingWalletRequest = useWalletConnectStore((s) => s.pending);
+  // Queued-error surface: if a deep link fails while the app is gated
+  // (e.g. locked / restoring / unavailable) the store flips to
+  // `{ phase: 'error', pending: null }`. Without this effect the
+  // navigator would silently drop the failure once the gate clears.
+  // We observe the phase / error tuple and, once the user lands on
+  // `Main`, surface the message via `Alert.alert`, then clear the
+  // store so the same error is not re-alerted after dismiss. See the
+  // feature description `fix-walletconnect-queued-error-surfacing`.
+  const walletConnectPhase = useWalletConnectStore((s) => s.phase);
+  const walletConnectError = useWalletConnectStore((s) => s.error);
+  const clearWalletConnect = useWalletConnectStore((s) => s.clear);
 
   // Gate matrix (VAL-UX-028).
   const route = getInitialRoute({
@@ -178,6 +189,41 @@ export function AppNavigator() {
   // every biometric gate and is on `Main` (VAL-UX-050).
   const showWalletConnectRequest =
     route === 'Main' && !!pendingWalletRequest;
+
+  // Queued wallet-connect error surfacing.
+  //
+  // The store can be in `phase === 'error'` with `pending === null`
+  // when an incoming deep link failed before we had anything to
+  // render (parse error, remote-fetch error, or a failure that
+  // occurred while a biometric gate was in the way). We mustn't
+  // silently swallow that — surface it via `Alert.alert` the moment
+  // the user is on `Main`, and clear the store on dismiss so we do
+  // not re-fire for the same error.
+  const alertedErrorRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (walletConnectPhase !== 'error') {
+      alertedErrorRef.current = null;
+      return;
+    }
+    if (route !== 'Main' || pendingWalletRequest || !walletConnectError) {
+      return;
+    }
+    const token = walletConnectError;
+    if (alertedErrorRef.current === token) return;
+    alertedErrorRef.current = token;
+    Alert.alert(
+      'Connection request failed',
+      walletConnectError,
+      [{ text: 'Dismiss', onPress: () => clearWalletConnect() }],
+      { cancelable: true, onDismiss: () => clearWalletConnect() },
+    );
+  }, [
+    route,
+    walletConnectPhase,
+    walletConnectError,
+    pendingWalletRequest,
+    clearWalletConnect,
+  ]);
 
   return (
     <NavigationContainer theme={createNavigationTheme(theme)}>

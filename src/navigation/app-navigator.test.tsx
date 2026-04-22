@@ -215,6 +215,7 @@ jest.mock('@/lib/enbox/wallet-connect-store', () => {
 });
 
 import { render, act } from '@testing-library/react-native';
+import { Alert } from 'react-native';
 
 import { AppNavigator } from '@/navigation/app-navigator';
 import { useSessionStore } from '@/features/session/session-store';
@@ -252,9 +253,26 @@ function setPendingWalletRequest(value: object | null): void {
   useWalletConnectStore.setState({ pending: value });
 }
 
+function setWalletConnectError(
+  error: string | null,
+  pending: object | null = null,
+): void {
+  useWalletConnectStore.setState({
+    phase: error ? 'error' : 'idle',
+    error,
+    pending,
+  });
+}
+
 beforeEach(() => {
   setRecoveryPhrase(null);
   setPendingWalletRequest(null);
+  useWalletConnectStore.setState({
+    phase: 'idle',
+    error: null,
+    pending: null,
+    generatedPin: null,
+  });
   useSessionStore.setState({
     isHydrated: true,
     hasCompletedOnboarding: false,
@@ -723,6 +741,143 @@ describe('AppNavigator — wallet-connect routes (VAL-UX-051)', () => {
     // The Identities tab content is unmounted now that the root stack
     // has switched to the request screen.
     expect(screen.queryByTestId('stub-identities')).toBeNull();
+  });
+});
+
+// ==================================================================
+// VAL-UX-050 — queued wallet-connect error surfacing
+// ==================================================================
+describe('AppNavigator — queued wallet-connect error surfacing (VAL-UX-050)', () => {
+  let alertSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    alertSpy.mockRestore();
+  });
+
+  it('surfaces an Alert when phase=error + pending=null while route=Main', () => {
+    setSession({
+      hasCompletedOnboarding: true,
+      hasIdentity: true,
+      isLocked: false,
+      biometricStatus: 'ready',
+    });
+    setWalletConnectError('bad request');
+
+    render(<AppNavigator />);
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    const [title, body, buttons] = alertSpy.mock.calls[0];
+    expect(title).toBe('Connection request failed');
+    expect(body).toBe('bad request');
+    expect(Array.isArray(buttons)).toBe(true);
+    expect((buttons as Array<{ text: string }>)[0]?.text).toBe('Dismiss');
+  });
+
+  it('clears the wallet-connect store when the Alert is dismissed', () => {
+    setSession({
+      hasCompletedOnboarding: true,
+      hasIdentity: true,
+      isLocked: false,
+      biometricStatus: 'ready',
+    });
+    setWalletConnectError('relay offline');
+
+    render(<AppNavigator />);
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    const clearSpy = useWalletConnectStore.getState().clear as jest.Mock;
+    const buttons = alertSpy.mock.calls[0][2] as Array<{
+      text: string;
+      onPress?: () => void;
+    }>;
+    // Simulate the user pressing "Dismiss" on the alert.
+    buttons[0].onPress?.();
+    expect(clearSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT alert while a biometric gate is still in the way', () => {
+    setSession({
+      hasCompletedOnboarding: true,
+      hasIdentity: true,
+      isLocked: true,
+      biometricStatus: 'ready',
+    });
+    setWalletConnectError('bad request');
+
+    const screen = render(<AppNavigator />);
+
+    // The user is still on BiometricUnlock — no alert yet.
+    expect(screen.getByTestId('stub-biometric-unlock')).toBeTruthy();
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+
+  it('fires the alert exactly once after the gate clears (no double-fire on rerender)', () => {
+    setSession({
+      hasCompletedOnboarding: true,
+      hasIdentity: true,
+      isLocked: true,
+      biometricStatus: 'ready',
+    });
+    setWalletConnectError('bad request');
+
+    const screen = render(<AppNavigator />);
+
+    expect(alertSpy).not.toHaveBeenCalled();
+
+    // Gate clears → alert must fire.
+    act(() => {
+      useSessionStore.setState({ isLocked: false });
+    });
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+
+    // A no-op rerender (unrelated state flip + back) must not
+    // re-fire the alert for the same error.
+    act(() => {
+      useSessionStore.setState({ isLocked: false });
+    });
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+
+    // Main is still rendered (not a wallet-connect request screen).
+    expect(screen.getByTestId('stub-identities')).toBeTruthy();
+    expect(screen.queryByTestId('stub-wallet-connect-request')).toBeNull();
+  });
+
+  it('does NOT alert when a pending request is present (navigator will render the request screen instead)', () => {
+    setSession({
+      hasCompletedOnboarding: true,
+      hasIdentity: true,
+      isLocked: false,
+      biometricStatus: 'ready',
+    });
+    // phase=error alongside a pending object is not the queued-error
+    // case — fall back to the regular WalletConnectRequest surface.
+    setWalletConnectError('retry in progress', {
+      rawUrl: 'enbox://connect?x=1',
+    });
+
+    const screen = render(<AppNavigator />);
+
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(screen.getByTestId('stub-wallet-connect-request')).toBeTruthy();
+  });
+
+  it('does NOT alert when the biometric gate blocks (BiometricUnavailable) even if error is queued', () => {
+    setSession({
+      hasCompletedOnboarding: true,
+      hasIdentity: true,
+      isLocked: true,
+      biometricStatus: 'unavailable',
+    });
+    setWalletConnectError('bad request');
+
+    const screen = render(<AppNavigator />);
+
+    expect(screen.getByTestId('stub-biometric-unavailable')).toBeTruthy();
+    expect(alertSpy).not.toHaveBeenCalled();
   });
 });
 
