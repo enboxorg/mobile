@@ -1,7 +1,7 @@
 {
   "milestone": "misc-1",
-  "round": 3,
-  "status": "pass",
+  "round": 2,
+  "status": "fail",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -24,17 +24,25 @@
   },
   "reviewsSummary": {
     "total": 5,
-    "passed": 5,
-    "failed": 0,
-    "failedFeatures": []
+    "passed": 4,
+    "failed": 1,
+    "failedFeatures": [
+      "fix-ios-target-membership-doc-accuracy"
+    ]
   },
-  "blockingIssues": [],
+  "blockingIssues": [
+    {
+      "featureId": "fix-ios-target-membership-doc-accuracy",
+      "severity": "blocking",
+      "description": "`.factory/library/ios-target-membership.md` still contains an incorrect `ios/Podfile` line citation (`line 16` instead of the actual `target`/`use_native_modules!` lines 17-18), so the exact-evidence documentation fix is not yet fully accurate."
+    }
+  ],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": "mobile-feature-worker skill",
-      "suggestion": "Tighten transcript-backed procedure enforcement so workers must record deviations whenever required mission-library reads or red→green test evidence are absent before marking `skillFeedback.followedProcedure=true`.",
-      "evidence": "Review reports for `misc-patch-injection-polish`, `misc-pbxproj-native-modules-consistency`, `misc-vault-determinism-snapshot`, `misc-vault-circular-import-cleanup`, and `fix-vault-determinism-snapshot-multi-key-coverage` all cited transcript evidence that required library reads and/or red→green proof were missing even though the handoffs still reported `followedProcedure: true`.",
+      "suggestion": "Tighten transcript-backed procedure enforcement so workers must record deviations whenever required mission-library reads or red\u2192green test evidence are absent before marking `skillFeedback.followedProcedure=true`.",
+      "evidence": "Review reports for `misc-patch-injection-polish`, `misc-pbxproj-native-modules-consistency`, `misc-vault-determinism-snapshot`, `misc-vault-circular-import-cleanup`, and `fix-vault-determinism-snapshot-multi-key-coverage` all cited transcript evidence that required library reads and/or red\u2192green proof were missing even though the handoffs still reported `followedProcedure: true`.",
       "isSystemic": true
     }
   ],
@@ -57,8 +65,8 @@
     },
     {
       "observation": "The new `ios-target-membership.md` note is not linked from `architecture.md`.",
-      "reason": "rejected: the round-3 rereview passed without requiring additional shared-state propagation, so linking it is still optional rather than a scrutiny-driven action item."
+      "reason": "blocked: linking it now would amplify guidance that the misc-pbxproj-native-modules-consistency review found inaccurate."
     }
   ],
-  "previousRound": ".factory/validation/misc-1/scrutiny/synthesis.round2.json"
+  "previousRound": ".factory/validation/misc-1/scrutiny/synthesis.round1.json"
 }

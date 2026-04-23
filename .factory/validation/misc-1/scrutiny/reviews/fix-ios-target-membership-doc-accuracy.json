@@ -1,22 +1,15 @@
 {
   "featureId": "fix-ios-target-membership-doc-accuracy",
-  "reviewedAt": "2026-04-23T03:29:53+00:00",
-  "commitId": "153550c4433fa02b2f6154f2cb3514eb69abd15b",
+  "reviewedAt": "2026-04-23T03:37:03+00:00",
+  "commitId": "f989e74558e3dc67f5575bac1bfe33f02e2dd3e5",
   "transcriptSkeletonReviewed": true,
   "diffReviewed": true,
-  "status": "fail",
+  "status": "pass",
   "codeReview": {
-    "summary": "The rerun fixes the original unsafe documentation blocker in substance: it no longer presents the NativeSecureStorage/NativeCrypto CocoaPods/codegen compilation path as proven, and it clearly marks that mechanism as unverified on this host while preserving the evidenced NativeBiometricVault pbxproj rationale. However, the feature's stated goal was exact file:line auditing for every concrete claim, and the final doc still contains a wrong Podfile line citation in its statically-verifiable section, so I am failing the fix on remaining documentation accuracy.",
-    "issues": [
-      {
-        "file": ".factory/library/ios-target-membership.md",
-        "line": 144,
-        "severity": "blocking",
-        "description": "The 'What we can verify statically without CocoaPods or Xcode' section still says '`ios/Podfile` line 16 calls `use_native_modules!` inside the `'EnboxMobile'` target,' but the actual file places `target 'EnboxMobile' do` on `ios/Podfile:17` and `config = use_native_modules!` on `ios/Podfile:18`. The same document even cites lines 17-18 correctly at `.factory/library/ios-target-membership.md:95-96` and `:195-196`. Because this fix feature specifically promised exact file:line evidence for every concrete claim, this remaining bad citation means the audited shared-state note is still not fully accurate."
-      }
-    ]
+    "summary": "Pass. The current tree resolves the prior blocker: follow-up commit `f989e74` corrects the remaining Podfile citation so the document now accurately cites `ios/Podfile:17-18`, keeps concrete claims anchored to repo-verifiable evidence (`package.json:20-33`, `ios/EnboxMobile.xcodeproj/project.pbxproj:10,14-17,31-34,43-44,59,64-72,79-80,271`, `RCTNativeSecureStorage.h:6`, `RCTNativeCrypto.h:6`), and explicitly labels the CocoaPods/codegen path for NativeSecureStorage/NativeCrypto as unverified on this host where repo-only proof is unavailable. I did not find a remaining inaccurate citation in the reviewed sections.",
+    "issues": []
   },
   "sharedStateObservations": [],
   "addressesFailureFrom": ".factory/validation/misc-1/scrutiny/reviews/misc-pbxproj-native-modules-consistency.json",
-  "summary": "Fail: the rerun removes the original unsubstantiated CocoaPods/codegen certainty, but the audited doc still contains a wrong Podfile line citation (`line 16` vs actual `line 18`), so the promised exact-evidence standard is not yet fully met."
+  "summary": "Pass: the previous Podfile citation blocker is resolved in the current tree, and `.factory/library/ios-target-membership.md` now meets the feature promise of exact repo-backed citations for concrete claims plus softened language where repo-only verification is unavailable."
 }
