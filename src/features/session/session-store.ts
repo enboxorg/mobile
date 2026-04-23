@@ -6,25 +6,24 @@ import {
   getSecureItem,
   setSecureItem,
 } from '@/lib/storage/secure-storage';
+import {
+  BIOMETRIC_STATE_STORAGE_KEY,
+  WALLET_ROOT_KEY_ALIAS,
+} from '@/lib/enbox/vault-constants';
 
 const SESSION_KEY = 'session:state';
-
-/**
- * Keychain/Keystore alias that holds the wallet's root biometric-gated
- * secret. Duplicated from `src/lib/enbox/biometric-vault.ts` on purpose:
- * importing the vault module here would pull in the ESM-only
- * `@enbox/agent` runtime, which breaks Jest's module resolution for
- * session-store tests. The two constants MUST stay in sync.
- */
-const WALLET_ROOT_KEY_ALIAS = 'enbox.wallet.root';
 
 /**
  * Raw SecureStorage key where BiometricVault persists its `biometricState`
  * signal (via `@enbox/auth` SecureStorageAdapter which prefixes keys with
  * `enbox:`). Session-store reads the raw key directly so it can gate the
  * navigator on invalidated state before any biometric prompt fires.
+ *
+ * Derived from the canonical `BIOMETRIC_STATE_STORAGE_KEY` in
+ * `vault-constants.ts` plus the `enbox:` prefix applied by
+ * `SecureStorageAdapter`.
  */
-const BIOMETRIC_STATE_RAW_KEY = 'enbox:enbox.vault.biometric-state';
+const BIOMETRIC_STATE_RAW_KEY = `enbox:${BIOMETRIC_STATE_STORAGE_KEY}`;
 
 /**
  * Biometric availability state exposed to the navigator / onboarding UI.

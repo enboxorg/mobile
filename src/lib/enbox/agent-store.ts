@@ -17,16 +17,20 @@ import type { AuthManager } from '@enbox/auth';
 
 import NativeBiometricVault from '@specs/NativeBiometricVault';
 
+import { useSessionStore } from '@/features/session/session-store';
+
 import { initializeAgent } from './agent-init';
 import {
   BiometricVault,
-  BIOMETRIC_STATE_STORAGE_KEY,
-  INITIALIZED_STORAGE_KEY,
-  WALLET_ROOT_KEY_ALIAS,
   type BiometricState,
 } from './biometric-vault';
 import { destroyAgentLevelDatabases } from './rn-level';
 import { SecureStorageAdapter } from './storage-adapter';
+import {
+  BIOMETRIC_STATE_STORAGE_KEY,
+  INITIALIZED_STORAGE_KEY,
+  WALLET_ROOT_KEY_ALIAS,
+} from './vault-constants';
 
 /**
  * `dataPath` passed to `EnboxUserAgent.create()` in `agent-init.ts`.
@@ -462,12 +466,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    null out the one-shot recovery phrase if it was still held.
     get().teardown();
 
-    // 4. Clear persisted session state + PIN-era storage artefacts. The
-    //    import lives inside the function to avoid a circular import at
-    //    module load time (session-store ↔ agent-store).
+    // 4. Clear persisted session state + PIN-era storage artefacts.
+    //    `useSessionStore` is imported statically at the top of the
+    //    module now that `session-store.ts` no longer pulls in the
+    //    ESM-only `@enbox/agent` runtime (the shared constants live in
+    //    the pure-data `vault-constants.ts` module).
     try {
-       
-      const { useSessionStore } = require('@/features/session/session-store');
       await useSessionStore.getState().reset();
     } catch (err) {
       console.warn('[agent-store] reset: session-store reset failed:', err);

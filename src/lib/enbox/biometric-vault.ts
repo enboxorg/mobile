@@ -42,24 +42,22 @@ import { LocalKeyManager, computeJwkThumbprint } from '@enbox/crypto';
 
 import NativeBiometricVault from '@specs/NativeBiometricVault';
 
-/** Keychain/Keystore alias that holds the wallet's root biometric-gated secret. */
-export const WALLET_ROOT_KEY_ALIAS = 'enbox.wallet.root';
+import {
+  BIOMETRIC_STATE_STORAGE_KEY,
+  INITIALIZED_STORAGE_KEY,
+  WALLET_ROOT_KEY_ALIAS,
+} from './vault-constants';
 
-/**
- * Well-known `@enbox/auth` SecureStorage key recording whether the vault
- * has ever been initialized. Complements `NativeBiometricVault.hasSecret`
- * so `isInitialized()` has a reliable answer even in the corner case
- * where the native module is momentarily unreachable (e.g. during app
- * cold-start before native bridge init).
- */
-export const INITIALIZED_STORAGE_KEY = 'enbox.vault.initialized';
-
-/**
- * Well-known SecureStorage key holding the last observed biometric state
- * so the app can restore the `invalidated` / `ready` gate across app
- * restarts without re-prompting.
- */
-export const BIOMETRIC_STATE_STORAGE_KEY = 'enbox.vault.biometric-state';
+// Re-export the shared constants from the pure `vault-constants` module
+// so existing callers (including the test suite) that import them from
+// `@/lib/enbox/biometric-vault` continue to resolve. The canonical
+// declaration lives in `vault-constants.ts`; see that module's header
+// comment for the circular-import rationale.
+export {
+  BIOMETRIC_STATE_STORAGE_KEY,
+  INITIALIZED_STORAGE_KEY,
+  WALLET_ROOT_KEY_ALIAS,
+};
 
 /** Default biometric prompt copy for unlock flows. */
 export const DEFAULT_UNLOCK_PROMPT = {
