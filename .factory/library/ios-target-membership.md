@@ -141,8 +141,8 @@ the intended effect is:
   `RCTNativeCrypto.h:6` declares `<NativeCryptoSpec>`).
 - `package.json` `codegenConfig.ios.modulesProvider` maps their JS names
   to these class names (`package.json` lines 28–30).
-- `ios/Podfile` line 16 calls `use_native_modules!` inside the
-  `'EnboxMobile'` target.
+- `ios/Podfile` line 17 opens `target 'EnboxMobile' do` and line 18
+  calls `config = use_native_modules!` inside that target.
 
 Everything else about how they reach the app binary must be taken on
 faith from RN's docs **or** proven by a green CI `build-ios` run.
