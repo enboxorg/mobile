@@ -78,65 +78,17 @@ jobs:
           force-avd-creation: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
-          script: |
-            set -e
-
-            # Ensure artifact directories exist before we capture anything.
-            mkdir -p /tmp/emulator-ui /tmp/emulator-ui-artifacts
-
-            # Always-run cleanup: copy UI artifacts + dump logcats regardless
-            # of whether the python flow script succeeded. The EXIT trap fires
-            # on normal shell exit AND on `set -e`-induced failure exit, which
-            # means `logcat-full.txt`, `logcat-rn.txt`, `flow-error.png`, and
-            # any partial screenshots are always uploaded. The shell still
-            # propagates the original (failing) exit code, so VAL-CI-013 /
-            # VAL-CI-024 (job fails loudly on flow regression) remain honored.
-            capture_artifacts() {
-              set +e
-              echo ""
-              echo "=== [cleanup] Copying screenshots and dumps into the artifact tree ==="
-              cp -R /tmp/emulator-ui/. /tmp/emulator-ui-artifacts/ 2>/dev/null
-
-              echo ""
-              echo "========================================="
-              echo "=== ReactNativeJS + Crash Logs ==="
-              echo "========================================="
-              adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1
-
-              echo ""
-              echo "========================================="
-              echo "=== All ERROR level logs ==="
-              echo "========================================="
-              adb logcat -d '*:E' 2>&1 | grep -i "react\|enbox\|level\|crypto\|fatal\|exception"
-
-              echo ""
-              echo "=== [cleanup] Saving full logcat (size-bounded to 10 MiB) ==="
-              # Cap each logcat artifact at 10 MiB so uploads stay well under
-              # GitHub's per-artifact limit. See VAL-CI-032.
-              adb logcat -d 2>&1 | head -c 10485760 > /tmp/logcat-full.txt
-              adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1 | head -c 10485760 > /tmp/logcat-rn.txt
-            }
-            trap capture_artifacts EXIT
-
-            echo "=== Installing release APK ==="
-            adb install android/app/build/outputs/apk/release/app-release.apk
-
-            echo "=== Clearing logcat ==="
-            adb logcat -c
-
-            echo "=== Launching app ==="
-            adb shell am start -n org.enbox.mobile/.MainActivity
-
-            echo "=== Waiting for app to start (20s) ==="
-            sleep 20
-
-            echo "=== Capturing initial logcat (size-bounded to 10 MiB) ==="
-            adb logcat -d 2>&1 | head -c 10485760 > /tmp/logcat-startup.txt
-
-            echo "=== Driving onboarding flow by UI text ==="
-            # No `|| true` — the script's exit code must propagate so flow regressions
-            # fail the job. See VAL-CI-013 / VAL-CI-024.
-            python3 scripts/emulator-debug-flow.py
+          # IMPORTANT: keep this `script:` block a one-liner.
+          # `reactivecircus/android-emulator-runner@v2` runs each line of
+          # this field as a separate `sh -c` invocation (see its
+          # `parseScript` helper and issue #391), which makes multi-line
+          # bash functions / `trap` handlers impossible here. All the
+          # actual orchestration (install APK, launch app, capture
+          # logcat, run the Python flow, always-run cleanup) lives in
+          # `scripts/ci-debug-emulator-runner.sh` so the trap + function
+          # bodies survive. Do not inline the script body back into this
+          # block.
+          script: bash scripts/ci-debug-emulator-runner.sh
 
       - name: Upload logs and screenshot
         if: always()
