@@ -81,7 +81,7 @@ The artifact (name `emulator-debug-<sha>`) should contain, at minimum:
 - `emulator-ui-artifacts/` directory with:
   - `welcome.png`
   - `biometric-setup.png`
-  - `biometric-prompt.png`
+  - `biometric-prompt-1.png`
   - `recovery-phrase.png`
   - `main-wallet.png`
   - `relaunch-unlock-prompt.png`
@@ -178,7 +178,7 @@ Return a handoff with this shape:
     { "workflow": "build-apk.yml", "runId": "...", "url": "...", "conclusion": "...", "headSha": "..." }
   ],
   "artifactFindings": {
-    "pngsPresent": ["welcome.png","biometric-setup.png","biometric-prompt.png","recovery-phrase.png","main-wallet.png","relaunch-unlock-prompt.png","after-relaunch.png"],
+    "pngsPresent": ["welcome.png","biometric-setup.png","biometric-prompt-1.png","recovery-phrase.png","main-wallet.png","relaunch-unlock-prompt.png","after-relaunch.png"],
     "pngsMissing": [],
     "walletReached": true,
     "walletReachedEvidence": "rg 'text=\"Identities\"' main-wallet.xml → 1 match; after-relaunch.xml → 1 match",
@@ -204,6 +204,6 @@ Rules:
 ## Failure modes to watch for
 
 - `reactivecircus/android-emulator-runner@v2` occasionally fails on boot with "emulator could not be started". This is infrastructure-level — retry ONCE with the same sha before concluding.
-- `adb -e emu finger touch 1` is a no-op if no fingerprint is enrolled. If `biometric-prompt.png` shows the system prompt but `main-wallet.png` is a black screen, the enrollment step in `emulator-debug-flow.py` regressed. Surface this as a blocking issue against the script.
+- `adb -e emu finger touch 1` is a no-op if no fingerprint is enrolled. If `biometric-prompt-1.png` shows the system prompt but `main-wallet.png` is a black screen, the enrollment step in `emulator-debug-flow.py` regressed. Surface this as a blocking issue against the script.
 - `uiautomator dump` can deadlock on animations. The flow script should `disable-animations: true` on the runner. If dumps are missing, that's a script issue.
 - Artifact naming: if the artifact is named something other than `emulator-debug-<sha>`, `VAL-CI-033` fails — report.
