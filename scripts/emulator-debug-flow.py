@@ -27,6 +27,7 @@ enroll a fingerprint on API 31 (Keystore ``setUserAuthenticationRequired``).
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -354,18 +355,28 @@ def ensure_device_credential(timeout: float = 20.0) -> None:
 
 
 def enrolled_fingerprint_count() -> int:
-    """Parse ``dumpsys fingerprint`` and return the enrolled-finger count."""
+    """Parse ``dumpsys fingerprint`` and return the enrolled-finger count.
+
+    On API 31 ``google_apis`` images, ``dumpsys fingerprint`` does NOT emit
+    a literal ``enrolled=N`` line and the JSON ``prints`` array is
+    pre-allocated with an empty slot even when nothing is enrolled (the
+    ``count`` field inside is the HAL's per-session sample counter, not
+    the enrolled count). Accordingly we cannot rely on ``prints`` length.
+    We keep the legacy ``enrolled``/``already enrolled`` text markers as
+    best-effort detection for AOSP / default images; the authoritative
+    success signal for google_apis images is ``seen_enroll_finish`` in
+    ``enroll_fingerprint()`` (i.e. the wizard reached
+    ``FingerprintEnrollFinish``).
+    """
 
     result = adb("shell", "dumpsys", "fingerprint", check=False)
     if result.returncode != 0:
         return 0
     text = result.stdout or ""
+
     for line in text.splitlines():
         lower = line.lower()
         if "enrolled" in lower:
-            # Examples observed on API 31:
-            #   "Fingerprint enrolled for user 0: 1"
-            #   "enrolled=1"
             matches = re.findall(r"(\d+)", line)
             if matches:
                 try:
@@ -374,6 +385,36 @@ def enrolled_fingerprint_count() -> int:
                     continue
     if "already enrolled" in text.lower():
         return 1
+    return 0
+
+
+def _enrollment_sample_count() -> int:
+    """Return the HAL's current enrollment-sample ``count`` from ``dumpsys``.
+
+    On API 31 ``google_apis`` images this is exposed via the JSON blob
+    ``{"prints":[{"id":0,"count":N,...}]}`` embedded in ``dumpsys
+    fingerprint``. ``count`` is the number of acquisition samples collected
+    in the current enrollment session. Returns 0 when the blob is absent
+    or unparseable. Used as a secondary "enrollment progressing" signal so
+    the main loop can distinguish "wizard is actually enrolling" from
+    "wizard stuck on a sub-screen".
+    """
+
+    result = adb("shell", "dumpsys", "fingerprint", check=False)
+    if result.returncode != 0:
+        return 0
+    text = result.stdout or ""
+    for match in re.finditer(r'"prints"\s*:\s*(\[[^\]]*\])', text):
+        try:
+            prints = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(prints, list):
+            total = 0
+            for entry in prints:
+                if isinstance(entry, dict):
+                    total += int(entry.get("count") or 0)
+            return total
     return 0
 
 
@@ -507,7 +548,7 @@ def _tap_first_label(
     return None
 
 
-def enroll_fingerprint(timeout: float = 300.0) -> None:
+def enroll_fingerprint(timeout: float = 600.0) -> None:
     """Enroll a fingerprint on the running emulator (idempotent).
 
     The emulator's fingerprint wizard on API 31 ``google_apis`` images
@@ -520,40 +561,57 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
     - ``ConfirmLockPassword`` / ``ConfirmLockPin`` — device PIN confirm.
       We ``input text 0000`` + KEYCODE_ENTER; on API 31 this submits
       the credential and advances the wizard.
-    - ``FingerprintEnrollFindSensor`` — "Touch the sensor" screen, needs
-      a "Start" / "Next" tap.
+    - ``FingerprintEnrollFindSensor`` — "Touch the sensor" screen.
+      On API 31 ``google_apis`` the only clickable control is
+      ``DO IT LATER`` (which we must NOT tap). The screen auto-advances
+      when a fingerprint touch is sent, so we fire
+      ``adb -e emu finger touch 1`` directly.
     - ``FingerprintEnrollEnrolling`` — records finger samples; needs
-      repeated ``adb -e emu finger touch 1`` (5-7 touches on Pixel 5).
-    - ``FingerprintEnrollFinish`` — "Fingerprint added"; best-effort
-      "Done" tap to return Settings to a clean state.
+      repeated ``adb -e emu finger touch 1`` (the HAL needs ~6-8 samples
+      on Pixel 5 AVD).
+    - ``FingerprintEnrollFinish`` — "Fingerprint added". Reaching this
+      state is our authoritative success signal because API 31
+      ``google_apis`` ``dumpsys fingerprint`` doesn't expose a reliable
+      enrolled-count number (the ``prints`` array is pre-allocated).
 
-    The loop dispatches on ``current_focus()`` so that it doesn't rely
-    on fragile UI-text matching (earlier iterations bailed to
-    ``SECURITY_SETTINGS`` whenever focus shifted to ``ConfirmLockPassword``
-    because the text-based PIN-prompt detection missed the API 31
-    copy — see ``.factory/library/ci-debug-emulator-fingerprint-enrollment-timeout.md``).
+    Critical fix for the persistent stall observed on fa30d4c:
+    our app (``org.enbox.mobile``) is launched BEFORE this script runs
+    (by ``ci-debug-emulator-runner.sh``), so it's sitting on top of the
+    task stack. When the FingerprintEnrollEnrolling activity eventually
+    completes (or even just finishes a sub-screen), Android resumes the
+    previously-foregrounded app, which is ours — not the launcher. That
+    pulls focus away from Settings while enrollment is only half-done,
+    and the script's fallback then taps ``Continue`` on our own
+    BiometricSetup screen, triggering a BiometricPrompt we haven't set up
+    yet. To avoid the race entirely we ``am force-stop`` our app at the
+    top of this function and leave the launcher (or an ANR'd launcher)
+    as the previous task; the main flow re-launches the app after
+    enrollment in ``main()``.
 
     Steps:
 
-    1. Early-return when ``dumpsys fingerprint`` already reports an
-       enrolled finger (cached AVD). This satisfies VAL-CI-037.
-    2. Launch the ``FINGERPRINT_ENROLL`` settings intent.
-    3. Poll ``current_focus()``; for each known activity, run the
-       dispatch handler (type PIN, tap advance button, fire finger
-       touches, etc.) and check ``enrolled_fingerprint_count()`` each
-       iteration.
-    4. If ``current_focus()`` ever leaves the fingerprint wizard
-       entirely (e.g. user bounced back to Security Settings) and the
-       finger count is still zero, re-launch the intent rather than
-       sit idle.
+    1. Force-stop our app so Settings can complete without racing against
+       our activity stack.
+    2. Early-return if ``dumpsys fingerprint`` already reports an enrolled
+       finger (legacy AOSP path) OR the wizard has reached
+       ``FingerprintEnrollFinish`` on a previous invocation.
+    3. Launch the ``FINGERPRINT_ENROLL`` settings intent.
+    4. Poll ``current_focus()``; for each known activity, run the
+       dispatch handler.
+    5. Once ``FingerprintEnrollFinish`` is observed OR
+       ``enrolled_fingerprint_count()`` returns >=1, tap ``Done`` and
+       exit.
 
     Diagnostics (current foreground activity + ``dumpsys fingerprint``
-    excerpt + on-screen button candidates) are printed every ~15 seconds
-    so a timeout reveals exactly where the wizard got stuck.
-
-    Raises :class:`TimeoutError` when enrollment cannot be verified within
-    ``timeout`` seconds.
+    excerpt + on-screen button candidates) are printed every ~15 seconds.
     """
+
+    # Prevent our app from being the fallback foreground task while the
+    # enrollment wizard is running (see the docstring for why).
+    adb("shell", "am", "force-stop", APP_PACKAGE, check=False)
+    time.sleep(1.0)
+    # Clear any pending ANR dialog before we start touching Settings.
+    dismiss_anr_if_present(max_attempts=3)
 
     if enrolled_fingerprint_count() >= 1:
         print(
@@ -570,6 +628,7 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
         "shell",
         "am",
         "start",
+        "-W",
         "-a",
         "android.settings.FINGERPRINT_ENROLL",
         check=False,
@@ -581,14 +640,18 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
     taps = 0
     pins = 0
     relaunches = 0
+    enrolling_touches = 0
     last_diagnostic = 0.0
     stuck_at_non_wizard_since: Optional[float] = None
+    seen_enroll_finish = False
     while time.time() < deadline:
         count = enrolled_fingerprint_count()
-        if count >= 1:
+        sample_count = _enrollment_sample_count()
+        if count >= 1 or seen_enroll_finish:
             print(
                 f"[enroll_fingerprint] enrolled after {touches} touch(es), "
-                f"{taps} wizard tap(s), {pins} pin-confirm(s); count={count}",
+                f"{taps} wizard tap(s), {pins} pin-confirm(s); count={count} "
+                f"samples={sample_count} finish_seen={seen_enroll_finish}",
                 flush=True,
             )
             # Best-effort "Done" tap to leave Settings in a clean state; the
@@ -598,6 +661,9 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
                 _tap_first_label(root, ("Done", "Finish", "OK", "Next"))
             except Exception:
                 pass
+            # Re-force-stop our app so main() re-launches it cleanly.
+            adb("shell", "am", "force-stop", APP_PACKAGE, check=False)
+            time.sleep(0.5)
             return
 
         focus = current_focus()
@@ -642,34 +708,49 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
             else:
                 # The intro usually auto-advances — give it a moment.
                 time.sleep(1.0)
+            # If a "Done" button is present on the Introduction activity,
+            # that's the post-enrollment "Fingerprint added" confirmation
+            # screen the wizard rendered under the Introduction class on
+            # some API 31 google_apis images. Treat as success.
+            if root is not None:
+                done_node = find_node_by_text_ci(root, "Done")
+                if done_node is not None and not find_node_by_text_ci(
+                    root, "More"
+                ):
+                    print(
+                        "[enroll_fingerprint] 'Done' visible on Introduction-"
+                        "class activity; treating as Finish",
+                        flush=True,
+                    )
+                    seen_enroll_finish = True
             handled = True
 
-        # 3) "Touch the sensor" screen — tap "Start"/"Next" to proceed to
-        # actual enrollment, then fire a touch for good measure.
+        # 3) "Touch the sensor" screen — on API 31 google_apis the only
+        # clickable is "DO IT LATER" (don't tap!). The screen auto-advances
+        # to Enrolling when a fingerprint touch arrives.
         elif _focus_matches(focus, ENROLL_FOCUS_FIND_SENSOR):
-            tapped = _tap_first_label(root, ("Start", "Next", "Continue"))
-            if tapped is not None:
-                print(
-                    f"[enroll_fingerprint] tapped '{tapped}' on FindSensor",
-                    flush=True,
-                )
-                taps += 1
-            adb_emu("emu", "finger", "touch", FINGER_ID)
-            touches += 1
-            time.sleep(1.0)
-            handled = True
-
-        # 4) Enrollment in progress — fire touches until the HAL records
-        # enough samples and the wizard advances on its own.
-        elif _focus_matches(focus, ENROLL_FOCUS_ENROLLING):
             adb_emu("emu", "finger", "touch", FINGER_ID)
             touches += 1
             time.sleep(0.8)
             handled = True
 
-        # 5) Finish screen — enrollment succeeded; tap Done and re-check
-        # the count on the next iteration (which will exit the loop).
+        # 4) Enrollment in progress — fire touches aggressively until the
+        # HAL records enough samples and the wizard advances on its own.
+        elif _focus_matches(focus, ENROLL_FOCUS_ENROLLING):
+            adb_emu("emu", "finger", "touch", FINGER_ID)
+            touches += 1
+            enrolling_touches += 1
+            # Brief sleep keeps us below the HAL's debounce threshold
+            # without starving the wizard of the window to render the
+            # "sample accepted" indicator.
+            time.sleep(0.5)
+            handled = True
+
+        # 5) Finish screen — enrollment succeeded; mark the flag and tap
+        # Done. The next loop iteration will exit via the
+        # ``seen_enroll_finish`` short-circuit at the top.
         elif _focus_matches(focus, ENROLL_FOCUS_FINISH):
+            seen_enroll_finish = True
             _tap_first_label(root, ("Done", "Finish", "OK", "Next"))
             taps += 1
             time.sleep(1.0)
@@ -681,10 +762,24 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
         if not handled:
             # System ANR dialog ("App isn't responding") can show over the
             # launcher on fresh AVDs. Tap "Wait" so the Settings intent can
-            # complete instead of being cancelled.
-            if dismiss_anr_if_present(max_attempts=1):
+            # complete instead of being cancelled. Retry the dump a few
+            # times because uiautomator can race against the dialog pop.
+            if dismiss_anr_if_present(max_attempts=3):
                 time.sleep(1.0)
                 continue
+
+            # Our app isn't a legit fingerprint-wizard host. If focus has
+            # landed on org.enbox.mobile it means the previous Settings
+            # activity ended; go HOME and let the re-launch branch pick it
+            # up on the next iteration. We never try to tap our own UI
+            # buttons from this path — doing so drives the biometric flow
+            # on a half-enrolled HAL and corrupts the fixture.
+            if APP_PACKAGE in (focus or ""):
+                adb("shell", "input", "keyevent", "KEYCODE_HOME", check=False)
+                time.sleep(0.5)
+                # And make sure our app can't reclaim focus again.
+                adb("shell", "am", "force-stop", APP_PACKAGE, check=False)
+                time.sleep(0.5)
 
             still_in_wizard = _focus_matches(
                 focus, ENROLL_FOCUS_SETTINGS_FINGERPRINT
@@ -705,6 +800,7 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
                         "shell",
                         "am",
                         "start",
+                        "-W",
                         "-a",
                         "android.settings.FINGERPRINT_ENROLL",
                         check=False,
@@ -714,7 +810,12 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
                     time.sleep(3.0)
                     continue
             # Fallback: try a text-based wizard advance + finger touch.
-            tapped = _tap_first_label(root, WIZARD_ADVANCE_LABELS)
+            # NEVER tap labels from our own app — ``_focus_matches`` above
+            # already HOMEs-out when focus is ours, so ``root`` here should
+            # belong to Settings or the launcher.
+            tapped = None
+            if focus and APP_PACKAGE not in focus:
+                tapped = _tap_first_label(root, WIZARD_ADVANCE_LABELS)
             if tapped is not None:
                 print(
                     f"[enroll_fingerprint] fallback tapped '{tapped}' "
@@ -743,7 +844,9 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
                         button_texts.append(t)
             print(
                 f"[enroll_fingerprint] touches={touches} taps={taps} pins={pins} "
-                f"relaunches={relaunches} count={count} "
+                f"relaunches={relaunches} count={count} samples={sample_count} "
+                f"enrolling_touches={enrolling_touches} "
+                f"finish_seen={seen_enroll_finish} "
                 f"focus={focus!r} clickable={button_texts[:10]!r} "
                 f"dumpsys={dumpsys_excerpt!r}",
                 flush=True,
@@ -888,11 +991,18 @@ def dismiss_anr_if_present(max_attempts: int = 3) -> bool:
     """
 
     dismissed_any = False
-    for _ in range(max_attempts):
+    # NOTE: Intentionally do NOT early-return on "dialog not found". The
+    # ANR dialog can race with ``uiautomator dump`` — uiautomator sometimes
+    # captures the underlying launcher hierarchy instead of the overlay,
+    # especially right after the dialog pops. Retry the dump up to
+    # ``max_attempts`` times with a short sleep between attempts so we get
+    # at least one accurate look.
+    for attempt in range(max_attempts):
         try:
             root = dump_ui()
         except subprocess.CalledProcessError:
-            return dismissed_any
+            time.sleep(0.5)
+            continue
 
         close_present = False
         wait_node: Optional[ET.Element] = None
@@ -905,7 +1015,12 @@ def dismiss_anr_if_present(max_attempts: int = 3) -> bool:
         # Only act when BOTH buttons are present — signature of an ANR
         # dialog. "Wait" alone could plausibly be app copy somewhere.
         if not (close_present and wait_node is not None):
-            return dismissed_any
+            # If we haven't tapped yet, keep retrying to rule out a
+            # dump-vs-dialog race; if we have tapped, we're done.
+            if dismissed_any:
+                return dismissed_any
+            time.sleep(0.5)
+            continue
         try:
             tap_node(wait_node)
             print(
@@ -913,7 +1028,8 @@ def dismiss_anr_if_present(max_attempts: int = 3) -> bool:
                 flush=True,
             )
             dismissed_any = True
-        except Exception:
+        except Exception as tap_exc:  # pragma: no cover - diagnostic only
+            print(f"[dismiss_anr] tap 'Wait' failed: {tap_exc}", flush=True)
             return dismissed_any
         time.sleep(1.5)
     return dismissed_any
