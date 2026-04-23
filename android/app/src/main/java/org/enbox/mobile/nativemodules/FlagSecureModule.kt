@@ -1,6 +1,6 @@
 package org.enbox.mobile.nativemodules
 
-import android.view.WindowManager
+import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
@@ -45,31 +45,31 @@ class FlagSecureModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun activate(promise: Promise) {
-        val activity = currentActivity
-        if (activity == null) {
-            // No Activity attached (e.g. headless bring-up): best-effort
-            // no-op, matching the JS shim's silently-no-op contract.
+        // FlagSecureModule extends ReactContextBaseJavaModule directly (not
+        // a codegen spec), so `currentActivity` is NOT resolvable as a bare
+        // identifier under Kotlin compilation on CI. Go through
+        // `reactApplicationContext.currentActivity` which returns a
+        // nullable Activity? — mirrors the pattern used by upstream RN Java
+        // samples and keeps our silently-no-op contract for a detached
+        // Activity (e.g. headless bring-up).
+        val activity = reactApplicationContext.currentActivity ?: run {
             promise.resolve(null)
             return
         }
         activity.runOnUiThread {
-            activity.window?.setFlags(
-                WindowManager.LayoutParams.FLAG_SECURE,
-                WindowManager.LayoutParams.FLAG_SECURE,
-            )
+            activity.window?.setFlags(FLAG_SECURE, FLAG_SECURE)
         }
         promise.resolve(null)
     }
 
     @ReactMethod
     fun deactivate(promise: Promise) {
-        val activity = currentActivity
-        if (activity == null) {
+        val activity = reactApplicationContext.currentActivity ?: run {
             promise.resolve(null)
             return
         }
         activity.runOnUiThread {
-            activity.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            activity.window?.clearFlags(FLAG_SECURE)
         }
         promise.resolve(null)
     }
