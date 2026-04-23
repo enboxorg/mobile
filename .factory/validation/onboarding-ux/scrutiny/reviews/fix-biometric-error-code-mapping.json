@@ -1,0 +1,26 @@
+{
+  "featureId": "fix-biometric-error-code-mapping",
+  "reviewedAt": "2026-04-23T00:00:18Z",
+  "commitId": "d1a4632cab9dcca38fcfd628bff9dadf1c584201",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. The fix adds a single canonical `VAULT_ERROR_BIOMETRY_LOCKOUT` mapping in `BiometricVault`, preserves that code through `agent-store`, and teaches both setup/unlock screens to treat the canonical code as lockout while leaving raw native codes as defensive fallbacks. That closes the exact production mismatch called out in the prior `biometric-setup-screen` and `biometric-unlock-screen` failures, and `AUTH_FAILED` still falls through the generic retry path as required.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The shared architecture doc's BiometricVault error-surface list is stale after this fix: it still omits `VAULT_ERROR_BIOMETRY_LOCKOUT`, even though setup/unlock screens now depend on that canonical code.",
+      "evidence": "`.factory/library/architecture.md:206-209` lists only `VAULT_ERROR_ALREADY_INITIALIZED`, `VAULT_ERROR_NOT_INITIALIZED`, `VAULT_ERROR_LOCKED`, `VAULT_ERROR_BIOMETRICS_UNAVAILABLE`, `VAULT_ERROR_USER_CANCELED`, and `VAULT_ERROR_KEY_INVALIDATED`, while `src/lib/enbox/biometric-vault.ts:83-92,434-439` now defines/maps `VAULT_ERROR_BIOMETRY_LOCKOUT` and both screens consume it at `src/features/auth/screens/biometric-setup-screen.tsx:31-36` and `src/features/auth/screens/biometric-unlock-screen.tsx:35-42`."
+    },
+    {
+      "area": "skills",
+      "observation": "The worker again marked `skillFeedback.followedProcedure: true` even though the transcript skeleton does not show the required `mission.md` or relevant library-doc reads for a vault + user-facing screen fix.",
+      "evidence": "`.factory/skills/mobile-feature-worker/SKILL.md:12-32` requires reading `mission.md`, `architecture.md`, `environment.md`, and `user-testing.md` when a feature touches vault/store flows and runs tests. The transcript skeleton for session `7f7d3c73-ca94-4539-b6f0-9ea9d64d8fbf` contains `AGENTS.md`, `validation-contract.md`, and `.factory/services.yaml`, but the saved skeleton is missing `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/mission.md`, `/home/liran/src/enboxorg/mobile/.factory/library/architecture.md`, `/home/liran/src/enboxorg/mobile/.factory/library/environment.md`, and `/home/liran/src/enboxorg/mobile/.factory/library/user-testing.md`."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/onboarding-ux/scrutiny/reviews/biometric-setup-screen.json, .factory/validation/onboarding-ux/scrutiny/reviews/biometric-unlock-screen.json",
+  "summary": "Pass. The fix resolves both prior blocking reviews: native `BIOMETRY_LOCKOUT` and `BIOMETRY_LOCKOUT_PERMANENT` now normalize to `VAULT_ERROR_BIOMETRY_LOCKOUT`, the agent store preserves that code, and both consuming screens route it to the required lockout UX instead of the generic error branch. No residual generic-error fallback was found for real OS lockouts; `AUTH_FAILED` still intentionally maps to generic retry behavior."
+}

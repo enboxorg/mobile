@@ -1,0 +1,15 @@
+{
+  "featureId": "fix-walletconnect-queued-error-surfacing",
+  "reviewedAt": "2026-04-23T00:00:00+00:00",
+  "commitId": "dcd24aee1a8854a93956130a0695d731b65be566",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. The fix now surfaces queued wallet-connect failures once the navigator reaches `Main`: `handleIncomingUrl()` still records deep-link failures as `{ phase: 'error', pending: null }` (`src/lib/enbox/wallet-connect-store.ts:59-73`), and `AppNavigator` now observes that state and calls `Alert.alert(...)` only after the route resolves to `Main` (`src/navigation/app-navigator.tsx:141-214`). The new navigation tests cover the queued-error alert path and keep the gate behavior intact (`src/navigation/app-navigator.test.tsx:750-837`). I also re-checked the current route matrix and found no remaining locked-session bypass: `getInitialRoute()` still returns `BiometricUnlock` for `ready` + `vaultInitialized` + `isLocked` (`src/features/session/get-initial-route.ts:86`), and the relaunch-locked integration test still asserts that path (`src/navigation/app-navigator.test.tsx:532-549`).",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": ".factory/validation/onboarding-ux/scrutiny/reviews/navigation-gating.json; .factory/validation/onboarding-ux/scrutiny/reviews/pin-removal-and-session-state.json",
+  "summary": "Review passed: queued wallet-connect errors are now surfaced after the biometric gate clears, and the current navigator route matrix still sends locked ready sessions to `BiometricUnlock`, so neither prior blocking concern remains."
+}

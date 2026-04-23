@@ -206,7 +206,8 @@ produced `BearerDid` is deterministic w.r.t. the native 32-byte secret.
 Error surface (stable codes consumed by the store + screens):
 `VAULT_ERROR_ALREADY_INITIALIZED`, `VAULT_ERROR_NOT_INITIALIZED`,
 `VAULT_ERROR_LOCKED`, `VAULT_ERROR_BIOMETRICS_UNAVAILABLE`,
-`VAULT_ERROR_USER_CANCELED`, `VAULT_ERROR_KEY_INVALIDATED`.
+`VAULT_ERROR_USER_CANCELED`, `VAULT_ERROR_KEY_INVALIDATED`,
+`VAULT_ERROR_BIOMETRY_LOCKOUT`.
 
 ### 3.6 `@enbox/agent` patch — `scripts/apply-patches.mjs`
 

@@ -34,6 +34,7 @@ Any step requiring an Android build, iOS build, or emulator MUST run on GitHub A
 - New Architecture enabled (Fabric + Turbo Modules). Codegen runs at build time on CI.
 - Metro resolver override in `metro.config.js` rewrites `level` imports in `@enbox/*` packages to `src/lib/enbox/rn-level.ts`.
 - `scripts/apply-patches.mjs` runs on `postinstall`. Existing patches for `react-native-leveldb` (Android gradle + iOS env_posix.cc) must be preserved; the mission adds an `@enbox/agent` vault-injection patch.
+- `react-native-camera-kit`'s iOS static permission helper has a shipped type/runtime mismatch: `checkDeviceCameraAuthorizationStatus()` is typed as `Promise<boolean>` in the generated spec, but the native implementation returns `-1` for `AVAuthorizationStatus.notDetermined`. Scanner permission code should treat `-1` as "not determined" instead of assuming a strict boolean.
 - No metro/dev server is expected to run under a worker session — tests only.
 
 ## External APIs / services

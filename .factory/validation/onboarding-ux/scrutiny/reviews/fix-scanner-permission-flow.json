@@ -1,0 +1,26 @@
+{
+  "featureId": "fix-scanner-permission-flow",
+  "reviewedAt": "2026-04-23T00:00:39Z",
+  "commitId": "07e6f87d865cf3159406a842894cb95f386a989e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The fix addresses the prior scanner deadlock in code, not just tests. `WalletConnectScannerScreen` now probes permission through a platform helper on mount, only mounts `<Camera>` after a granted result, and the updated Jest suite exercises the loading→camera transition plus denied/blocked states.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "`react-native-camera-kit`'s iOS static permission helper returns `-1` for `AVAuthorizationStatus.notDetermined` even though its generated TypeScript spec advertises `Promise<boolean>`. That quirk is important for future scanner-permission work and is not captured in mission shared state.",
+      "evidence": "Installed package mismatch: `node_modules/react-native-camera-kit/src/specs/NativeCameraKitModule.ts:19-20` types `checkDeviceCameraAuthorizationStatus(): Promise<boolean>`, but `node_modules/react-native-camera-kit/ios/ReactNativeCameraKit/CameraManager.swift:30-47` resolves `-1` for `.notDetermined`. The worker transcript shows source inspection across those files before implementing `src/lib/native/camera-permission.ts`."
+    },
+    {
+      "area": "skills",
+      "observation": "The `mobile-feature-worker` skill's honesty gate requires reading `.factory/library/architecture.md` at minimum before claiming `skillFeedback.followedProcedure: true`, but this worker's transcript never read any `.factory/library/*.md` file while the handoff still reported `followedProcedure: true`.",
+      "evidence": "Skill requirement: `/home/liran/src/enboxorg/mobile/.factory/skills/mobile-feature-worker/SKILL.md` ('at minimum `architecture.md`'). Transcript tool order for worker session `4d997701-10e1-4c75-80ba-20598f0da38f` shows reads for `mission.md`, `validation-contract.md`, and `AGENTS.md`, but no `.factory/library/architecture.md` read; the handoff file `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-22T23-29-03-290Z__fix-scanner-permission-flow__4d997701-10e1-4c75-80ba-20598f0da38f.json` sets `skillFeedback.followedProcedure` to `true`."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/onboarding-ux/scrutiny/reviews/onboarding-edge-cases-and-regressions.json",
+  "summary": "Pass. The code breaks the old camera-ref deadlock by probing permission before mounting `<Camera>`, and the updated scanner tests now cover the real grant→camera transition plus denied/blocked recovery states. No blocking or non-blocking code issues found in this fix."
+}

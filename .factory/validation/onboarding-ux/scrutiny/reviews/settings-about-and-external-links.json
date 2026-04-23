@@ -1,0 +1,21 @@
+{
+  "featureId": "settings-about-and-external-links",
+  "reviewedAt": "2026-04-23T00:00:22Z",
+  "commitId": "f4a1f7d9d07e077ca8511bd1cc040f0b57e6d2ca",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. This fix closes the prior VAL-UX-053 gap: Settings now renders an About section with the package.json version string and Privacy policy / Terms of service rows, and the regression suite explicitly presses each link row and verifies the exact https://enbox.org/privacy and https://enbox.org/terms targets.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker marked `skillFeedback.followedProcedure: true`, but the transcript skeleton does not show the required `.factory/library/architecture.md` read and shows the first settings test run before any file edits, then code edits, then the green rerun. The mobile-feature-worker skill currently relies on self-report for its honesty gate, so scrutiny had to infer the deviation from transcript order.",
+      "evidence": "`/home/liran/src/enboxorg/mobile/.factory/skills/mobile-feature-worker/SKILL.md:26-36,66-73` requires reading at least `architecture.md` and observing a red test before implementation. In `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/worker-transcripts.jsonl` for session `3f6c9c35-d683-4c1d-a6f7-fd935078b2da`, the skeleton contains reads for mission.md / validation-contract.md / AGENTS.md but no `architecture.md` read, and its first `bun run test -- --testPathPattern 'settings'` entry appears before the first `Edit` entry."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/onboarding-ux/scrutiny/reviews/onboarding-edge-cases-and-regressions.json",
+  "summary": "Review passed. The settings fix now exposes the required About/version and Privacy/Terms rows, and committed Jest coverage verifies both exact external URLs, resolving the prior blocking VAL-UX-053 failure."
+}
