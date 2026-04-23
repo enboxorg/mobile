@@ -403,11 +403,27 @@ WIZARD_ADVANCE_LABELS: tuple[str, ...] = (
     "I Agree",
     "Agree",
     "Continue",
+    "More",
     "Start",
     "Next",
     "Done",
     "Fingerprint added",
 )
+
+
+# Activity class fragments we expect to see in ``current_focus()`` during the
+# fingerprint enrollment wizard on API 31 ``google_apis`` images. These are
+# checked case-insensitively to make the state-machine resilient to minor
+# class-name drift between system images.
+ENROLL_FOCUS_CONFIRM = ("confirmlockpassword", "confirmlockpin", "confirmlockpattern")
+ENROLL_FOCUS_INTRO = ("fingerprintenrollintroduction",)
+ENROLL_FOCUS_FIND_SENSOR = ("fingerprintenrollfindsensor",)
+ENROLL_FOCUS_ENROLLING = ("fingerprintenrollenrolling", "fingerprintenrollsidecar")
+ENROLL_FOCUS_FINISH = ("fingerprintenrollfinish",)
+# Any activity in the settings fingerprint package counts as "still in the
+# enrollment flow" even when the specific class isn't one we recognize by
+# name. Used to decide whether we need to re-launch the intent.
+ENROLL_FOCUS_SETTINGS_FINGERPRINT = ("biometrics.fingerprint",)
 
 
 def current_focus() -> str:
@@ -429,23 +445,79 @@ def current_focus() -> str:
     return ""
 
 
-def enroll_fingerprint(timeout: float = 240.0) -> None:
+def _focus_matches(focus: str, fragments: Iterable[str]) -> bool:
+    """Case-insensitive substring match over activity ``focus`` line."""
+
+    focus_lower = focus.lower()
+    return any(frag in focus_lower for frag in fragments)
+
+
+def _tap_first_label(
+    root: Optional[ET.Element], labels: Iterable[str]
+) -> Optional[str]:
+    """Tap the first node whose text matches any of ``labels``.
+
+    Returns the tapped label on success, ``None`` otherwise.
+    """
+
+    if root is None:
+        return None
+    for label in labels:
+        node = find_node_by_text(root, label)
+        if node is not None:
+            try:
+                tap_node(node)
+                return label
+            except Exception as tap_exc:  # pragma: no cover - diagnostic only
+                print(
+                    f"[enroll_fingerprint] tap '{label}' failed: {tap_exc}",
+                    flush=True,
+                )
+                return None
+    return None
+
+
+def enroll_fingerprint(timeout: float = 300.0) -> None:
     """Enroll a fingerprint on the running emulator (idempotent).
+
+    The emulator's fingerprint wizard on API 31 ``google_apis`` images
+    drives through several activities that must each be satisfied in
+    order:
+
+    - ``FingerprintEnrollIntroduction`` — intro; auto-advances to
+      ``ConfirmLockPassword`` via ``launchConfirmLock`` when a PIN is
+      already set on the device (no tap required).
+    - ``ConfirmLockPassword`` / ``ConfirmLockPin`` — device PIN confirm.
+      We ``input text 0000`` + KEYCODE_ENTER; on API 31 this submits
+      the credential and advances the wizard.
+    - ``FingerprintEnrollFindSensor`` — "Touch the sensor" screen, needs
+      a "Start" / "Next" tap.
+    - ``FingerprintEnrollEnrolling`` — records finger samples; needs
+      repeated ``adb -e emu finger touch 1`` (5-7 touches on Pixel 5).
+    - ``FingerprintEnrollFinish`` — "Fingerprint added"; best-effort
+      "Done" tap to return Settings to a clean state.
+
+    The loop dispatches on ``current_focus()`` so that it doesn't rely
+    on fragile UI-text matching (earlier iterations bailed to
+    ``SECURITY_SETTINGS`` whenever focus shifted to ``ConfirmLockPassword``
+    because the text-based PIN-prompt detection missed the API 31
+    copy — see ``.factory/library/ci-debug-emulator-fingerprint-enrollment-timeout.md``).
 
     Steps:
 
     1. Early-return when ``dumpsys fingerprint`` already reports an
        enrolled finger (cached AVD). This satisfies VAL-CI-037.
     2. Launch the ``FINGERPRINT_ENROLL`` settings intent.
-    3. If the keyguard asks for the device PIN, type ``0000``.
-    4. Repeatedly:
-       - Tap any wizard-advancement button currently on screen
-         ("I agree", "Continue", "Start", "Next", "Done", …).
-       - Fire ``adb -e emu finger touch 1`` — a no-op on non-sensor
-         screens and a registered sample on the enrolling screen.
-       - Poll ``dumpsys fingerprint`` and return when count >= 1.
+    3. Poll ``current_focus()``; for each known activity, run the
+       dispatch handler (type PIN, tap advance button, fire finger
+       touches, etc.) and check ``enrolled_fingerprint_count()`` each
+       iteration.
+    4. If ``current_focus()`` ever leaves the fingerprint wizard
+       entirely (e.g. user bounced back to Security Settings) and the
+       finger count is still zero, re-launch the intent rather than
+       sit idle.
 
-    Diagnostics (current foreground activity + `dumpsys fingerprint`
+    Diagnostics (current foreground activity + ``dumpsys fingerprint``
     excerpt + on-screen button candidates) are printed every ~15 seconds
     so a timeout reveals exactly where the wizard got stuck.
 
@@ -472,96 +544,150 @@ def enroll_fingerprint(timeout: float = 240.0) -> None:
         "android.settings.FINGERPRINT_ENROLL",
         check=False,
     )
-    time.sleep(2)
-    if _enter_device_pin_if_prompted(timeout=10.0):
-        print("[enroll_fingerprint] device PIN accepted", flush=True)
-        time.sleep(1.5)
-
-    # Some OEM settings fall back to SECURITY_SETTINGS when the direct
-    # FINGERPRINT_ENROLL intent is unavailable.
-    if enrolled_fingerprint_count() < 1:
-        focus_before = current_focus()
-        if "FingerprintEnroll" not in focus_before and "fingerprint" not in focus_before.lower():
-            print(
-                f"[enroll_fingerprint] FINGERPRINT_ENROLL did not take focus (focus={focus_before!r}); trying SECURITY_SETTINGS",
-                flush=True,
-            )
-            adb(
-                "shell",
-                "am",
-                "start",
-                "-a",
-                "android.settings.SECURITY_SETTINGS",
-                check=False,
-            )
-            time.sleep(2)
-            _enter_device_pin_if_prompted(timeout=5.0)
+    time.sleep(2.0)
 
     deadline = time.time() + timeout
     touches = 0
     taps = 0
+    pins = 0
+    relaunches = 0
     last_diagnostic = 0.0
+    stuck_at_non_wizard_since: Optional[float] = None
     while time.time() < deadline:
-        # 1. Advance the wizard by tapping a known "next step" button.
-        try:
-            root = dump_ui()
-        except subprocess.CalledProcessError:
-            root = None
-
-        tapped_label: Optional[str] = None
-        if root is not None:
-            for label in WIZARD_ADVANCE_LABELS:
-                node = find_node_by_text(root, label)
-                if node is not None:
-                    try:
-                        tap_node(node)
-                        tapped_label = label
-                        taps += 1
-                    except Exception as tap_exc:  # pragma: no cover
-                        print(
-                            f"[enroll_fingerprint] tap '{label}' failed: {tap_exc}",
-                            flush=True,
-                        )
-                    break
-
-        if tapped_label is not None:
-            print(
-                f"[enroll_fingerprint] tapped '{tapped_label}' to advance wizard",
-                flush=True,
-            )
-            time.sleep(1.5)
-            # Re-check for PIN prompt after button taps that may launch a
-            # ConfirmLockPassword dialog.
-            if _enter_device_pin_if_prompted(timeout=3.0):
-                time.sleep(1.0)
-
-        # 2. Fire a finger touch. Harmless outside the sensor screen.
-        adb_emu("emu", "finger", "touch", FINGER_ID)
-        touches += 1
-        time.sleep(1.5)
-
         count = enrolled_fingerprint_count()
         if count >= 1:
             print(
                 f"[enroll_fingerprint] enrolled after {touches} touch(es), "
-                f"{taps} wizard tap(s); count={count}",
+                f"{taps} wizard tap(s), {pins} pin-confirm(s); count={count}",
                 flush=True,
             )
             # Best-effort "Done" tap to leave Settings in a clean state; the
             # app is force-stopped in main() regardless.
             try:
                 root = dump_ui()
-                if root is not None:
-                    for label in ("Done", "Finish", "OK", "Next"):
-                        node = find_node_by_text(root, label)
-                        if node is not None:
-                            tap_node(node)
-                            break
+                _tap_first_label(root, ("Done", "Finish", "OK", "Next"))
             except Exception:
                 pass
             return
 
-        # 3. Periodic diagnostics so a timeout doesn't hide the root cause.
+        focus = current_focus()
+        try:
+            root = dump_ui()
+        except subprocess.CalledProcessError:
+            root = None
+
+        handled = False
+
+        # 1) Credential confirmation — type the device PIN + ENTER.
+        if _focus_matches(focus, ENROLL_FOCUS_CONFIRM):
+            input_text(DEVICE_PIN)
+            time.sleep(0.5)
+            press_enter()
+            pins += 1
+            print(
+                f"[enroll_fingerprint] typed device PIN on ConfirmLock* ({pins} total)",
+                flush=True,
+            )
+            time.sleep(2.0)
+            handled = True
+
+        # 2) Intro screen usually auto-advances via launchConfirmLock on
+        # API 31, but on some images the user has to tap "More" / "Agree"
+        # / "Continue" first. Cover both paths.
+        elif _focus_matches(focus, ENROLL_FOCUS_INTRO):
+            tapped = _tap_first_label(
+                root, ("More", "I agree", "I Agree", "Agree", "Continue", "Next")
+            )
+            if tapped is not None:
+                print(
+                    f"[enroll_fingerprint] tapped '{tapped}' on Introduction",
+                    flush=True,
+                )
+                taps += 1
+                time.sleep(1.5)
+            else:
+                # The intro usually auto-advances — give it a moment.
+                time.sleep(1.0)
+            handled = True
+
+        # 3) "Touch the sensor" screen — tap "Start"/"Next" to proceed to
+        # actual enrollment, then fire a touch for good measure.
+        elif _focus_matches(focus, ENROLL_FOCUS_FIND_SENSOR):
+            tapped = _tap_first_label(root, ("Start", "Next", "Continue"))
+            if tapped is not None:
+                print(
+                    f"[enroll_fingerprint] tapped '{tapped}' on FindSensor",
+                    flush=True,
+                )
+                taps += 1
+            adb_emu("emu", "finger", "touch", FINGER_ID)
+            touches += 1
+            time.sleep(1.0)
+            handled = True
+
+        # 4) Enrollment in progress — fire touches until the HAL records
+        # enough samples and the wizard advances on its own.
+        elif _focus_matches(focus, ENROLL_FOCUS_ENROLLING):
+            adb_emu("emu", "finger", "touch", FINGER_ID)
+            touches += 1
+            time.sleep(0.8)
+            handled = True
+
+        # 5) Finish screen — enrollment succeeded; tap Done and re-check
+        # the count on the next iteration (which will exit the loop).
+        elif _focus_matches(focus, ENROLL_FOCUS_FINISH):
+            _tap_first_label(root, ("Done", "Finish", "OK", "Next"))
+            taps += 1
+            time.sleep(1.0)
+            handled = True
+
+        # 6) Something unexpected (Security Settings, Home screen, etc.).
+        # Re-launch the intent to get back on track, but guard against
+        # tight re-launch loops with a 10s grace window.
+        if not handled:
+            still_in_wizard = _focus_matches(
+                focus, ENROLL_FOCUS_SETTINGS_FINGERPRINT
+            )
+            now = time.time()
+            if still_in_wizard:
+                stuck_at_non_wizard_since = None
+            else:
+                if stuck_at_non_wizard_since is None:
+                    stuck_at_non_wizard_since = now
+                elif now - stuck_at_non_wizard_since > 10.0 and relaunches < 3:
+                    print(
+                        f"[enroll_fingerprint] not in wizard (focus={focus!r}); "
+                        "re-launching FINGERPRINT_ENROLL",
+                        flush=True,
+                    )
+                    adb(
+                        "shell",
+                        "am",
+                        "start",
+                        "-a",
+                        "android.settings.FINGERPRINT_ENROLL",
+                        check=False,
+                    )
+                    relaunches += 1
+                    stuck_at_non_wizard_since = None
+                    time.sleep(2.0)
+                    continue
+            # Fallback: try a text-based wizard advance + finger touch.
+            tapped = _tap_first_label(root, WIZARD_ADVANCE_LABELS)
+            if tapped is not None:
+                print(
+                    f"[enroll_fingerprint] fallback tapped '{tapped}' "
+                    f"(focus={focus!r})",
+                    flush=True,
+                )
+                taps += 1
+                time.sleep(1.0)
+            else:
+                adb_emu("emu", "finger", "touch", FINGER_ID)
+                touches += 1
+                time.sleep(1.0)
+
+        # Periodic diagnostics so a timeout doesn't hide the root cause.
         now = time.time()
         if now - last_diagnostic > 15.0:
             last_diagnostic = now
@@ -575,8 +701,9 @@ def enroll_fingerprint(timeout: float = 240.0) -> None:
                     if t and node.attrib.get("clickable") == "true":
                         button_texts.append(t)
             print(
-                f"[enroll_fingerprint] touches={touches} taps={taps} count={count} "
-                f"focus={current_focus()!r} clickable={button_texts[:10]!r} "
+                f"[enroll_fingerprint] touches={touches} taps={taps} pins={pins} "
+                f"relaunches={relaunches} count={count} "
+                f"focus={focus!r} clickable={button_texts[:10]!r} "
                 f"dumpsys={dumpsys_excerpt!r}",
                 flush=True,
             )
