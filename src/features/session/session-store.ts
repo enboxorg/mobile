@@ -109,15 +109,33 @@ export interface SessionState {
  * Returns a Promise<void> that resolves once `setSecureItem` has either
  * committed the write OR failed (failures are swallowed here so that
  * non-awaiting callers — e.g. `completeOnboarding` / `setHasIdentity` —
- * never produce an unhandled rejection). Callers that MUST observe the
- * commit before proceeding (notably `hydrateRestored`, which is awaited
- * by `RecoveryRestoreScreen` before it hands control back to the
- * navigator) should `await` the returned promise.
+ * never produce an unhandled rejection). Callers that need to observe
+ * a SecureStorage rejection (e.g. `hydrateRestored`, which gates
+ * RecoveryRestoreScreen navigation on a durable write) MUST use
+ * `persistSessionOrThrow` instead — the swallow is deliberate here.
  */
 function persistSession(state: PersistedSessionState): Promise<void> {
   return setSecureItem(SESSION_KEY, JSON.stringify(state)).catch((err) => {
     console.warn('[session] persist failed:', err);
   });
+}
+
+/**
+ * Propagating variant of `persistSession`. Writes the identity/onboarding
+ * half of the session to SecureStorage and REJECTS when the underlying
+ * `setSecureItem(SESSION_KEY, ...)` write fails.
+ *
+ * Used exclusively by `hydrateRestored` so that a silent SecureStorage
+ * failure during post-recovery commit surfaces as a rejection to
+ * `RecoveryRestoreScreen`, which can then render a retry alert instead
+ * of navigating away on a not-actually-persisted restore. All other
+ * callers (`completeOnboarding`, `setHasIdentity`) should continue to
+ * use the non-throwing `persistSession` so they remain rejection-safe.
+ */
+function persistSessionOrThrow(
+  state: PersistedSessionState,
+): Promise<void> {
+  return setSecureItem(SESSION_KEY, JSON.stringify(state));
 }
 
 /**
@@ -238,18 +256,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   hydrateRestored: async () => {
     // One atomic state transition followed by one persist call — see
     // the docstring on `SessionState.hydrateRestored` for the rationale.
-    // We await `persistSession` so the underlying SecureStorage write
-    // has fully committed before the promise resolves; callers rely on
-    // that guarantee to defeat the cold-kill durability race where a
-    // relaunch running `hydrate()` against a not-yet-written SESSION_KEY
-    // would rehydrate stale flags.
+    // We `await persistSessionOrThrow` so the underlying SecureStorage
+    // write has fully committed before the promise resolves AND so a
+    // write failure REJECTS this call. Callers (notably
+    // `RecoveryRestoreScreen`) rely on the rejection to surface a
+    // retry alert instead of navigating away on a silent persistence
+    // failure. `persistSession` (non-throwing) is kept for
+    // fire-and-forget callers — we must not use it here because a
+    // swallowed rejection would make `hydrateRestored` resolve even
+    // though the on-disk state is stale, which is the bug this helper
+    // exists to prevent.
     set({
       biometricStatus: 'ready',
       hasCompletedOnboarding: true,
       hasIdentity: true,
       isLocked: false,
     });
-    await persistSession({
+    await persistSessionOrThrow({
       hasCompletedOnboarding: true,
       hasIdentity: true,
     });

@@ -45,6 +45,18 @@ const INVALID_MNEMONIC_MESSAGE =
   "That recovery phrase doesn't look right. Double-check each word and try again.";
 
 /**
+ * Copy shown when `useSessionStore.hydrateRestored()` rejects (i.e. the
+ * native `restoreFromMnemonic` seal succeeded but the downstream
+ * SecureStorage write for the onboarding/identity snapshot failed).
+ * The seal itself worked — re-typing the mnemonic and re-running the
+ * flow gives the underlying SecureStorage stack another chance to
+ * commit, so the copy explicitly invites the user to retry rather than
+ * suggesting the phrase was wrong.
+ */
+const SESSION_PERSIST_FAILURE_MESSAGE =
+  'Restore succeeded but the session could not be saved. Please try again.';
+
+/**
  * Normalize a mnemonic typed into the multi-line input. The contract is
  * stable across the app (see VAL-UX-023 evidence):
  *
@@ -207,7 +219,18 @@ export function RecoveryRestoreScreen({
     setErrorMessage(null);
     try {
       await restoreFromMnemonic(normalized);
+    } catch (err) {
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Something went wrong while restoring. Please try again.';
+      setErrorMessage(message);
+      inFlightRef.current = false;
+      setIsSubmitting(false);
+      return;
+    }
 
+    try {
       // On success commit the restored session snapshot through the
       // session-store's dedicated helper. `hydrateRestored()`:
       //   1. Atomically sets biometricStatus='ready',
@@ -215,24 +238,27 @@ export function RecoveryRestoreScreen({
       //      isLocked=false in one `setState` call so subsequent
       //      navigator selectors observe a consistent snapshot.
       //   2. Awaits the SecureStorage write for the onboarding /
-      //      identity half via the store's internal `persistSession()`
-      //      pipe. We MUST `await` this call before handing control
-      //      back to the navigator — a cold kill in the gap between
-      //      setState and the SecureStorage commit would otherwise
-      //      rehydrate stale flags and misroute the restored wallet
-      //      back to Welcome / BiometricSetup (VAL-UX-024).
+      //      identity half via the store's internal
+      //      `persistSessionOrThrow()` pipe. We MUST `await` this
+      //      call before handing control back to the navigator — a
+      //      cold kill in the gap between setState and the
+      //      SecureStorage commit would otherwise rehydrate stale
+      //      flags and misroute the restored wallet back to
+      //      Welcome / BiometricSetup (VAL-UX-024).
+      //
+      // If `hydrateRestored()` REJECTS (SecureStorage write failed),
+      // we MUST NOT call `onRestored()`; instead render an inline
+      // retry alert so the user can resubmit. Navigating on a silent
+      // persistence failure would land the user on Main with an
+      // in-memory session that a cold relaunch would discard.
       await useSessionStore.getState().hydrateRestored();
 
       if (!restoredRef.current) {
         restoredRef.current = true;
         onRestored();
       }
-    } catch (err) {
-      const message =
-        err instanceof Error && err.message
-          ? err.message
-          : 'Something went wrong while restoring. Please try again.';
-      setErrorMessage(message);
+    } catch {
+      setErrorMessage(SESSION_PERSIST_FAILURE_MESSAGE);
     } finally {
       inFlightRef.current = false;
       setIsSubmitting(false);

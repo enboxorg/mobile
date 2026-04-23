@@ -208,6 +208,69 @@ describe('useSessionStore', () => {
       expect(resolved).toBe(true);
     });
 
+    it('rejects with the underlying error when setSecureItem fails (persistence-failure propagation)', async () => {
+      // Regression guard: `persistSession` swallows SecureStorage
+      // rejections so fire-and-forget callers (completeOnboarding,
+      // setHasIdentity) stay rejection-safe. `hydrateRestored` MUST
+      // opt OUT of that swallow so `RecoveryRestoreScreen` can render
+      // a retry alert on a silent persistence failure instead of
+      // navigating the user to Main with an in-memory session that a
+      // cold relaunch would discard.
+      const persistError = new Error('secure storage unavailable');
+      mockedSetSecureItem.mockImplementationOnce(() =>
+        Promise.reject(persistError),
+      );
+
+      await expect(
+        useSessionStore.getState().hydrateRestored(),
+      ).rejects.toBe(persistError);
+
+      // setSecureItem was invoked with the SESSION_KEY payload — the
+      // rejection path MUST still have attempted the write.
+      expect(mockedSetSecureItem).toHaveBeenCalledWith(
+        'session:state',
+        expect.stringContaining('"hasCompletedOnboarding":true'),
+      );
+    });
+
+    it('leaves persistSession (non-throwing) intact for fire-and-forget callers', async () => {
+      // Guards against a regression where the fix for hydrateRestored
+      // accidentally propagates SecureStorage failures through
+      // `completeOnboarding` / `setHasIdentity` as well. Those
+      // callers do NOT await the persist call — propagating the
+      // rejection would surface as an UnhandledPromiseRejection and
+      // crash dev builds / fail tests.
+      const warnSpy = jest
+        .spyOn(console, 'warn')
+        .mockImplementation(() => undefined);
+      try {
+        mockedSetSecureItem.mockImplementationOnce(() =>
+          Promise.reject(new Error('secure storage unavailable')),
+        );
+
+        expect(() =>
+          useSessionStore.getState().completeOnboarding(),
+        ).not.toThrow();
+
+        // Let the rejected persist promise settle without causing an
+        // unhandled rejection.
+        await Promise.resolve();
+        await Promise.resolve();
+
+        mockedSetSecureItem.mockImplementationOnce(() =>
+          Promise.reject(new Error('secure storage unavailable')),
+        );
+        expect(() =>
+          useSessionStore.getState().setHasIdentity(true),
+        ).not.toThrow();
+
+        await Promise.resolve();
+        await Promise.resolve();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     it('survives kill/relaunch simulation — hydrate() restores the flags written by hydrateRestored()', async () => {
       // 1. Commit a restored session — the helper writes to the mocked
       //    SecureStorage backend via setSecureItem. Await so the

@@ -340,6 +340,87 @@ describe('RecoveryRestoreScreen', () => {
     expect(onRestored).toHaveBeenCalledTimes(1);
   });
 
+  // ------------------------------------------------------------------
+  // Persistence-failure propagation: when `hydrateRestored()` REJECTS
+  // (SecureStorage write failed after a successful native seal), the
+  // screen MUST NOT call `onRestored()` and MUST render a retry alert
+  // so the user can resubmit. Navigating on a silent persistence
+  // failure would land the user on Main with an in-memory session
+  // that a cold relaunch would discard.
+  // ------------------------------------------------------------------
+  it('renders a retry alert and does NOT call onRestored when hydrateRestored rejects', async () => {
+    (mockRestoreFromMnemonic as jest.Mock).mockResolvedValue(undefined);
+
+    const persistError = new Error('secure storage unavailable');
+    const hydrateRestoredSpy = jest
+      .spyOn(useSessionStore.getState(), 'hydrateRestored')
+      .mockRejectedValueOnce(persistError);
+
+    const onRestored = jest.fn();
+    const screen = render(
+      <RecoveryRestoreScreen onRestored={onRestored} />,
+    );
+
+    typeMnemonic(screen, VALID_MNEMONIC_24);
+
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Restore wallet'));
+    });
+
+    // restoreFromMnemonic still succeeded (native seal committed) but
+    // the downstream SecureStorage write for the onboarding/identity
+    // snapshot failed. The screen MUST NOT navigate.
+    expect(mockRestoreFromMnemonic).toHaveBeenCalledTimes(1);
+    expect(hydrateRestoredSpy).toHaveBeenCalledTimes(1);
+    expect(onRestored).not.toHaveBeenCalled();
+
+    // Inline alert rendered with the exact retry copy contracted in
+    // the feature description.
+    const alert = screen.getByRole('alert');
+    expect(alert).toBeTruthy();
+    expect(String(alert.props.children ?? '')).toBe(
+      'Restore succeeded but the session could not be saved. Please try again.',
+    );
+
+    // Input retains the typed value so the user can resubmit without
+    // re-typing the mnemonic.
+    expect(
+      screen.getByLabelText('Recovery phrase input').props.value,
+    ).toBe(VALID_MNEMONIC_24);
+  });
+
+  it('allows a retry after a hydrateRestored rejection (CTA not wedged)', async () => {
+    (mockRestoreFromMnemonic as jest.Mock).mockResolvedValue(undefined);
+
+    const hydrateRestoredSpy = jest
+      .spyOn(useSessionStore.getState(), 'hydrateRestored')
+      .mockRejectedValueOnce(new Error('secure storage unavailable'))
+      .mockResolvedValueOnce(undefined);
+
+    const onRestored = jest.fn();
+    const screen = render(
+      <RecoveryRestoreScreen onRestored={onRestored} />,
+    );
+
+    typeMnemonic(screen, VALID_MNEMONIC_24);
+
+    // First attempt fails at the persist step.
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Restore wallet'));
+    });
+    expect(onRestored).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toBeTruthy();
+
+    // Second attempt succeeds; the CTA must not have been wedged by
+    // the first failure (in-flight guard + isSubmitting state both
+    // reset on the error path).
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Restore wallet'));
+    });
+    expect(hydrateRestoredSpy).toHaveBeenCalledTimes(2);
+    expect(onRestored).toHaveBeenCalledTimes(1);
+  });
+
   it('commits the restored session exactly once via useSessionStore.hydrateRestored()', async () => {
     (mockRestoreFromMnemonic as jest.Mock).mockResolvedValue(undefined);
     useSessionStore.setState({ biometricStatus: 'invalidated' });
