@@ -269,6 +269,97 @@ function patchReactNativeCameraKit() {
   }
 }
 
+/**
+ * Widen `AgentInitializeParams.password` and `AgentStartParams.password`
+ * from `string` to `string | undefined` (i.e. mark them optional) so
+ * callers can invoke `agent.initialize({})` / `agent.start({})` without a
+ * password. The new BiometricVault replacement ignores the password
+ * entirely — it prompts biometrics via the native module instead — so
+ * the upstream type requirement is vestigial for this mobile app.
+ *
+ * This is purely a TypeScript surface widening; the runtime ESM does not
+ * need any change. Targeted files:
+ *   - dist/types/enbox-user-agent.d.ts   (required — primary type surface)
+ *   - dist/types/enbox-user-agent.d.cts  (optional — dual-format future)
+ *   - src/enbox-user-agent.ts            (optional — kept coherent for
+ *                                         bundlers that resolve TS source)
+ *
+ * Idempotent: detects the widened `password?: string` shape and skips.
+ * Tolerates missing target files (warns + continues; never throws).
+ * Tolerates upstream layout drift by requiring exactly two pre-patch
+ * `password: string;` tokens before rewriting; if the count is off, the
+ * file is left untouched and a warning is emitted.
+ *
+ * Coexists with `patchEnboxAgent()` above: this function only rewrites
+ * the two `password: string;` declarations inside the `AgentInitializeParams`
+ * and `AgentStartParams` type aliases and does not touch the
+ * `agentVault: HdIdentityVault` / `vault: HdIdentityVault` tokens that
+ * the vault-injection patch handles.
+ */
+function patchEnboxAgentPasswordOptional() {
+  const root = process.cwd();
+  const agentRoot = resolve(root, 'node_modules/@enbox/agent');
+  const targets = [
+    {
+      path: resolve(agentRoot, 'dist/types/enbox-user-agent.d.ts'),
+      label: '@enbox/agent/dist/types/enbox-user-agent.d.ts',
+    },
+    {
+      path: resolve(agentRoot, 'dist/types/enbox-user-agent.d.cts'),
+      label: '@enbox/agent/dist/types/enbox-user-agent.d.cts',
+    },
+    {
+      path: resolve(agentRoot, 'src/enbox-user-agent.ts'),
+      label: '@enbox/agent/src/enbox-user-agent.ts',
+    },
+  ];
+
+  for (const { path, label } of targets) {
+    if (!existsSync(path)) {
+      console.warn(
+        `[apply-patches] @enbox/agent password-optional target missing: ${path}; skipping (layout drift?)`,
+      );
+      continue;
+    }
+    const original = readFileSync(path, 'utf8');
+
+    const strictMatches = original.match(/^(\s*)password: string;/gm) || [];
+    const optionalMatches = original.match(/^(\s*)password\?: string;/gm) || [];
+
+    // Idempotence: already patched (both `password: string;` lines rewritten).
+    if (strictMatches.length === 0 && optionalMatches.length >= 2) continue;
+
+    // Drift guard: require exactly two pre-patch tokens. If the count is
+    // unexpected (upstream layout drift), leave the file untouched.
+    if (strictMatches.length !== 2) {
+      let version = 'unknown';
+      try {
+        const pkg = JSON.parse(
+          readFileSync(resolve(agentRoot, 'package.json'), 'utf8'),
+        );
+        version = pkg.version ?? 'unknown';
+      } catch {
+        // ignore
+      }
+      console.warn(
+        `[postinstall] Skipped ${label} password-optional widening: expected 2 'password: string;' tokens, found ${strictMatches.length} (installed version ${version}).`,
+      );
+      continue;
+    }
+
+    const next = original.replace(
+      /^(\s*)password: string;/gm,
+      '$1password?: string;',
+    );
+
+    if (next !== original) {
+      writeFileSync(path, next, 'utf8');
+      console.log(`[postinstall] Patched ${label} (password-optional)`);
+    }
+  }
+}
+
 patchReactNativeLevelDb();
 patchEnboxAgent();
+patchEnboxAgentPasswordOptional();
 patchReactNativeCameraKit();

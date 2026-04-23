@@ -169,19 +169,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       let recoveryPhrase: string;
       if (isFirst) {
         console.log('[agent-store] initializing vault (biometric prompt)...');
-        // BiometricVault has no password. The upstream
-        // `AgentInitializeParams` TypeScript shape still requires
-        // `password: string`; we narrow it locally so the call site
-        // does NOT carry a `password` property at all. The upstream
-        // type will be loosened once @enbox/agent ships a vault-aware
-        // overload (tracked alongside the `scripts/apply-patches.mjs`
-        // enbox-agent-vault-injection patch).
-        // @ts-expect-error password removed — BiometricVault ignores it
+        // BiometricVault has no password. `AgentInitializeParams.password`
+        // is widened to optional by `scripts/apply-patches.mjs`'s
+        // `patchEnboxAgentPasswordOptional()` so the call site does NOT
+        // need to carry a `password` property.
         recoveryPhrase = await agent.initialize({});
         console.log('[agent-store] vault initialized.');
       } else {
         console.log('[agent-store] starting existing vault (biometric prompt)...');
-        // @ts-expect-error password removed — BiometricVault ignores it
         await agent.start({});
         recoveryPhrase = '';
       }
@@ -228,14 +223,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       console.log('[agent-store] unlockAgent: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       console.log('[agent-store] starting vault (biometric prompt)...');
-      // BiometricVault has no password. The upstream
-      // `AgentStartParams` TypeScript shape still requires `password:
-      // string`; we narrow it locally so the call site does NOT carry
-      // a `password` property at all. The upstream type will be
-      // loosened once @enbox/agent ships a vault-aware overload
-      // (tracked alongside the `scripts/apply-patches.mjs`
-      // enbox-agent-vault-injection patch).
-      // @ts-expect-error password removed — BiometricVault ignores it
+      // BiometricVault has no password. `AgentStartParams.password` is
+      // widened to optional by `scripts/apply-patches.mjs`'s
+      // `patchEnboxAgentPasswordOptional()` so the call site does NOT
+      // need to carry a `password` property.
       await agent.start({});
       console.log('[agent-store] vault started.');
       set({
@@ -304,8 +295,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       //    entropy, calls `NativeBiometricVault.generateAndStoreSecret`,
       //    and rebuilds the HD seed / BearerDid in memory. Any native
       //    rejection is mapped to a canonical VAULT_ERROR_* and
-      //    surfaced via the screen.
-      // @ts-expect-error password removed — BiometricVault ignores it
+      //    surfaced via the screen. `AgentInitializeParams.password` is
+      //    widened to optional by the postinstall patch, so we omit it.
       await agent.initialize({ recoveryPhrase: mnemonic });
 
       set({
