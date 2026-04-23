@@ -38,7 +38,7 @@ import type {
 } from '@enbox/agent';
 import { AgentCryptoApi } from '@enbox/agent';
 import { BearerDid, DidDht } from '@enbox/dids';
-import { LocalKeyManager, computeJwkThumbprint } from '@enbox/crypto';
+import { Ed25519, LocalKeyManager, computeJwkThumbprint } from '@enbox/crypto';
 
 import NativeBiometricVault from '@specs/NativeBiometricVault';
 
@@ -217,6 +217,30 @@ class DeterministicKeyGenerator extends LocalKeyManager {
     const pub = { ...pk };
     delete pub.d;
     return pub;
+  }
+
+  /**
+   * Sign `data` under the predefined key identified by `keyUri`.
+   *
+   * Mirrors the upstream `DeterministicKeyGenerator.sign()` override in
+   * `@enbox/agent/src/utils-internal.ts`. Without this override, calls
+   * from `DidDht.create()` fall through to `LocalKeyManager.sign()`,
+   * which consults the base class's private `_keyStore` (always empty
+   * here — we store our keys in the subclass's own `_predefinedKeys`
+   * Map). The fall-through threw `Key not found: urn:jwk:<thumbprint>`
+   * at boot after biometric success in the release APK.
+   *
+   * Our DID document only uses an Ed25519 identity key + X25519
+   * encryption key; `DidDht.create` only asks us to sign with the
+   * Ed25519 identity key (X25519 is not a signing curve), so
+   * hardcoding `Ed25519.sign` here is correct.
+   */
+  async sign({ keyUri, data }: { keyUri: string; data: Uint8Array }): Promise<Uint8Array> {
+    const privateKey = this._predefinedKeys.get(keyUri);
+    if (!privateKey) {
+      throw new Error(`DeterministicKeyGenerator.sign: Key not found: ${keyUri}`);
+    }
+    return Ed25519.sign({ data, key: privateKey });
   }
 }
 
