@@ -139,6 +139,28 @@ def find_node_by_text(root: ET.Element, text: str) -> Optional[ET.Element]:
     return None
 
 
+def find_node_by_text_ci(root: ET.Element, text: str) -> Optional[ET.Element]:
+    """Return the first node whose ``text`` or ``content-desc`` matches
+    ``text`` case-insensitively.
+
+    Used for OS wizard buttons (``MORE``, ``AGREE``, ``DONE`` etc.) which
+    render in uppercase on API 31 AOSP/``google_apis`` images, unlike the
+    app-level anchors which must match exact copy.
+    """
+
+    needle = text.lower()
+    for node in root.iter("node"):
+        node_text = (node.attrib.get("text") or "").lower()
+        node_desc = (node.attrib.get("content-desc") or "").lower()
+        if node_text == needle or node_desc == needle:
+            return node
+    for node in root.iter("node"):
+        node_text = (node.attrib.get("text") or "").lower()
+        if needle and needle in node_text:
+            return node
+    return None
+
+
 def find_system_ui_biometric_node(
     root: ET.Element, patterns: Iterable[str] = BIOMETRIC_PROMPT_PATTERNS
 ) -> Optional[ET.Element]:
@@ -457,13 +479,17 @@ def _tap_first_label(
 ) -> Optional[str]:
     """Tap the first node whose text matches any of ``labels``.
 
+    Matching is case-insensitive so that OS wizard labels like ``MORE`` or
+    ``AGREE`` (which render uppercase on API 31 ``google_apis``) are tapped
+    even when our label list uses mixed case.
+
     Returns the tapped label on success, ``None`` otherwise.
     """
 
     if root is None:
         return None
     for label in labels:
-        node = find_node_by_text(root, label)
+        node = find_node_by_text_ci(root, label)
         if node is not None:
             try:
                 tap_node(node)
@@ -595,8 +621,12 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
         # API 31, but on some images the user has to tap "More" / "Agree"
         # / "Continue" first. Cover both paths.
         elif _focus_matches(focus, ENROLL_FOCUS_INTRO):
+            # Order: prefer Agree/Continue (terminal advance), fall back to
+            # More (scroll to reveal Agree) only when no terminal is visible.
+            # All matches are case-insensitive so that API 31 uppercase
+            # variants ("AGREE"/"MORE") are recognized.
             tapped = _tap_first_label(
-                root, ("More", "I agree", "I Agree", "Agree", "Continue", "Next")
+                root, ("I Agree", "I agree", "Agree", "Continue", "Next", "More")
             )
             if tapped is not None:
                 print(
