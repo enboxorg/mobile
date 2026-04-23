@@ -354,38 +354,54 @@ def ensure_device_credential(timeout: float = 20.0) -> None:
     )
 
 
-def enrolled_fingerprint_count() -> int:
-    """Parse ``dumpsys fingerprint`` and return the enrolled-finger count.
+def has_enrollments() -> bool:
+    """Authoritative "fingerprint actually enrolled" signal.
 
-    On API 31 ``google_apis`` images, ``dumpsys fingerprint`` does NOT emit
-    a literal ``enrolled=N`` line and the JSON ``prints`` array is
-    pre-allocated with an empty slot even when nothing is enrolled (the
-    ``count`` field inside is the HAL's per-session sample counter, not
-    the enrolled count). Accordingly we cannot rely on ``prints`` length.
-    We keep the legacy ``enrolled``/``already enrolled`` text markers as
-    best-effort detection for AOSP / default images; the authoritative
-    success signal for google_apis images is ``seen_enroll_finish`` in
-    ``enroll_fingerprint()`` (i.e. the wizard reached
-    ``FingerprintEnrollFinish``).
+    Queries ``dumpsys biometric`` / ``dumpsys fingerprint`` for the
+    ``hasEnrollments: true`` / ``hasEnrollments=true`` marker that
+    ``BiometricService`` (``frameworks/base/services/core/.../biometrics``)
+    consults before allowing ``setUserAuthenticationRequired(true)`` +
+    ``AUTH_BIOMETRIC_STRONG`` Keystore keys to be generated. Without this
+    flipping to ``true``, ``NativeBiometricVault.generateAndStoreSecret``
+    will throw ``VAULT_ERROR`` regardless of what the enrollment wizard's
+    final activity looked like.
+
+    The reason we cannot just trust the wizard: on API 31 ``google_apis``,
+    ``FingerprintEnrollFinish`` can render "Fingerprint added" even when
+    only a single acquisition sample was captured — the wizard shows a
+    success screen but the HAL never actually committed an enrolled
+    fingerprint, and ``BiometricService`` reports ``hasEnrollments: false``.
+    Using this probe as the authoritative exit signal guarantees that by
+    the time ``enroll_fingerprint`` returns, the Keystore side of the
+    biometric vault will succeed.
     """
 
-    result = adb("shell", "dumpsys", "fingerprint", check=False)
-    if result.returncode != 0:
-        return 0
-    text = result.stdout or ""
+    for service in ("biometric", "fingerprint"):
+        result = adb("shell", "dumpsys", service, check=False)
+        if result.returncode != 0:
+            continue
+        text = result.stdout or ""
+        # Accept either ``hasEnrollments: true`` (BiometricService log
+        # format) or ``hasEnrollments=true`` (proto-dump debug format).
+        if re.search(r"hasEnrollments\s*[:=]\s*true", text, re.IGNORECASE):
+            return True
+    return False
 
-    for line in text.splitlines():
-        lower = line.lower()
-        if "enrolled" in lower:
-            matches = re.findall(r"(\d+)", line)
-            if matches:
-                try:
-                    return int(matches[-1])
-                except ValueError:
-                    continue
-    if "already enrolled" in text.lower():
-        return 1
-    return 0
+
+def enrolled_fingerprint_count() -> int:
+    """Legacy/compat wrapper around :func:`has_enrollments`.
+
+    Kept for backwards-compatibility with callers that expect an int-valued
+    probe; returns ``1`` when ``has_enrollments`` is true and ``0``
+    otherwise. The earlier text-scanning implementation was unreliable on
+    ``google_apis`` images because ``dumpsys fingerprint`` leaks the
+    substring "enrolled" inside unrelated tokens like ``enrollmentClient``
+    — counting those as enrolled fingerprints caused the enrollment loop
+    to exit after one acquisition sample and the Keystore call downstream
+    then failed with ``generateAndStoreSecret failed``.
+    """
+
+    return 1 if has_enrollments() else 0
 
 
 def _enrollment_sample_count() -> int:
@@ -598,9 +614,16 @@ def enroll_fingerprint(timeout: float = 600.0) -> None:
     3. Launch the ``FINGERPRINT_ENROLL`` settings intent.
     4. Poll ``current_focus()``; for each known activity, run the
        dispatch handler.
-    5. Once ``FingerprintEnrollFinish`` is observed OR
-       ``enrolled_fingerprint_count()`` returns >=1, tap ``Done`` and
-       exit.
+    5. Once ``has_enrollments()`` (``BiometricService.hasEnrollments=true``)
+       flips to true — the only signal that actually proves the HAL has a
+       usable fingerprint the Keystore can key off — tap ``Done`` and
+       return. Observing ``FingerprintEnrollFinish`` alone is NOT a
+       success signal on API 31 ``google_apis`` images: that wizard
+       activity can render "Fingerprint added" even when only a single
+       acquisition sample was captured, at which point the HAL quietly
+       drops the enrollment and any subsequent
+       ``AUTH_BIOMETRIC_STRONG`` Keystore key generation (i.e.
+       ``NativeBiometricVault.generateAndStoreSecret``) fails.
 
     Diagnostics (current foreground activity + ``dumpsys fingerprint``
     excerpt + on-screen button candidates) are printed every ~15 seconds.
@@ -613,9 +636,9 @@ def enroll_fingerprint(timeout: float = 600.0) -> None:
     # Clear any pending ANR dialog before we start touching Settings.
     dismiss_anr_if_present(max_attempts=3)
 
-    if enrolled_fingerprint_count() >= 1:
+    if has_enrollments():
         print(
-            "[enroll_fingerprint] fingerprint already enrolled; skipping",
+            "[enroll_fingerprint] BiometricService reports hasEnrollments=true; skipping",
             flush=True,
         )
         return
@@ -644,13 +667,14 @@ def enroll_fingerprint(timeout: float = 600.0) -> None:
     last_diagnostic = 0.0
     stuck_at_non_wizard_since: Optional[float] = None
     seen_enroll_finish = False
+    finish_seen_at: Optional[float] = None
     while time.time() < deadline:
-        count = enrolled_fingerprint_count()
+        enrolled = has_enrollments()
         sample_count = _enrollment_sample_count()
-        if count >= 1 or seen_enroll_finish:
+        if enrolled:
             print(
-                f"[enroll_fingerprint] enrolled after {touches} touch(es), "
-                f"{taps} wizard tap(s), {pins} pin-confirm(s); count={count} "
+                f"[enroll_fingerprint] BiometricService hasEnrollments=true after "
+                f"{touches} touch(es), {taps} wizard tap(s), {pins} pin-confirm(s); "
                 f"samples={sample_count} finish_seen={seen_enroll_finish}",
                 flush=True,
             )
@@ -665,6 +689,35 @@ def enroll_fingerprint(timeout: float = 600.0) -> None:
             adb("shell", "am", "force-stop", APP_PACKAGE, check=False)
             time.sleep(0.5)
             return
+
+        # If the wizard reached the Finish screen but the HAL still reports
+        # hasEnrollments=false, the enrollment silently failed (too few
+        # samples captured / wizard timed out). Re-launch the intent after
+        # a brief grace window so we get another pass instead of exiting
+        # early on a phantom success signal.
+        if seen_enroll_finish and finish_seen_at is not None:
+            if time.time() - finish_seen_at > 5.0 and relaunches < 8:
+                print(
+                    "[enroll_fingerprint] wizard reached Finish but HAL still "
+                    "reports hasEnrollments=false; re-launching intent",
+                    flush=True,
+                )
+                adb("shell", "input", "keyevent", "KEYCODE_HOME", check=False)
+                time.sleep(0.5)
+                adb(
+                    "shell",
+                    "am",
+                    "start",
+                    "-W",
+                    "-a",
+                    "android.settings.FINGERPRINT_ENROLL",
+                    check=False,
+                )
+                relaunches += 1
+                seen_enroll_finish = False
+                finish_seen_at = None
+                time.sleep(3.0)
+                continue
 
         focus = current_focus()
         try:
@@ -719,10 +772,12 @@ def enroll_fingerprint(timeout: float = 600.0) -> None:
                 ):
                     print(
                         "[enroll_fingerprint] 'Done' visible on Introduction-"
-                        "class activity; treating as Finish",
+                        "class activity; treating as Finish (pending HAL verify)",
                         flush=True,
                     )
                     seen_enroll_finish = True
+                    if finish_seen_at is None:
+                        finish_seen_at = time.time()
             handled = True
 
         # 3) "Touch the sensor" screen — on API 31 google_apis the only
@@ -734,23 +789,38 @@ def enroll_fingerprint(timeout: float = 600.0) -> None:
             time.sleep(0.8)
             handled = True
 
-        # 4) Enrollment in progress — fire touches aggressively until the
-        # HAL records enough samples and the wizard advances on its own.
+        # 4) Enrollment in progress — fire a burst of touches so the HAL
+        # accrues enough samples even when the wizard window is short.
+        # On API 31 ``google_apis`` the HAL needs ~6-8 acquisition samples
+        # before it will commit an enrolled fingerprint; if we send one
+        # touch per second the wizard can time out and advance to
+        # ``FingerprintEnrollFinish`` with only a single sample captured,
+        # leaving ``BiometricService`` with ``hasEnrollments=false``.
         elif _focus_matches(focus, ENROLL_FOCUS_ENROLLING):
-            adb_emu("emu", "finger", "touch", FINGER_ID)
-            touches += 1
-            enrolling_touches += 1
-            # Brief sleep keeps us below the HAL's debounce threshold
-            # without starving the wizard of the window to render the
-            # "sample accepted" indicator.
-            time.sleep(0.5)
+            for _ in range(4):
+                adb_emu("emu", "finger", "touch", FINGER_ID)
+                touches += 1
+                enrolling_touches += 1
+                time.sleep(0.4)
             handled = True
 
-        # 5) Finish screen — enrollment succeeded; mark the flag and tap
-        # Done. The next loop iteration will exit via the
-        # ``seen_enroll_finish`` short-circuit at the top.
+        # 5) Finish screen — we *think* enrollment succeeded. Mark the
+        # flag but DO NOT exit: the real exit condition is
+        # ``has_enrollments()`` at the top of the loop, because the
+        # FingerprintEnrollFinish activity renders "Fingerprint added"
+        # even when the HAL silently failed to commit the enrollment.
+        # The Finish-but-no-enrollment recovery block re-launches the
+        # intent after a short grace window.
         elif _focus_matches(focus, ENROLL_FOCUS_FINISH):
+            if not seen_enroll_finish:
+                print(
+                    "[enroll_fingerprint] FingerprintEnrollFinish activity "
+                    "focused; waiting on HAL confirmation",
+                    flush=True,
+                )
             seen_enroll_finish = True
+            if finish_seen_at is None:
+                finish_seen_at = time.time()
             _tap_first_label(root, ("Done", "Finish", "OK", "Next"))
             taps += 1
             time.sleep(1.0)
@@ -844,8 +914,8 @@ def enroll_fingerprint(timeout: float = 600.0) -> None:
                         button_texts.append(t)
             print(
                 f"[enroll_fingerprint] touches={touches} taps={taps} pins={pins} "
-                f"relaunches={relaunches} count={count} samples={sample_count} "
-                f"enrolling_touches={enrolling_touches} "
+                f"relaunches={relaunches} enrolled={enrolled} "
+                f"samples={sample_count} enrolling_touches={enrolling_touches} "
                 f"finish_seen={seen_enroll_finish} "
                 f"focus={focus!r} clickable={button_texts[:10]!r} "
                 f"dumpsys={dumpsys_excerpt!r}",
@@ -853,7 +923,9 @@ def enroll_fingerprint(timeout: float = 600.0) -> None:
             )
 
     raise TimeoutError(
-        f"enroll_fingerprint: no fingerprint enrolled within {timeout:.0f}s"
+        f"enroll_fingerprint: BiometricService.hasEnrollments stayed false "
+        f"for {timeout:.0f}s ({touches} touch(es), {taps} tap(s), "
+        f"{pins} pin(s), {relaunches} re-launch(es))"
     )
 
 
