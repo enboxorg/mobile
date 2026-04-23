@@ -84,6 +84,40 @@ jobs:
             # Ensure artifact directories exist before we capture anything.
             mkdir -p /tmp/emulator-ui /tmp/emulator-ui-artifacts
 
+            # Always-run cleanup: copy UI artifacts + dump logcats regardless
+            # of whether the python flow script succeeded. The EXIT trap fires
+            # on normal shell exit AND on `set -e`-induced failure exit, which
+            # means `logcat-full.txt`, `logcat-rn.txt`, `flow-error.png`, and
+            # any partial screenshots are always uploaded. The shell still
+            # propagates the original (failing) exit code, so VAL-CI-013 /
+            # VAL-CI-024 (job fails loudly on flow regression) remain honored.
+            capture_artifacts() {
+              set +e
+              echo ""
+              echo "=== [cleanup] Copying screenshots and dumps into the artifact tree ==="
+              cp -R /tmp/emulator-ui/. /tmp/emulator-ui-artifacts/ 2>/dev/null
+
+              echo ""
+              echo "========================================="
+              echo "=== ReactNativeJS + Crash Logs ==="
+              echo "========================================="
+              adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1
+
+              echo ""
+              echo "========================================="
+              echo "=== All ERROR level logs ==="
+              echo "========================================="
+              adb logcat -d '*:E' 2>&1 | grep -i "react\|enbox\|level\|crypto\|fatal\|exception"
+
+              echo ""
+              echo "=== [cleanup] Saving full logcat (size-bounded to 10 MiB) ==="
+              # Cap each logcat artifact at 10 MiB so uploads stay well under
+              # GitHub's per-artifact limit. See VAL-CI-032.
+              adb logcat -d 2>&1 | head -c 10485760 > /tmp/logcat-full.txt
+              adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1 | head -c 10485760 > /tmp/logcat-rn.txt
+            }
+            trap capture_artifacts EXIT
+
             echo "=== Installing release APK ==="
             adb install android/app/build/outputs/apk/release/app-release.apk
 
@@ -103,28 +137,6 @@ jobs:
             # No `|| true` — the script's exit code must propagate so flow regressions
             # fail the job. See VAL-CI-013 / VAL-CI-024.
             python3 scripts/emulator-debug-flow.py
-
-            echo "=== Copying screenshots and dumps into the artifact tree ==="
-            cp -R /tmp/emulator-ui/. /tmp/emulator-ui-artifacts/ 2>/dev/null || true
-
-            echo ""
-            echo "========================================="
-            echo "=== ReactNativeJS + Crash Logs ==="
-            echo "========================================="
-            adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E
-
-            echo ""
-            echo "========================================="
-            echo "=== All ERROR level logs ==="
-            echo "========================================="
-            adb logcat -d '*:E' | grep -i "react\|enbox\|level\|crypto\|fatal\|exception" || true
-
-            echo ""
-            echo "=== Saving full logcat (size-bounded to 10 MiB) ==="
-            # Cap each logcat artifact at 10 MiB so uploads stay well under GitHub's
-            # per-artifact limit. See VAL-CI-032.
-            adb logcat -d 2>&1 | head -c 10485760 > /tmp/logcat-full.txt
-            adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1 | head -c 10485760 > /tmp/logcat-rn.txt
 
       - name: Upload logs and screenshot
         if: always()
