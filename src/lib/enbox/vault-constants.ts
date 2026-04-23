@@ -38,3 +38,35 @@ export const INITIALIZED_STORAGE_KEY = 'enbox.vault.initialized';
  * app restarts without re-prompting.
  */
 export const BIOMETRIC_STATE_STORAGE_KEY = 'enbox.vault.biometric-state';
+
+/**
+ * HD derivation paths for the three identity-account keys that the
+ * BiometricVault's `defaultDidFactory` feeds into
+ * `DeterministicKeyGenerator` before calling `DidDht.create`. The
+ * ordering is load-bearing — predefined keys are consumed in order, so
+ * `[0]` becomes the identity verification method (`Ed25519`), `[1]`
+ * the signing method (`Ed25519`), and `[2]` the encryption method
+ * (`X25519`). Mirrors the recipe baked into `HdIdentityVault` upstream
+ * so a mnemonic derived here re-derives the same DID in any other
+ * `@enbox/agent` consumer.
+ *
+ * This constant is the single source of truth for the paths: both
+ * `biometric-vault.ts` (production derivation) and the determinism
+ * snapshot test import it, so the test cannot drift from the runtime
+ * recipe. Reordering or mutating this tuple is a BREAKING change to
+ * the DID derivation.
+ */
+export const IDENTITY_DERIVATION_PATHS: readonly [string, string, string] = [
+  "m/44'/0'/1708523827'/0'/0'", // identity verification method (Ed25519)
+  "m/44'/0'/1708523827'/0'/1'", // signing verification method (Ed25519)
+  "m/44'/0'/1708523827'/0'/2'", // encryption verification method (X25519)
+] as const;
+
+/**
+ * HD derivation path for the content-encryption key bound to the root
+ * HD seed. Matches the path `HdIdentityVault` uses for its vault CEK so
+ * the CEK rides the same deterministic chain as the DID. Kept separate
+ * from the identity paths because it is NOT fed through
+ * `DeterministicKeyGenerator`.
+ */
+export const VAULT_CEK_DERIVATION_PATH = "m/44'/0'/0'/0'/0'";

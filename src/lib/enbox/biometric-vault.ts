@@ -44,7 +44,9 @@ import NativeBiometricVault from '@specs/NativeBiometricVault';
 
 import {
   BIOMETRIC_STATE_STORAGE_KEY,
+  IDENTITY_DERIVATION_PATHS,
   INITIALIZED_STORAGE_KEY,
+  VAULT_CEK_DERIVATION_PATH,
   WALLET_ROOT_KEY_ALIAS,
 } from './vault-constants';
 
@@ -55,7 +57,9 @@ import {
 // comment for the circular-import rationale.
 export {
   BIOMETRIC_STATE_STORAGE_KEY,
+  IDENTITY_DERIVATION_PATHS,
   INITIALIZED_STORAGE_KEY,
+  VAULT_CEK_DERIVATION_PATH,
   WALLET_ROOT_KEY_ALIAS,
 };
 
@@ -208,10 +212,12 @@ async function defaultDidFactory({
 
   // Match the exact derivation paths from HdIdentityVault so the produced
   // DID is identical to what that vault would have produced from the same
-  // mnemonic. The account index is pinned for deterministic replay.
-  const identityHdKey = rootHdKey.derive(`m/44'/0'/1708523827'/0'/0'`);
-  const signingHdKey = rootHdKey.derive(`m/44'/0'/1708523827'/0'/1'`);
-  const encryptionHdKey = rootHdKey.derive(`m/44'/0'/1708523827'/0'/2'`);
+  // mnemonic. The account index is pinned for deterministic replay. The
+  // path strings live in `vault-constants` so the determinism snapshot
+  // test consumes exactly the same source of truth as production.
+  const identityHdKey = rootHdKey.derive(IDENTITY_DERIVATION_PATHS[0]);
+  const signingHdKey = rootHdKey.derive(IDENTITY_DERIVATION_PATHS[1]);
+  const encryptionHdKey = rootHdKey.derive(IDENTITY_DERIVATION_PATHS[2]);
 
   const identityPrivateKey = await crypto.bytesToPrivateKey({
     algorithm: 'Ed25519',
@@ -329,8 +335,9 @@ function fromBase64Url(str: string): Uint8Array {
 /** Derive a 32-byte content encryption key bound to the root HD key. */
 async function deriveContentEncryptionKey(rootHdKey: any): Promise<Uint8Array> {
   // Reuse HdIdentityVault's vault HD key derivation path so the CEK
-  // rides the same deterministic chain as the DID.
-  const vaultHdKey = rootHdKey.derive(`m/44'/0'/0'/0'/0'`);
+  // rides the same deterministic chain as the DID. Path string lives
+  // in `vault-constants` to keep the test suite in sync with runtime.
+  const vaultHdKey = rootHdKey.derive(VAULT_CEK_DERIVATION_PATH);
   const priv = vaultHdKey.privateKey as Uint8Array;
   // HKDF via WebCrypto (available both on RN via react-native-quick-crypto
   // and in Node >= 20 used by Jest).
