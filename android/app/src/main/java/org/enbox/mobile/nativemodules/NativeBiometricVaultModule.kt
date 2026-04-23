@@ -247,82 +247,190 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             return
         }
 
-        var secretBuf: ByteArray? = null
+        // Resolve the 32-byte wallet secret up-front — caller-provided bytes
+        // (via `secretHex`, lower-case hex of length 64) when supplied,
+        // otherwise freshly generated CSPRNG entropy. Caller-provided bytes
+        // let the JS layer derive the HD seed / mnemonic from the same bytes
+        // that will be stored here without a follow-up biometric read during
+        // provisioning (that would fire a second BiometricPrompt).
+        val secret = ByteArray(SECRET_BYTES)
+        val providedHex = if (options.hasKey("secretHex")) options.getString("secretHex") else null
+        if (providedHex != null) {
+            if (providedHex.length != SECRET_BYTES * 2) {
+                promise.reject(ERR_VAULT, "secretHex must be 64 lower-case hex characters")
+                return
+            }
+            for (i in 0 until SECRET_BYTES) {
+                val hi = Character.digit(providedHex[i * 2], 16)
+                val lo = Character.digit(providedHex[i * 2 + 1], 16)
+                if (hi < 0 || lo < 0) {
+                    secret.fill(0.toByte())
+                    promise.reject(ERR_VAULT, "secretHex is not valid hex")
+                    return
+                }
+                secret[i] = ((hi shl 4) or lo).toByte()
+            }
+        } else {
+            SecureRandom().nextBytes(secret)
+        }
+
+        // Prepare the biometric-bound Keystore key + ENCRYPT cipher. The
+        // cipher.init call succeeds without biometric auth (the operation
+        // handle is created with an unauthenticated token); the actual
+        // cipher.doFinal call inside onAuthenticationSucceeded() is what
+        // requires the auth token that `BiometricPrompt` supplies.
+        //
+        // AndroidKeyStore AES/GCM note: keys created with
+        // setRandomizedEncryptionRequired(true) (see createKeyGenSpec
+        // above — required by the mission's security contract) MUST let
+        // the Keystore provider generate the GCM IV itself. Supplying a
+        // caller-generated IV via GCMParameterSpec at ENCRYPT_MODE is
+        // rejected by the provider with an
+        // InvalidAlgorithmParameterException on several Android versions.
+        // We read `cipher.iv` after init so we can persist the
+        // provider-generated IV alongside the ciphertext on the success
+        // path.
+        val cipher: Cipher
+        val iv: ByteArray
         try {
             // Rotate the Keystore key on every provisioning so that an old
             // wrapped ciphertext from a previous install cannot accidentally
             // be decryptable under a reused alias.
             deleteKeystoreKey(keyAlias)
             val key = createKeystoreKey(keyAlias)
-
-            // 32-byte wallet secret — caller-provided bytes (via `secretHex`,
-            // lower-case hex of length 64) when supplied, otherwise freshly
-            // generated CSPRNG entropy. Caller-provided bytes allow the JS
-            // layer to derive the HD seed / mnemonic from the same bytes
-            // that are stored here without a follow-up biometric read
-            // during provisioning.
-            val secret = ByteArray(SECRET_BYTES)
-            val providedHex = if (options.hasKey("secretHex")) options.getString("secretHex") else null
-            if (providedHex != null) {
-                if (providedHex.length != SECRET_BYTES * 2) {
-                    promise.reject(ERR_VAULT, "secretHex must be 64 lower-case hex characters")
-                    return
-                }
-                for (i in 0 until SECRET_BYTES) {
-                    val hi = Character.digit(providedHex[i * 2], 16)
-                    val lo = Character.digit(providedHex[i * 2 + 1], 16)
-                    if (hi < 0 || lo < 0) {
-                        promise.reject(ERR_VAULT, "secretHex is not valid hex")
-                        return
-                    }
-                    secret[i] = ((hi shl 4) or lo).toByte()
-                }
-            } else {
-                SecureRandom().nextBytes(secret)
-            }
-            secretBuf = secret
-
-            // AndroidKeyStore AES/GCM requirement: when the key was created
-            // with setRandomizedEncryptionRequired(true) (see createKeyGenSpec
-            // above — required by the mission's security contract), the
-            // Keystore provider MUST generate the GCM IV itself. Supplying a
-            // caller-generated IV via GCMParameterSpec at ENCRYPT_MODE is
-            // rejected by the provider with an InvalidAlgorithmParameterException
-            // on several Android versions / OEM implementations. Initialise
-            // without an IV parameter here, then read `cipher.iv` after init
-            // to persist the provider-generated IV alongside the ciphertext.
-            // The DECRYPT_MODE path below is unaffected by this requirement
-            // and continues to supply the stored IV via GCMParameterSpec.
-            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, key)
-            val iv = cipher.iv
-            val ciphertext = cipher.doFinal(secret)
-
-            // Persist ciphertext + IV side-by-side under alias-scoped keys.
-            val ok = prefs().edit()
-                .putString(ivKey(keyAlias), Base64.encodeToString(iv, Base64.NO_WRAP))
-                .putString(ctKey(keyAlias), Base64.encodeToString(ciphertext, Base64.NO_WRAP))
-                .commit()
-
-            if (!ok) {
-                deleteKeystoreKey(keyAlias)
-                promise.reject(ERR_VAULT, "Failed to persist wrapped secret")
-                return
-            }
-
-            promise.resolve(null)
+            iv = cipher.iv
         } catch (e: KeyPermanentlyInvalidatedException) {
+            secret.fill(0.toByte())
             deleteKeystoreKey(keyAlias)
             promise.reject(ERR_KEY_INVALIDATED, "Keystore key was invalidated")
+            return
         } catch (e: GeneralSecurityException) {
+            secret.fill(0.toByte())
             deleteKeystoreKey(keyAlias)
             promise.reject(mapKeystoreException(e), "generateAndStoreSecret failed")
+            return
         } catch (e: Exception) {
+            secret.fill(0.toByte())
             deleteKeystoreKey(keyAlias)
             promise.reject(ERR_VAULT, "generateAndStoreSecret failed")
-        } finally {
-            // Zero the in-memory secret buffer.
-            secretBuf?.fill(0.toByte())
+            return
+        }
+
+        // BiometricPrompt.authenticate must be invoked on the UI thread;
+        // biometrics-bound keys created with
+        // setUserAuthenticationRequired(true) + AUTH_BIOMETRIC_STRONG +
+        // zero-second validity require a FRESH `BiometricPrompt`
+        // authentication to produce the per-operation auth token that
+        // Keystore's `update()` consumes. Calling `cipher.doFinal(...)`
+        // directly (without going through `BiometricPrompt.CryptoObject`)
+        // triggers a keystore2 `KeystoreOperation::update` rejection with
+        // `Km(ErrorCode(-26))` = `KEY_USER_NOT_AUTHENTICATED` — that was
+        // the root-cause of the post-enrollment VAULT_ERROR observed in
+        // the debug-emulator CI runs prior to this fix.
+        val activity = currentActivity as? FragmentActivity
+        if (activity == null) {
+            secret.fill(0.toByte())
+            deleteKeystoreKey(keyAlias)
+            promise.reject(ERR_VAULT, "No FragmentActivity available for biometric prompt")
+            return
+        }
+
+        val title = if (options.hasKey("promptTitle")) options.getString("promptTitle") ?: "" else ""
+        val message = if (options.hasKey("promptMessage")) options.getString("promptMessage") ?: "" else ""
+        val cancel = if (options.hasKey("promptCancel")) options.getString("promptCancel") ?: "Cancel" else "Cancel"
+        val subtitle = if (options.hasKey("promptSubtitle")) options.getString("promptSubtitle") else null
+
+        activity.runOnUiThread {
+            val executor = ContextCompat.getMainExecutor(reactApplicationContext)
+            val alreadyResolved = booleanArrayOf(false)
+
+            val callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    if (alreadyResolved[0]) return
+                    alreadyResolved[0] = true
+                    // Zero the in-memory secret and roll back the orphan
+                    // Keystore key so `isInitialized()` keeps returning
+                    // false and the user can retry setup cleanly.
+                    secret.fill(0.toByte())
+                    deleteKeystoreKey(keyAlias)
+                    val code = mapBiometricError(errorCode)
+                    promise.reject(code, "Biometric authentication failed")
+                }
+
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    if (alreadyResolved[0]) return
+                    alreadyResolved[0] = true
+
+                    try {
+                        val authedCipher = result.cryptoObject?.cipher
+                        if (authedCipher == null) {
+                            deleteKeystoreKey(keyAlias)
+                            promise.reject(ERR_VAULT, "Authenticated cipher missing")
+                            return
+                        }
+                        val ciphertext = authedCipher.doFinal(secret)
+
+                        // Persist ciphertext + IV side-by-side under
+                        // alias-scoped keys.
+                        val ok = prefs().edit()
+                            .putString(ivKey(keyAlias), Base64.encodeToString(iv, Base64.NO_WRAP))
+                            .putString(ctKey(keyAlias), Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+                            .commit()
+
+                        if (!ok) {
+                            deleteKeystoreKey(keyAlias)
+                            promise.reject(ERR_VAULT, "Failed to persist wrapped secret")
+                            return
+                        }
+
+                        promise.resolve(null)
+                    } catch (e: KeyPermanentlyInvalidatedException) {
+                        deleteKeystoreKey(keyAlias)
+                        promise.reject(ERR_KEY_INVALIDATED, "Keystore key was invalidated")
+                    } catch (e: GeneralSecurityException) {
+                        deleteKeystoreKey(keyAlias)
+                        promise.reject(mapKeystoreException(e), "generateAndStoreSecret failed")
+                    } catch (e: Exception) {
+                        deleteKeystoreKey(keyAlias)
+                        promise.reject(ERR_VAULT, "generateAndStoreSecret failed")
+                    } finally {
+                        // Zero the in-memory secret buffer once the
+                        // encrypted ciphertext has landed on disk.
+                        secret.fill(0.toByte())
+                    }
+                }
+
+                override fun onAuthenticationFailed() {
+                    // Single mismatch; BiometricPrompt stays open for
+                    // retry. Do NOT reject here — the terminal
+                    // lockout / cancellation comes through
+                    // onAuthenticationError above.
+                }
+            }
+
+            try {
+                val biometricPrompt = BiometricPrompt(activity, executor, callback)
+                val infoBuilder = BiometricPrompt.PromptInfo.Builder()
+                    .setTitle(if (title.isNotEmpty()) title else "Set up biometric unlock")
+                    .setDescription(message)
+                    .setNegativeButtonText(cancel)
+                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                    .setConfirmationRequired(false)
+                if (!subtitle.isNullOrEmpty()) {
+                    infoBuilder.setSubtitle(subtitle)
+                }
+                val cryptoObject = BiometricPrompt.CryptoObject(cipher)
+                biometricPrompt.authenticate(infoBuilder.build(), cryptoObject)
+            } catch (e: Exception) {
+                if (!alreadyResolved[0]) {
+                    alreadyResolved[0] = true
+                    secret.fill(0.toByte())
+                    deleteKeystoreKey(keyAlias)
+                    promise.reject(ERR_VAULT, "Failed to start biometric prompt")
+                }
+            }
         }
     }
 

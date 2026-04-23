@@ -357,34 +357,89 @@ def ensure_device_credential(timeout: float = 20.0) -> None:
 def has_enrollments() -> bool:
     """Authoritative "fingerprint actually enrolled" signal.
 
-    Queries ``dumpsys biometric`` / ``dumpsys fingerprint`` for the
-    ``hasEnrollments: true`` / ``hasEnrollments=true`` marker that
-    ``BiometricService`` (``frameworks/base/services/core/.../biometrics``)
-    consults before allowing ``setUserAuthenticationRequired(true)`` +
-    ``AUTH_BIOMETRIC_STRONG`` Keystore keys to be generated. Without this
-    flipping to ``true``, ``NativeBiometricVault.generateAndStoreSecret``
-    will throw ``VAULT_ERROR`` regardless of what the enrollment wizard's
-    final activity looked like.
+    Queries ``dumpsys fingerprint`` for the AOSP ``Fingerprint21.dumpInternal``
+    JSON blob (``"prints":[{"id":<user_id>,"count":<enrolled_count>,...}]``)
+    and returns ``True`` as soon as any user has ``count > 0``. That
+    ``count`` is populated from
+    ``FingerprintUtils.getBiometricsForUser(...).size()`` — i.e. it's the
+    authoritative "number of enrolled fingerprints" per userId on the
+    ``google_apis`` / AOSP API 31 HAL. When it's ``>= 1`` the HAL has
+    committed at least one enrolled fingerprint to
+    ``/data/vendor_de/<user>/fpdata`` and ``BiometricService`` will report
+    ``hasEnrollments=true`` to ``canAuthenticate`` callers — which is the
+    precondition for ``setUserAuthenticationRequired(true)`` +
+    ``AUTH_BIOMETRIC_STRONG`` Keystore keys.
+
+    Secondary signals (checked in order of preference):
+    1. A ``FingerprintHal: Write fingerprint[<slot>] (0x<non_zero>,0x1)``
+       line in logcat. The HAL emits that exactly when it commits an
+       enrolled fingerprint, so seeing it is proof-positive that
+       enrollment succeeded at the HAL layer.
+    2. Legacy regex match for ``hasEnrollments\\s*[:=]\\s*true`` in
+       ``dumpsys biometric`` / ``dumpsys fingerprint`` output. Left as a
+       fallback in case a future system image starts emitting that field
+       explicitly in the dump.
 
     The reason we cannot just trust the wizard: on API 31 ``google_apis``,
     ``FingerprintEnrollFinish`` can render "Fingerprint added" even when
     only a single acquisition sample was captured — the wizard shows a
     success screen but the HAL never actually committed an enrolled
-    fingerprint, and ``BiometricService`` reports ``hasEnrollments: false``.
-    Using this probe as the authoritative exit signal guarantees that by
-    the time ``enroll_fingerprint`` returns, the Keystore side of the
-    biometric vault will succeed.
+    fingerprint, so ``count`` stays at 0 and ``BiometricService`` reports
+    ``hasEnrollments: false``. Using the authoritative HAL-committed
+    fingerprint count as the exit signal guarantees that by the time
+    ``enroll_fingerprint`` returns, the Keystore side of the biometric
+    vault will have a usable enrollment to key off.
     """
 
-    for service in ("biometric", "fingerprint"):
-        result = adb("shell", "dumpsys", service, check=False)
-        if result.returncode != 0:
-            continue
-        text = result.stdout or ""
-        # Accept either ``hasEnrollments: true`` (BiometricService log
-        # format) or ``hasEnrollments=true`` (proto-dump debug format).
-        if re.search(r"hasEnrollments\s*[:=]\s*true", text, re.IGNORECASE):
+    # 1. Primary signal: Fingerprint21 dumpInternal "count" field is
+    #    populated from `FingerprintUtils.getBiometricsForUser(...).size()`
+    #    — so `count >= 1` means the HAL has at least one committed
+    #    enrollment for that userId. This is the AUTHORITATIVE signal on
+    #    API 31 `google_apis` images.
+    fp_dump = adb("shell", "dumpsys", "fingerprint", check=False)
+    if fp_dump.returncode == 0:
+        fp_text = fp_dump.stdout or ""
+        for match in re.finditer(r'"prints"\s*:\s*(\[[^\]]*\])', fp_text):
+            try:
+                prints = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(prints, list):
+                for entry in prints:
+                    if isinstance(entry, dict):
+                        try:
+                            if int(entry.get("count") or 0) > 0:
+                                return True
+                        except (TypeError, ValueError):
+                            continue
+        # Legacy regex fallback (kept for forward-compatibility with
+        # system images that may one day emit `hasEnrollments` directly
+        # in the fingerprint dump).
+        if re.search(r"hasEnrollments\s*[:=]\s*true", fp_text, re.IGNORECASE):
             return True
+
+    # 2. Secondary signal: dumpsys biometric (in case a system image
+    #    exposes `hasEnrollments` at that layer).
+    bio_dump = adb("shell", "dumpsys", "biometric", check=False)
+    if bio_dump.returncode == 0:
+        bio_text = bio_dump.stdout or ""
+        if re.search(r"hasEnrollments\s*[:=]\s*true", bio_text, re.IGNORECASE):
+            return True
+
+    # 3. Tertiary signal: scan logcat for the `FingerprintHal: Write
+    #    fingerprint[<slot>] (0x<non_zero>,0x1)` marker that the emulator
+    #    HAL emits exactly when it commits an enrollment. The opening
+    #    `0x0` parenthesized pair is an UNUSED slot on the HAL side, so
+    #    we match `0x[1-9a-f]` (i.e. non-zero) as the first hex nibble to
+    #    avoid false-positives from the HAL's slot-dump output.
+    logcat = adb("logcat", "-d", "-s", "FingerprintHal:D", check=False)
+    if logcat.returncode == 0:
+        for line in (logcat.stdout or "").splitlines():
+            if "Write fingerprint" not in line:
+                continue
+            if re.search(r"\(0x[1-9a-fA-F][0-9a-fA-F]*,0x1\)", line):
+                return True
+
     return False
 
 
