@@ -15,7 +15,9 @@ on:
 jobs:
   debug-android:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # timeout-minutes must be >= 45 (emulator boot ~5 min, release APK build ~15 min,
+    # biometric-first flow + relaunch cycle ~10 min + margin). See VAL-CI-016.
+    timeout-minutes: 60
 
     steps:
       - name: Free disk space
@@ -65,13 +67,22 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 31
+          # `google_apis` system image includes the fingerprint HAL required by the
+          # biometric-first onboarding flow; the default `default`/`aosp_atd` images
+          # lack it and would silently let the flow pass. See VAL-CI-036.
+          target: google_apis
           arch: x86_64
           profile: pixel_5
+          # Reset AVD state between reruns so stale fingerprint/credential state
+          # from a prior run cannot satisfy the current flow. See VAL-CI-031.
           force-avd-creation: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
           script: |
             set -e
+
+            # Ensure artifact directories exist before we capture anything.
+            mkdir -p /tmp/emulator-ui /tmp/emulator-ui-artifacts
 
             echo "=== Installing release APK ==="
             adb install android/app/build/outputs/apk/release/app-release.apk
@@ -85,14 +96,15 @@ jobs:
             echo "=== Waiting for app to start (20s) ==="
             sleep 20
 
-            echo "=== Capturing initial logcat ==="
-            adb logcat -d > /tmp/logcat-startup.txt 2>&1
+            echo "=== Capturing initial logcat (size-bounded to 10 MiB) ==="
+            adb logcat -d 2>&1 | head -c 10485760 > /tmp/logcat-startup.txt
 
             echo "=== Driving onboarding flow by UI text ==="
-            python3 scripts/emulator-debug-flow.py || true
+            # No `|| true` — the script's exit code must propagate so flow regressions
+            # fail the job. See VAL-CI-013 / VAL-CI-024.
+            python3 scripts/emulator-debug-flow.py
 
-            echo "=== Copying screenshots and dumps ==="
-            mkdir -p /tmp/emulator-ui
+            echo "=== Copying screenshots and dumps into the artifact tree ==="
             cp -R /tmp/emulator-ui/. /tmp/emulator-ui-artifacts/ 2>/dev/null || true
 
             echo ""
@@ -108,18 +120,23 @@ jobs:
             adb logcat -d '*:E' | grep -i "react\|enbox\|level\|crypto\|fatal\|exception" || true
 
             echo ""
-            echo "=== Saving full logcat ==="
-            adb logcat -d > /tmp/logcat-full.txt 2>&1
-            adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E > /tmp/logcat-rn.txt 2>&1
+            echo "=== Saving full logcat (size-bounded to 10 MiB) ==="
+            # Cap each logcat artifact at 10 MiB so uploads stay well under GitHub's
+            # per-artifact limit. See VAL-CI-032.
+            adb logcat -d 2>&1 | head -c 10485760 > /tmp/logcat-full.txt
+            adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1 | head -c 10485760 > /tmp/logcat-rn.txt
 
       - name: Upload logs and screenshot
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          # Deterministic artifact name keyed on the commit SHA so a parent
+          # validation step can locate it by SHA. See VAL-CI-030.
           name: emulator-debug-${{ github.sha }}
           path: |
             /tmp/logcat-full.txt
             /tmp/logcat-rn.txt
             /tmp/logcat-startup.txt
             /tmp/emulator-ui-artifacts/**
+          # retention-days must be >= 7 per VAL-CI-030.
           retention-days: 7
