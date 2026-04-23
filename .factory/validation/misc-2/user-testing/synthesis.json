@@ -1,0 +1,21 @@
+{
+  "milestone": "misc-2",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "flowReports": [],
+  "generatedAt": "2026-04-23T04:04:33.778525+00:00",
+  "previousRound": null,
+  "notes": [
+    "No user-testable assertions were mapped to milestone misc-2 because the only completed implementation feature in this milestone had an empty fulfills array."
+  ]
+}
