@@ -331,7 +331,7 @@ jest.mock(
 import { act, fireEvent, render } from '@testing-library/react-native';
 
 import { BiometricSetupScreen } from '@/features/auth/screens/biometric-setup-screen';
-import { BiometricUnlockScreen } from '@/features/auth/screens/biometric-unlock-screen';
+import { BiometricUnlockScreen } from '@/features/auth/screens/biometric-unlock';
 import { RecoveryPhraseScreen } from '@/features/auth/screens/recovery-phrase-screen';
 import { WelcomeScreen } from '@/features/onboarding/screens/welcome-screen';
 import { getInitialRoute } from '@/features/session/get-initial-route';

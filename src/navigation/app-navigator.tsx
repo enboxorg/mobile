@@ -6,7 +6,7 @@ import { ActivityIndicator, Alert, StyleSheet, View } from 'react-native';
 
 import { BiometricSetupScreen } from '@/features/auth/screens/biometric-setup-screen';
 import { BiometricUnavailableScreen } from '@/features/auth/screens/biometric-unavailable-screen';
-import { BiometricUnlockScreen } from '@/features/auth/screens/biometric-unlock-screen';
+import { BiometricUnlockScreen } from '@/features/auth/screens/biometric-unlock';
 import { RecoveryPhraseScreen } from '@/features/auth/screens/recovery-phrase-screen';
 import { RecoveryRestoreScreen } from '@/features/auth/screens/recovery-restore-screen';
 import { ConnectScreen } from '@/features/connect/screens/connect-screen';

@@ -23,7 +23,7 @@
  *     HD seed derivation are local-only; a fetch that rejects (airplane
  *     mode) MUST NOT block `initializeFirstLaunch`.
  *
- * Together these pin three subtle failure modes that the biometric-first
+ * Together these capture three subtle failure modes that the biometric-first
  * refactor could regress silently.
  */
 
@@ -198,7 +198,7 @@ import { AppState } from 'react-native';
 import { act, fireEvent, render } from '@testing-library/react-native';
 
 import { BiometricSetupScreen } from '@/features/auth/screens/biometric-setup-screen';
-import { BiometricUnlockScreen } from '@/features/auth/screens/biometric-unlock-screen';
+import { BiometricUnlockScreen } from '@/features/auth/screens/biometric-unlock';
 import { useSessionStore } from '@/features/session/session-store';
 import { useAgentStore } from '@/lib/enbox/agent-store';
 import { getInitialRoute } from '@/features/session/get-initial-route';

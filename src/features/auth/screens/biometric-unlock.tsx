@@ -11,10 +11,10 @@ import { useAppTheme } from '@/theme';
 /**
  * Maximum number of consecutive non-cancel / non-lockout failures we
  * tolerate before escalating the inline error to the lockout copy. The
- * biometric-first contract (VAL-UX-018) forbids a PIN fallback at any
- * point, so this threshold is strictly an inline UX hint — there is no
- * state machine consequence beyond the message change; the user can
- * still tap the CTA to re-prompt.
+ * biometric-first contract (VAL-UX-018) forbids any legacy
+ * knowledge-factor fallback, so this threshold is strictly an inline UX
+ * hint — there is no state machine consequence beyond the message
+ * change; the user can still tap the CTA to re-prompt.
  */
 export const MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT = 5;
 
@@ -25,7 +25,7 @@ export const MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT = 5;
  * `BiometricVault.mapNativeErrorToVaultError` (which re-throws with the
  * `VAULT_ERROR_*` aliases). Accepting both matrices keeps this screen
  * testable with a directly-mocked `unlockAgent` (see
- * `biometric-unlock-screen.test.tsx`) AND with the real store that
+ * `__tests__/biometric-unlock.test.tsx`) AND with the real store that
  * re-throws the mapped `VaultError`.
  */
 const USER_CANCELED_CODES = new Set<string>([
@@ -120,8 +120,8 @@ function deriveUnlockLabel(type?: string | null): string {
  *      leave the CTA pressable — no navigation, no dialog, no fallback.
  *   5. On `BIOMETRY_LOCKOUT(_PERMANENT)` (or after N consecutive
  *      AUTH_FAILED / generic errors) we render a clear lockout message
- *      referencing device biometrics. We NEVER offer a PIN / passcode
- *      / skip affordance.
+ *      referencing device biometrics. We NEVER offer a legacy
+ *      knowledge-factor / skip affordance.
  *   6. On `KEY_INVALIDATED` we either call `onInvalidated` (when the
  *      caller wired the navigator to `.replace('RecoveryRestore')`) or
  *      flip `session.biometricStatus` to `'invalidated'` so the

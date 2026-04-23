@@ -357,7 +357,7 @@ describe('useSessionStore', () => {
       //    restore commit. biometricStatus is recomputed from the
       //    native probe (enrolled+available → 'ready'); isLocked
       //    defaults to true so the navigator routes through
-      //    BiometricUnlock → Main (not Welcome / BiometricSetup).
+      //    biometric-unlock gate → Main (not Welcome / BiometricSetup).
       await useSessionStore.getState().hydrate();
 
       const state = useSessionStore.getState();

@@ -48,7 +48,7 @@ jest.mock('@/features/auth/screens/biometric-setup-screen', () => {
   };
 });
 
-jest.mock('@/features/auth/screens/biometric-unlock-screen', () => {
+jest.mock('@/features/auth/screens/biometric-unlock', () => {
   const React = require('react');
   const { Text, View } = require('react-native');
   return {

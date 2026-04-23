@@ -67,7 +67,8 @@ export interface BiometricSetupScreenProps {
  *      `features/session/get-initial-route.ts`) then routes us to the
  *      BiometricUnavailable hard gate.
  *   6. On BIOMETRY_LOCKOUT / LOCKOUT_PERMANENT we surface a clear lockout
- *      message WITHOUT offering a PIN / passcode / skip fallback.
+ *      message WITHOUT offering a legacy knowledge-factor / skip
+ *      fallback.
  */
 export function BiometricSetupScreen({
   onInitialized,

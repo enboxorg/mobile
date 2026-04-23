@@ -8,7 +8,8 @@ import { useAppTheme } from '@/theme';
  * Hard gate shown when the device either lacks biometric hardware or has no
  * biometrics enrolled. The user cannot proceed past this screen until they
  * enroll a biometric in the system Settings app — biometric unlock is the
- * only authentication factor this app supports (no PIN / passcode fallback).
+ * only authentication factor this app supports (no legacy knowledge-factor
+ * fallback).
  */
 export function BiometricUnavailableScreen() {
   const theme = useAppTheme();
