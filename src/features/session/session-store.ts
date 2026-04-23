@@ -86,24 +86,36 @@ export interface SessionState {
    *
    * Applies all four session flags — `biometricStatus: 'ready'`,
    * `hasCompletedOnboarding: true`, `hasIdentity: true`,
-   * `isLocked: false` — in a single `setState`, then persists the
-   * identity/onboarding half to SecureStorage via `persistSession()`
-   * so a cold relaunch (which runs `hydrate()` against a fresh
-   * process) routes the restored wallet straight to
-   * `BiometricUnlock → Main` instead of falling back to `Welcome` or
-   * `BiometricSetup`.
+   * `isLocked: false` — in a single `setState`, then awaits
+   * `persistSession()` so the underlying
+   * `setSecureItem(SESSION_KEY, ...)` write has fully committed to
+   * SecureStorage before the promise resolves. Callers (notably
+   * `RecoveryRestoreScreen`) MUST await this helper before handing
+   * control back to the navigator so a cold kill immediately after
+   * restore cannot rehydrate stale flags.
    *
    * The raw `setState` call that previously lived in
    * `recovery-restore-screen.tsx` bypassed the store's persistence
    * path entirely; this helper is the single source of truth for
    * committing a successful restore.
    */
-  hydrateRestored: () => void;
+  hydrateRestored: () => Promise<void>;
   reset: () => Promise<void>;
 }
 
-function persistSession(state: PersistedSessionState): void {
-  setSecureItem(SESSION_KEY, JSON.stringify(state)).catch((err) => {
+/**
+ * Persist the identity/onboarding half of the session to SecureStorage.
+ *
+ * Returns a Promise<void> that resolves once `setSecureItem` has either
+ * committed the write OR failed (failures are swallowed here so that
+ * non-awaiting callers — e.g. `completeOnboarding` / `setHasIdentity` —
+ * never produce an unhandled rejection). Callers that MUST observe the
+ * commit before proceeding (notably `hydrateRestored`, which is awaited
+ * by `RecoveryRestoreScreen` before it hands control back to the
+ * navigator) should `await` the returned promise.
+ */
+function persistSession(state: PersistedSessionState): Promise<void> {
+  return setSecureItem(SESSION_KEY, JSON.stringify(state)).catch((err) => {
     console.warn('[session] persist failed:', err);
   });
 }
@@ -223,16 +235,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ biometricStatus: next });
   },
 
-  hydrateRestored: () => {
+  hydrateRestored: async () => {
     // One atomic state transition followed by one persist call — see
     // the docstring on `SessionState.hydrateRestored` for the rationale.
+    // We await `persistSession` so the underlying SecureStorage write
+    // has fully committed before the promise resolves; callers rely on
+    // that guarantee to defeat the cold-kill durability race where a
+    // relaunch running `hydrate()` against a not-yet-written SESSION_KEY
+    // would rehydrate stale flags.
     set({
       biometricStatus: 'ready',
       hasCompletedOnboarding: true,
       hasIdentity: true,
       isLocked: false,
     });
-    persistSession({
+    await persistSession({
       hasCompletedOnboarding: true,
       hasIdentity: true,
     });

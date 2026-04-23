@@ -163,10 +163,56 @@ describe('useSessionStore', () => {
       );
     });
 
+    it('awaits setSecureItem before resolving (cold-kill durability race fix)', async () => {
+      // Hold setSecureItem on a deferred promise so we can observe
+      // whether hydrateRestored resolves before the SecureStorage
+      // write commits. Prior to the fix, the helper fired the
+      // persistSession call without awaiting, so a cold kill landing
+      // in the window between the in-memory setState and the
+      // on-disk commit could rehydrate stale flags on relaunch.
+      let resolveWrite: (() => void) | undefined;
+      const deferredWrite = new Promise<void>((resolve) => {
+        resolveWrite = () => resolve();
+      });
+      mockedSetSecureItem.mockImplementationOnce(() => deferredWrite);
+
+      let resolved = false;
+      const hydratePromise = useSessionStore
+        .getState()
+        .hydrateRestored()
+        .then(() => {
+          resolved = true;
+        });
+
+      // Flush microtasks a handful of times. hydrateRestored MUST NOT
+      // resolve yet because the underlying setSecureItem write is still
+      // pending on the deferred promise above.
+      for (let i = 0; i < 5; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+      expect(resolved).toBe(false);
+
+      // setSecureItem was invoked synchronously inside hydrateRestored
+      // (the await chain is on the returned promise, not on the
+      // invocation itself).
+      expect(mockedSetSecureItem).toHaveBeenCalledWith(
+        'session:state',
+        expect.stringContaining('"hasCompletedOnboarding":true'),
+      );
+
+      // Commit the deferred write; hydrateRestored's awaited promise
+      // should now resolve.
+      resolveWrite?.();
+      await hydratePromise;
+      expect(resolved).toBe(true);
+    });
+
     it('survives kill/relaunch simulation — hydrate() restores the flags written by hydrateRestored()', async () => {
       // 1. Commit a restored session — the helper writes to the mocked
-      //    SecureStorage backend via setSecureItem.
-      useSessionStore.getState().hydrateRestored();
+      //    SecureStorage backend via setSecureItem. Await so the
+      //    SecureStorage commit completes before we simulate relaunch.
+      await useSessionStore.getState().hydrateRestored();
 
       // Grab whatever payload got persisted to `session:state` so the
       // relaunch simulation can hand it back to hydrate(). This keeps

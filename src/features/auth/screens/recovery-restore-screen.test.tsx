@@ -295,6 +295,51 @@ describe('RecoveryRestoreScreen', () => {
   // store's persistence path and mis-route a cold relaunch to the
   // Welcome / BiometricSetup screens.
   // ------------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // Durability-race fix: the screen MUST `await` hydrateRestored before
+  // calling `onRestored`. If the await were missing, a cold kill in the
+  // gap between the in-memory setState and the SecureStorage commit
+  // would rehydrate stale flags on relaunch. This test drives
+  // hydrateRestored with a deferred promise so we can observe that
+  // onRestored is fired ONLY after the awaited helper resolves.
+  // ------------------------------------------------------------------
+  it('awaits hydrateRestored before calling onRestored (cold-kill durability race fix)', async () => {
+    (mockRestoreFromMnemonic as jest.Mock).mockResolvedValue(undefined);
+
+    let resolveHydrate: (() => void) | undefined;
+    const deferredHydrate = new Promise<void>((resolve) => {
+      resolveHydrate = () => resolve();
+    });
+    const hydrateRestoredSpy = jest
+      .spyOn(useSessionStore.getState(), 'hydrateRestored')
+      .mockImplementation(() => deferredHydrate);
+
+    const onRestored = jest.fn();
+    const screen = render(
+      <RecoveryRestoreScreen onRestored={onRestored} />,
+    );
+
+    typeMnemonic(screen, VALID_MNEMONIC_24);
+
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Restore wallet'));
+    });
+
+    // hydrateRestored has been invoked but its deferred promise is
+    // still pending — `onRestored` MUST NOT have fired yet because the
+    // screen awaits the helper before handing control to the navigator.
+    expect(hydrateRestoredSpy).toHaveBeenCalledTimes(1);
+    expect(onRestored).not.toHaveBeenCalled();
+
+    // Resolve the deferred hydrate; the screen's awaited call now
+    // continues past hydrateRestored and reaches `onRestored()`.
+    await act(async () => {
+      resolveHydrate?.();
+    });
+
+    expect(onRestored).toHaveBeenCalledTimes(1);
+  });
+
   it('commits the restored session exactly once via useSessionStore.hydrateRestored()', async () => {
     (mockRestoreFromMnemonic as jest.Mock).mockResolvedValue(undefined);
     useSessionStore.setState({ biometricStatus: 'invalidated' });

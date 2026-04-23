@@ -117,7 +117,6 @@ export function RecoveryRestoreScreen({
     (s) => (s as { restoreFromMnemonic?: (m: string) => Promise<void> })
       .restoreFromMnemonic,
   );
-  const hydrateRestored = useSessionStore((s) => s.hydrateRestored);
 
   const [phrase, setPhrase] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -215,13 +214,14 @@ export function RecoveryRestoreScreen({
       //      hasCompletedOnboarding=true, hasIdentity=true, and
       //      isLocked=false in one `setState` call so subsequent
       //      navigator selectors observe a consistent snapshot.
-      //   2. Persists the onboarding/identity half to SecureStorage
-      //      via the store's internal `persistSession()` pipe — the
-      //      previous inline `useSessionStore.setState({...})` call
-      //      bypassed persistence, which caused cold relaunches to
+      //   2. Awaits the SecureStorage write for the onboarding /
+      //      identity half via the store's internal `persistSession()`
+      //      pipe. We MUST `await` this call before handing control
+      //      back to the navigator — a cold kill in the gap between
+      //      setState and the SecureStorage commit would otherwise
       //      rehydrate stale flags and misroute the restored wallet
       //      back to Welcome / BiometricSetup (VAL-UX-024).
-      hydrateRestored();
+      await useSessionStore.getState().hydrateRestored();
 
       if (!restoredRef.current) {
         restoredRef.current = true;
@@ -237,13 +237,7 @@ export function RecoveryRestoreScreen({
       inFlightRef.current = false;
       setIsSubmitting(false);
     }
-  }, [
-    hydrateRestored,
-    isShapeValid,
-    normalized,
-    onRestored,
-    restoreFromMnemonic,
-  ]);
+  }, [isShapeValid, normalized, onRestored, restoreFromMnemonic]);
 
   const handleChange = useCallback((next: string) => {
     setPhrase(next);
