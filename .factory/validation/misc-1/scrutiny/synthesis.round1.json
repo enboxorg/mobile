@@ -1,13 +1,13 @@
 {
   "milestone": "misc-1",
-  "round": 2,
+  "round": 1,
   "status": "fail",
   "validatorsRun": {
     "test": {
       "passed": true,
       "command": "bun run test",
       "exitCode": 0,
-      "observation": "Jest ran 40 suites / 366 tests and all passed. Output still included the expected agent-store/agent-init console logging and the wallet-connect error-path console.error from the existing test harness."
+      "observation": "Jest ran 40 suites / 366 tests and all passed. Output still included the expected test-harness console logging from agent-store/agent-init and the wallet-connect error-path console.error."
     },
     "typecheck": {
       "passed": true,
@@ -24,25 +24,31 @@
   },
   "reviewsSummary": {
     "total": 5,
-    "passed": 4,
-    "failed": 1,
+    "passed": 3,
+    "failed": 2,
     "failedFeatures": [
-      "fix-ios-target-membership-doc-accuracy"
+      "misc-pbxproj-native-modules-consistency",
+      "misc-vault-determinism-snapshot"
     ]
   },
   "blockingIssues": [
     {
-      "featureId": "fix-ios-target-membership-doc-accuracy",
+      "featureId": "misc-pbxproj-native-modules-consistency",
       "severity": "blocking",
-      "description": "`.factory/library/ios-target-membership.md` still contains an incorrect `ios/Podfile` line citation (`line 16` instead of the actual `target`/`use_native_modules!` lines 17-18), so the exact-evidence documentation fix is not yet fully accurate."
+      "description": "`.factory/library/ios-target-membership.md` now asserts a specific CocoaPods/codegen compilation path for `RCTNativeSecureStorage.mm` and `RCTNativeCrypto.mm` that the reviewed repo state does not substantiate, so the new guidance is not yet trustworthy."
+    },
+    {
+      "featureId": "misc-vault-determinism-snapshot",
+      "severity": "blocking",
+      "description": "The new determinism guard snapshots independently-derived fixture values and a DID mock that only depends on the first derived key, so regressions in BiometricVault's second/third derived-key recipe can still slip through."
     }
   ],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": "mobile-feature-worker skill",
-      "suggestion": "Tighten transcript-backed procedure enforcement so workers must record deviations whenever required mission-library reads or red\u2192green test evidence are absent before marking `skillFeedback.followedProcedure=true`.",
-      "evidence": "Review reports for `misc-patch-injection-polish`, `misc-pbxproj-native-modules-consistency`, `misc-vault-determinism-snapshot`, `misc-vault-circular-import-cleanup`, and `fix-vault-determinism-snapshot-multi-key-coverage` all cited transcript evidence that required library reads and/or red\u2192green proof were missing even though the handoffs still reported `followedProcedure: true`.",
+      "suggestion": "Tighten transcript-backed procedure enforcement so workers must record deviations whenever required mission-library reads or red→green test evidence are absent before marking `skillFeedback.followedProcedure=true`.",
+      "evidence": "Review reports for `misc-patch-injection-polish`, `misc-pbxproj-native-modules-consistency`, `misc-vault-determinism-snapshot`, and `misc-vault-circular-import-cleanup` all cited transcript evidence that required library reads and/or red→green proof were missing even though the handoffs still reported `followedProcedure: true`.",
       "isSystemic": true
     }
   ],
@@ -68,5 +74,5 @@
       "reason": "blocked: linking it now would amplify guidance that the misc-pbxproj-native-modules-consistency review found inaccurate."
     }
   ],
-  "previousRound": ".factory/validation/misc-1/scrutiny/synthesis.round1.json"
+  "previousRound": null
 }
