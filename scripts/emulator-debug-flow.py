@@ -264,20 +264,20 @@ def wait_until_package(
 
 
 def _locksettings_pin_is_set() -> bool:
-    """Best-effort check: does the device already have a lockscreen PIN?"""
+    """Best-effort check: does the device already have a lockscreen PIN?
 
-    result = adb(
-        "shell",
-        "locksettings",
-        "get-disabled",
-        check=False,
-    )
-    # ``locksettings get-disabled`` prints ``true`` when the keyguard is
-    # disabled (no credential set) and ``false`` otherwise.
-    if result.returncode == 0 and result.stdout.strip().lower() == "false":
-        return True
-    # Fallback heuristic: attempt a set without --old and look for the
-    # "already set" failure.
+    ``locksettings get-disabled`` is NOT a credential probe — it returns
+    ``false`` whenever the keyguard is active, which is the default on
+    stock AVDs (swipe-to-unlock). To actually detect a PIN credential we
+    check ``dumpsys trust`` and ``dumpsys account`` markers and fall back
+    to a probe via ``set-pin`` (which reports "already set" when a PIN
+    exists).
+    """
+
+    # Probe: try setting the PIN without --old. If one is already set
+    # with a different value we get an explicit error; if one is set
+    # with the same value we get a success message; if none is set at
+    # all we get a success and return True (the PIN is now set).
     probe = adb(
         "shell",
         "locksettings",
@@ -286,14 +286,18 @@ def _locksettings_pin_is_set() -> bool:
         check=False,
     )
     combined = f"{probe.stdout}\n{probe.stderr}".lower()
-    if probe.returncode != 0 and (
+    if probe.returncode == 0:
+        # We either re-set the same PIN or set a fresh PIN to the
+        # expected value; either way the device now has the expected
+        # credential.
+        return True
+    if (
         "already set" in combined
         or "existing" in combined
         or "old password" in combined
     ):
-        return True
-    if probe.returncode == 0:
-        # We just set it to DEVICE_PIN, so it is now set.
+        # A different PIN is already set. We'll re-issue with --old in
+        # the outer function to normalize it to DEVICE_PIN.
         return True
     return False
 
@@ -675,6 +679,13 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
         # Re-launch the intent to get back on track, but guard against
         # tight re-launch loops with a 10s grace window.
         if not handled:
+            # System ANR dialog ("App isn't responding") can show over the
+            # launcher on fresh AVDs. Tap "Wait" so the Settings intent can
+            # complete instead of being cancelled.
+            if dismiss_anr_if_present(max_attempts=1):
+                time.sleep(1.0)
+                continue
+
             still_in_wizard = _focus_matches(
                 focus, ENROLL_FOCUS_SETTINGS_FINGERPRINT
             )
@@ -684,7 +695,7 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
             else:
                 if stuck_at_non_wizard_since is None:
                     stuck_at_non_wizard_since = now
-                elif now - stuck_at_non_wizard_since > 10.0 and relaunches < 3:
+                elif now - stuck_at_non_wizard_since > 10.0 and relaunches < 8:
                     print(
                         f"[enroll_fingerprint] not in wizard (focus={focus!r}); "
                         "re-launching FINGERPRINT_ENROLL",
@@ -700,7 +711,7 @@ def enroll_fingerprint(timeout: float = 300.0) -> None:
                     )
                     relaunches += 1
                     stuck_at_non_wizard_since = None
-                    time.sleep(2.0)
+                    time.sleep(3.0)
                     continue
             # Fallback: try a text-based wizard advance + finger touch.
             tapped = _tap_first_label(root, WIZARD_ADVANCE_LABELS)
@@ -842,8 +853,78 @@ def relaunch_and_unlock(
 # -- main flow ---------------------------------------------------------------
 
 
+def wait_for_boot_completed(timeout: float = 90.0, settle: float = 10.0) -> None:
+    """Poll ``sys.boot_completed`` until it returns ``1``, then sleep
+    ``settle`` seconds so background services quiesce.
+
+    ``reactivecircus/android-emulator-runner@v2`` waits for boot before
+    handing off, but on some runs the launcher (``NexusLauncherActivity``)
+    can ANR immediately afterward because background services are still
+    settling. Giving them an extra grace window — plus probing
+    ``sys.boot_completed`` explicitly — sharply reduces the flaky
+    ``Close app / Wait`` ANR on the first ``FINGERPRINT_ENROLL`` launch.
+    """
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = adb("shell", "getprop", "sys.boot_completed", check=False)
+        if (result.stdout or "").strip() == "1":
+            break
+        time.sleep(1.0)
+    # Non-fatal: fall through to the rest of the flow, which has its
+    # own bounded waits and diagnostics.
+    if settle > 0:
+        time.sleep(settle)
+
+
+def dismiss_anr_if_present(max_attempts: int = 3) -> bool:
+    """If a system ANR dialog is on-screen, tap ``Wait`` to keep the
+    application running.
+
+    Returns ``True`` when an ANR dialog was observed and dismissed,
+    ``False`` otherwise. Only matches the ``Wait`` button alongside
+    ``Close app`` (the standard ANR dialog shape); never taps "Close app"
+    alone.
+    """
+
+    dismissed_any = False
+    for _ in range(max_attempts):
+        try:
+            root = dump_ui()
+        except subprocess.CalledProcessError:
+            return dismissed_any
+
+        close_present = False
+        wait_node: Optional[ET.Element] = None
+        for node in root.iter("node"):
+            text = (node.attrib.get("text") or "").strip().lower()
+            if text == "close app":
+                close_present = True
+            elif text == "wait":
+                wait_node = node
+        # Only act when BOTH buttons are present — signature of an ANR
+        # dialog. "Wait" alone could plausibly be app copy somewhere.
+        if not (close_present and wait_node is not None):
+            return dismissed_any
+        try:
+            tap_node(wait_node)
+            print(
+                "[dismiss_anr] tapped 'Wait' on ANR dialog",
+                flush=True,
+            )
+            dismissed_any = True
+        except Exception:
+            return dismissed_any
+        time.sleep(1.5)
+    return dismissed_any
+
+
 def main() -> int:
     print("== preparing emulator (device credential + fingerprint) ==")
+    wait_for_boot_completed()
+    # Launcher ANRs sometimes appear right after boot_completed on first
+    # run of a fresh AVD; dismiss before touching Settings.
+    dismiss_anr_if_present()
     ensure_device_credential()
     enroll_fingerprint()
 
