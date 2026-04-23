@@ -84,15 +84,27 @@ export interface SessionState {
   /**
    * Atomically commit the post-recovery-restore session snapshot.
    *
-   * Applies all four session flags — `biometricStatus: 'ready'`,
-   * `hasCompletedOnboarding: true`, `hasIdentity: true`,
-   * `isLocked: false` — in a single `setState`, then awaits
-   * `persistSession()` so the underlying
-   * `setSecureItem(SESSION_KEY, ...)` write has fully committed to
-   * SecureStorage before the promise resolves. Callers (notably
-   * `RecoveryRestoreScreen`) MUST await this helper before handing
-   * control back to the navigator so a cold kill immediately after
-   * restore cannot rehydrate stale flags.
+   * Persists the onboarding/identity half of the session to
+   * SecureStorage FIRST via `persistSessionOrThrow(...)`, and only
+   * on a successful commit flips the four route-driving flags —
+   * `biometricStatus: 'ready'`, `hasCompletedOnboarding: true`,
+   * `hasIdentity: true`, `isLocked: false` — in a single `setState`
+   * call. Callers (notably `RecoveryRestoreScreen`) MUST await this
+   * helper before handing control back to the navigator.
+   *
+   * Rationale: AppNavigator routes declaratively from these flags,
+   * so a "flip first, persist second" ordering creates a cold-kill
+   * race. A process kill that lands after the in-memory flip but
+   * before the `setSecureItem(SESSION_KEY, ...)` commit would leave
+   * the user with a persisted legacy snapshot while the in-memory
+   * UI has already left RecoveryRestore — on relaunch `hydrate()`
+   * re-reads the stale payload and misroutes the restored wallet.
+   * Persisting first guarantees that by the time any navigator
+   * selector observes the flipped flags, the on-disk state already
+   * agrees. On persist failure NO flags change (no visible partial
+   * flip to the navigator) and the rejection propagates to the
+   * caller so `RecoveryRestoreScreen` can render a retry alert
+   * instead of navigating away.
    *
    * The raw `setState` call that previously lived in
    * `recovery-restore-screen.tsx` bypassed the store's persistence
@@ -254,27 +266,43 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   hydrateRestored: async () => {
-    // One atomic state transition followed by one persist call — see
-    // the docstring on `SessionState.hydrateRestored` for the rationale.
-    // We `await persistSessionOrThrow` so the underlying SecureStorage
-    // write has fully committed before the promise resolves AND so a
-    // write failure REJECTS this call. Callers (notably
-    // `RecoveryRestoreScreen`) rely on the rejection to surface a
-    // retry alert instead of navigating away on a silent persistence
-    // failure. `persistSession` (non-throwing) is kept for
-    // fire-and-forget callers — we must not use it here because a
-    // swallowed rejection would make `hydrateRestored` resolve even
-    // though the on-disk state is stale, which is the bug this helper
-    // exists to prevent.
+    // Persist-BEFORE-flip ordering. The route-driving flags
+    // (`biometricStatus`, `hasCompletedOnboarding`, `hasIdentity`,
+    // `isLocked`) must NOT change until the SecureStorage write for
+    // the onboarding/identity snapshot has fully committed. The
+    // earlier "flip first, persist second" implementation had a
+    // cold-kill race: AppNavigator re-rendered on the in-memory
+    // setState, so a process kill that landed in the gap between
+    // `setState` and the awaited `setSecureItem(SESSION_KEY, ...)`
+    // commit would leave the user with a persisted legacy snapshot
+    // while the in-memory UI had already left RecoveryRestore. On
+    // relaunch, `hydrate()` would re-read the stale on-disk payload
+    // and misroute the restored wallet.
+    //
+    // Contract:
+    //   1. `await persistSessionOrThrow(...)` FIRST. If SecureStorage
+    //      rejects, the route-driving flags stay exactly as the
+    //      caller left them (no visible partial flip to the
+    //      navigator) and the rejection propagates to the caller
+    //      (typically `RecoveryRestoreScreen`, which renders a retry
+    //      alert).
+    //   2. Only on persist success do we atomically flip all four
+    //      flags in a single `setState` call so the navigator's
+    //      selectors observe a consistent snapshot.
+    //
+    // `persistSession` (non-throwing) is kept for fire-and-forget
+    // callers — we must not use it here because a swallowed rejection
+    // would make `hydrateRestored` resolve even though the on-disk
+    // state is stale, which is the bug this helper exists to prevent.
+    await persistSessionOrThrow({
+      hasCompletedOnboarding: true,
+      hasIdentity: true,
+    });
     set({
       biometricStatus: 'ready',
       hasCompletedOnboarding: true,
       hasIdentity: true,
       isLocked: false,
-    });
-    await persistSessionOrThrow({
-      hasCompletedOnboarding: true,
-      hasIdentity: true,
     });
   },
 

@@ -120,7 +120,7 @@ describe('useSessionStore', () => {
   });
 
   describe('hydrateRestored', () => {
-    it('atomically sets all four session flags for a restored wallet', () => {
+    it('atomically sets all four session flags for a restored wallet once persist resolves', async () => {
       // Simulate the pre-restore snapshot: invalidated biometric state
       // (the only pathway that lands on RecoveryRestoreScreen), locked
       // session, nothing on-disk yet.
@@ -132,7 +132,7 @@ describe('useSessionStore', () => {
         biometricStatus: 'invalidated',
       });
 
-      useSessionStore.getState().hydrateRestored();
+      await useSessionStore.getState().hydrateRestored();
 
       const state = useSessionStore.getState();
       expect(state.biometricStatus).toBe('ready');
@@ -141,13 +141,13 @@ describe('useSessionStore', () => {
       expect(state.isLocked).toBe(false);
     });
 
-    it('persists the onboarding/identity snapshot through setSecureItem(SESSION_KEY, ...)', () => {
+    it('persists the onboarding/identity snapshot through setSecureItem(SESSION_KEY, ...)', async () => {
       useSessionStore.setState({
         hasCompletedOnboarding: false,
         hasIdentity: false,
       });
 
-      useSessionStore.getState().hydrateRestored();
+      await useSessionStore.getState().hydrateRestored();
 
       // persistSession() writes the JSON-encoded snapshot to the
       // canonical `session:state` SecureStorage key. Without this write
@@ -163,13 +163,25 @@ describe('useSessionStore', () => {
       );
     });
 
-    it('awaits setSecureItem before resolving (cold-kill durability race fix)', async () => {
+    it('does NOT flip the route-driving flags until setSecureItem has committed (persist-before-flip ordering)', async () => {
+      // Seed the pre-restore snapshot that the navigator is currently
+      // observing: biometricStatus='invalidated', isLocked=true,
+      // hasCompletedOnboarding/hasIdentity=false. AppNavigator routes
+      // declaratively from these four flags, so any flip before the
+      // SecureStorage commit would trigger a re-render out of
+      // RecoveryRestore — a cold kill landing in the gap between the
+      // flip and the on-disk commit would rehydrate stale flags on
+      // relaunch and misroute the restored wallet.
+      useSessionStore.setState({
+        isHydrated: true,
+        hasCompletedOnboarding: false,
+        hasIdentity: false,
+        isLocked: true,
+        biometricStatus: 'invalidated',
+      });
+
       // Hold setSecureItem on a deferred promise so we can observe
-      // whether hydrateRestored resolves before the SecureStorage
-      // write commits. Prior to the fix, the helper fired the
-      // persistSession call without awaiting, so a cold kill landing
-      // in the window between the in-memory setState and the
-      // on-disk commit could rehydrate stale flags on relaunch.
+      // the store state across the await boundary.
       let resolveWrite: (() => void) | undefined;
       const deferredWrite = new Promise<void>((resolve) => {
         resolveWrite = () => resolve();
@@ -185,8 +197,8 @@ describe('useSessionStore', () => {
         });
 
       // Flush microtasks a handful of times. hydrateRestored MUST NOT
-      // resolve yet because the underlying setSecureItem write is still
-      // pending on the deferred promise above.
+      // resolve yet because the underlying setSecureItem write is
+      // still pending on the deferred promise above.
       for (let i = 0; i < 5; i += 1) {
         // eslint-disable-next-line no-await-in-loop
         await Promise.resolve();
@@ -195,20 +207,38 @@ describe('useSessionStore', () => {
 
       // setSecureItem was invoked synchronously inside hydrateRestored
       // (the await chain is on the returned promise, not on the
-      // invocation itself).
+      // invocation itself) — the write has been ATTEMPTED.
       expect(mockedSetSecureItem).toHaveBeenCalledWith(
         'session:state',
         expect.stringContaining('"hasCompletedOnboarding":true'),
       );
 
+      // Core durability assertion: while the SecureStorage commit is
+      // still in flight, the route-driving flags MUST still reflect
+      // the pre-call snapshot. A cold kill landing here would leave
+      // the navigator exactly where the user was (RecoveryRestore),
+      // matching the not-yet-written on-disk state.
+      const midFlight = useSessionStore.getState();
+      expect(midFlight.biometricStatus).toBe('invalidated');
+      expect(midFlight.isLocked).toBe(true);
+      expect(midFlight.hasCompletedOnboarding).toBe(false);
+      expect(midFlight.hasIdentity).toBe(false);
+
       // Commit the deferred write; hydrateRestored's awaited promise
-      // should now resolve.
+      // now continues past the `await persistSessionOrThrow` and
+      // flips the four flags in a single setState.
       resolveWrite?.();
       await hydratePromise;
       expect(resolved).toBe(true);
+
+      const afterCommit = useSessionStore.getState();
+      expect(afterCommit.biometricStatus).toBe('ready');
+      expect(afterCommit.isLocked).toBe(false);
+      expect(afterCommit.hasCompletedOnboarding).toBe(true);
+      expect(afterCommit.hasIdentity).toBe(true);
     });
 
-    it('rejects with the underlying error when setSecureItem fails (persistence-failure propagation)', async () => {
+    it('rejects with the underlying error and leaves the pre-call snapshot intact when setSecureItem fails', async () => {
       // Regression guard: `persistSession` swallows SecureStorage
       // rejections so fire-and-forget callers (completeOnboarding,
       // setHasIdentity) stay rejection-safe. `hydrateRestored` MUST
@@ -216,6 +246,19 @@ describe('useSessionStore', () => {
       // a retry alert on a silent persistence failure instead of
       // navigating the user to Main with an in-memory session that a
       // cold relaunch would discard.
+      //
+      // Additionally, with persist-before-flip ordering, the route-
+      // driving flags MUST NOT change at all on the rejection path:
+      // no partial flip visible to the navigator, nothing for a cold
+      // kill to misread on relaunch.
+      useSessionStore.setState({
+        isHydrated: true,
+        hasCompletedOnboarding: false,
+        hasIdentity: false,
+        isLocked: true,
+        biometricStatus: 'invalidated',
+      });
+
       const persistError = new Error('secure storage unavailable');
       mockedSetSecureItem.mockImplementationOnce(() =>
         Promise.reject(persistError),
@@ -231,6 +274,14 @@ describe('useSessionStore', () => {
         'session:state',
         expect.stringContaining('"hasCompletedOnboarding":true'),
       );
+
+      // Post-reject: every route-driving flag still matches the
+      // pre-call snapshot. No visible partial flip to the navigator.
+      const state = useSessionStore.getState();
+      expect(state.biometricStatus).toBe('invalidated');
+      expect(state.isLocked).toBe(true);
+      expect(state.hasCompletedOnboarding).toBe(false);
+      expect(state.hasIdentity).toBe(false);
     });
 
     it('leaves persistSession (non-throwing) intact for fire-and-forget callers', async () => {
