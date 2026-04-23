@@ -1,0 +1,28 @@
+{
+  "featureId": "fix-restore-session-persistence-durability",
+  "reviewedAt": "2026-04-23T00:16:18Z",
+  "commitId": "601ee86a55b122c622a32b051c409ef8b0ec700c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Compared both restore-session diffs and the fix-session transcript. The new commit correctly makes `hydrateRestored()` async, updates `RecoveryRestoreScreen` to await it, and adds deferred-promise tests that prove the success-path await chain. However, the durability contract is still incomplete because `persistSession()` swallows SecureStorage failures, so `hydrateRestored()` can resolve and let the screen navigate away even when `session:state` never commits.",
+    "issues": [
+      {
+        "file": "src/features/session/session-store.ts",
+        "line": 117,
+        "severity": "blocking",
+        "description": "`persistSession()` now returns `setSecureItem(SESSION_KEY, ...).catch(...)` (`session-store.ts:117-120`), and `hydrateRestored()` simply `await`s that helper (`session-store.ts:238-255`). Because the catch handler converts SecureStorage rejection into a resolved promise, `RecoveryRestoreScreen` will continue to `onRestored()` after `await useSessionStore.getState().hydrateRestored()` (`src/features/auth/screens/recovery-restore-screen.tsx:224-228`) even when the `session:state` write failed. That still violates the feature's required durability contract ('resolve only after the SecureStorage write commits'): this code waits for the write attempt to settle, not for a successful commit. Rejection needs to propagate here (or this path needs a non-swallowing persistence helper) so restore success is not surfaced without a durable snapshot."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker marked `skillFeedback.followedProcedure: true`, but the transcript skeleton does not show the required library-doc reads or a red-first cycle for this store/screen fix.",
+      "evidence": "`.factory/skills/mobile-feature-worker/SKILL.md:15-29` requires reading the relevant `.factory/library/*.md` docs (at minimum `architecture.md`, plus `environment.md` when running tests and `user-testing.md` for user-facing anchors), and `SKILL.md:66-73` requires writing failing tests first and confirming they go red. The transcript skeleton for session `c30c7ef5-5df7-4782-a6c6-b043368ff7b5` shows reads of the source/test files plus `.factory/services.yaml` and `AGENTS.md`, then a green `bun run test -- src/features/session src/features/auth/screens/recovery-restore-screen.test.tsx`, then edits to `session-store.ts` / `recovery-restore-screen.tsx`, with the test-file edits only later. No reads of `.factory/library/architecture.md`, `.factory/library/environment.md`, or `.factory/library/user-testing.md` appear in the skeleton."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/onboarding-ux/scrutiny/reviews/fix-restore-session-persistence.json",
+  "summary": "Review failed. The durability fix closes the original success-path race and adds the expected deferred-promise tests, but `hydrateRestored()` still resolves after a failed SecureStorage write because `persistSession()` swallows rejections. That means the restore screen can still navigate away without a durably committed `session:state` snapshot."
+}

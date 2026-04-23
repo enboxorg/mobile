@@ -1,6 +1,6 @@
 {
   "milestone": "onboarding-ux",
-  "round": 2,
+  "round": 3,
   "status": "fail",
   "validatorsRun": {
     "test": {
@@ -17,50 +17,33 @@
       "passed": true,
       "command": "bun run lint",
       "exitCode": 0,
-      "warnings": 83
+      "warnings": 84
     }
   },
   "reviewsSummary": {
-    "total": 7,
-    "passed": 6,
+    "total": 1,
+    "passed": 0,
     "failed": 1,
     "failedFeatures": [
-      "fix-restore-session-persistence"
+      "fix-restore-session-persistence-durability"
     ]
   },
   "blockingIssues": [
     {
-      "featureId": "fix-restore-session-persistence",
+      "featureId": "fix-restore-session-persistence-durability",
       "severity": "blocking",
-      "description": "The new hydrateRestored() helper still persists session:state via a fire-and-forget async setSecureItem(...) call and RecoveryRestoreScreen navigates away immediately, so an immediate cold kill can still relaunch with stale onboarding/identity flags and misroute the restored wallet back to Welcome or BiometricSetup instead of BiometricUnlock \u2192 Main."
+      "description": "The durability fix now awaits the persistence helper, but `persistSession()` still catches and swallows `setSecureItem(SESSION_KEY, ...)` failures, so `hydrateRestored()` can resolve and `RecoveryRestoreScreen` can navigate away even when the restored `session:state` snapshot never committed durably."
     }
   ],
-  "appliedUpdates": [
-    {
-      "target": "library",
-      "description": "Updated .factory/library/architecture.md so the documented BiometricVault error surface now includes VAULT_ERROR_BIOMETRY_LOCKOUT.",
-      "sourceFeature": "fix-biometric-error-code-mapping"
-    },
-    {
-      "target": "library",
-      "description": "Updated .factory/library/environment.md with the react-native-camera-kit iOS permission-helper quirk: checkDeviceCameraAuthorizationStatus() returns -1 for notDetermined despite its Promise<boolean> typing.",
-      "sourceFeature": "fix-scanner-permission-flow"
-    }
-  ],
+  "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": "mobile-feature-worker",
-      "suggestion": "Enforce the skill honesty gate from transcript evidence: do not allow skillFeedback.followedProcedure=true unless required mission/library reads are present in the transcript skeleton and the claimed red-to-green test cycle actually appears before edits.",
-      "evidence": "Six onboarding-ux fix reviews repeated the same discrepancy: sessions 7f7d3c73-ca94-4539-b6f0-9ea9d64d8fbf, cfb4a113-cf16-4fd6-a1b3-0f621143014b, 4d997701-10e1-4c75-80ba-20598f0da38f, e3fc5473-3a11-4250-b875-2da6270d2fb6, 3f6c9c35-d683-4c1d-a6f7-fd935078b2da, and 3eed29ae-fd92-4e3d-8577-e3cc54b4746f all reported followedProcedure=true even though the saved transcript skeletons were missing required .factory/library reads and/or did not show the required red-first test sequence.",
+      "suggestion": "Enforce the skill honesty gate from transcript evidence: do not allow `skillFeedback.followedProcedure=true` unless the saved transcript skeleton shows the required `.factory/library` reads and a red-first test cycle before implementation edits.",
+      "evidence": "The round-3 fix review for session `c30c7ef5-5df7-4782-a6c6-b043368ff7b5` repeated the same issue seen in earlier onboarding-ux fixes: the saved transcript skeleton showed source/test-file reads plus a green targeted test run before edits, but no reads of `.factory/library/architecture.md`, `.factory/library/environment.md`, or `.factory/library/user-testing.md`, and no failing test run before the implementation.",
       "isSystemic": true
-    },
-    {
-      "target": "AGENTS.md",
-      "suggestion": "Clarify the native-module convention so workers know that a small platform-specific legacy bridge (ReactContextBaseJavaModule / isTurboModule=false) is acceptable when a feature explicitly requires an Android-only native shim, even though the default pattern remains TurboModule + codegen.",
-      "evidence": "The mission guidance says native modules should match the existing TurboModule/codegen pattern, but implement-android-flag-secure-native-module legitimately added a non-Turbo EnboxFlagSecure bridge and needed scrutiny to explain why that was acceptable. The concrete behavior is now documented in .factory/library/android-flag-secure-native-module.md, but the normative rule still lives in AGENTS.md.",
-      "isSystemic": false
     }
   ],
   "rejectedObservations": [],
-  "previousRound": ".factory/validation/onboarding-ux/scrutiny/synthesis.round-1.json"
+  "previousRound": ".factory/validation/onboarding-ux/scrutiny/synthesis.round-2.json"
 }
