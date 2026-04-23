@@ -17,7 +17,9 @@ export function BiometricUnavailableScreen() {
   const handleOpenSettings = () => {
     // Fire-and-forget; we intentionally ignore the returned promise here
     // because the screen has nothing to do while the system Settings app
-    // opens. Any rejection is surfaced by the OS, not the app.
+    // opens. Any rejection is surfaced by the OS, not the app. `void` is
+    // the idiomatic way to mark a deliberately-unawaited promise.
+    // eslint-disable-next-line no-void
     void Linking.openSettings();
   };
 

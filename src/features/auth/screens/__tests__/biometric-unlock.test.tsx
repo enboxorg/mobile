@@ -28,7 +28,7 @@
  */
 
 jest.mock('@/lib/enbox/agent-store', () => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+   
   const { create } = require('zustand');
   const mockUnlockAgent = jest.fn();
   const useAgentStore = create(() => ({
@@ -44,7 +44,7 @@ import { act, fireEvent, render } from '@testing-library/react-native';
 
 import { BiometricUnlockScreen } from '@/features/auth/screens/biometric-unlock';
 import { useSessionStore } from '@/features/session/session-store';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const { __mockUnlockAgent: mockUnlockAgent } = require('@/lib/enbox/agent-store');
 
 function makeNativeError(code: string, message?: string): Error & { code: string } {

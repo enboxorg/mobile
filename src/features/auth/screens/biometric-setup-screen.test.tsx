@@ -30,7 +30,7 @@
 // the factory and re-export it so the test can grab a stable reference.
 
 jest.mock('@/lib/enbox/agent-store', () => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+   
   const { create } = require('zustand');
   const mockInitializeFirstLaunch = jest.fn();
   const useAgentStore = create(() => ({
@@ -46,7 +46,7 @@ import { act, fireEvent, render } from '@testing-library/react-native';
 
 import { BiometricSetupScreen } from '@/features/auth/screens/biometric-setup-screen';
 import { useSessionStore } from '@/features/session/session-store';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const { __mockInitializeFirstLaunch: mockInitializeFirstLaunch } = require('@/lib/enbox/agent-store');
 
 function makeNativeError(code: string, message?: string): Error & { code: string } {

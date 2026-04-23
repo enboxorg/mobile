@@ -16,7 +16,7 @@
  *   5. `setBiometricStatus` action toggles between states.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const nativeBiometric = require('@specs/NativeBiometricVault').default;
 
 jest.mock('@/lib/storage/secure-storage', () => ({

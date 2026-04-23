@@ -27,7 +27,7 @@
  * refactor could regress silently.
  */
 
-/* eslint-disable @typescript-eslint/no-var-requires */
+ 
 
 jest.mock(
   '@enbox/agent',
@@ -37,7 +37,7 @@ jest.mock(
       public _localDwnStrategy: string | undefined;
       public _localDwnDiscovery: unknown;
       public _localManagedDidCache: Map<string, unknown> = new Map();
-      // eslint-disable-next-line accessor-pairs
+       
       set agent(value: unknown) {
         this._agent = value;
       }
@@ -93,7 +93,7 @@ jest.mock(
     }
 
     class AgentCryptoApi {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       async bytesToPrivateKey(args: any) {
         // Read the bytes via computed key lookup so the property name
         // never appears in source (avoids secret-scanner false positives

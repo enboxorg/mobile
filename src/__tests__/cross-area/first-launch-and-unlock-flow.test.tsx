@@ -23,7 +23,7 @@
  *     ever flows into `agent.start` / `agent.initialize`.
  */
 
-/* eslint-disable @typescript-eslint/no-var-requires */
+ 
 
 // ---------------------------------------------------------------------
 // @enbox/agent mock
@@ -56,6 +56,10 @@ function mockDeriveDidFromSecret(secretHex: string): string {
   return `did:dht:stub:${secretHex.slice(0, 32)}`;
 }
 
+// The bitwise operators below (`>>> 0`, `^=`, `& 0xff`) are the idiomatic
+// way to implement an FNV-1a hash + LCG PRNG in JS with unsigned-32-bit
+// wraparound semantics. There is no non-bitwise equivalent.
+/* eslint-disable no-bitwise */
 function mockHashMnemonicToSecret(mnemonic: string): string {
   // Simple deterministic FNV-1a style hash over the mnemonic,
   // expanded to 64 hex chars. Mirrors "same mnemonic → same secret"
@@ -75,6 +79,7 @@ function mockHashMnemonicToSecret(mnemonic: string): string {
   }
   return out;
 }
+/* eslint-enable no-bitwise */
 
 jest.mock(
   '@enbox/agent',
@@ -209,7 +214,7 @@ jest.mock(
     }
 
     class AgentCryptoApi {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       async bytesToPrivateKey(args: any) {
         const bytesKey = 'private' + 'Key' + 'Bytes';
         const keyBytes = args[bytesKey] as {
@@ -228,7 +233,7 @@ jest.mock(
       public _localDwnStrategy: string | undefined;
       public _localDwnDiscovery: unknown;
       public _localManagedDidCache: Map<string, unknown> = new Map();
-      // eslint-disable-next-line accessor-pairs
+       
       set agent(value: unknown) {
         this._agent = value;
       }

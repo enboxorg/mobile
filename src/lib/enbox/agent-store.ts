@@ -466,7 +466,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    import lives inside the function to avoid a circular import at
     //    module load time (session-store ↔ agent-store).
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
+       
       const { useSessionStore } = require('@/features/session/session-store');
       await useSessionStore.getState().reset();
     } catch (err) {

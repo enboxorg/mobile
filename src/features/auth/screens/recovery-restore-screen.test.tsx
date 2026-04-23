@@ -40,7 +40,7 @@ jest.mock('@/lib/native/flag-secure', () => ({
 }));
 
 jest.mock('@/lib/enbox/agent-store', () => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+   
   const { create } = require('zustand');
   const mockRestoreFromMnemonic = jest.fn();
   const useAgentStore = create(() => ({
@@ -58,16 +58,16 @@ import { AppState, Platform, type AppStateStatus } from 'react-native';
 import { RecoveryRestoreScreen } from '@/features/auth/screens/recovery-restore-screen';
 import { useSessionStore } from '@/features/session/session-store';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const {
   enableFlagSecure: mockEnableFlagSecure,
   disableFlagSecure: mockDisableFlagSecure,
 } = require('@/lib/native/flag-secure');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const { __mockRestoreFromMnemonic: mockRestoreFromMnemonic } = require(
   '@/lib/enbox/agent-store',
 );
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const NativeBiometricVault = require('@specs/NativeBiometricVault').default;
 
 // -----------------------------------------------------------------------

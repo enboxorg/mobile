@@ -6,7 +6,7 @@
  * `src/features/session/__tests__/session-store.biometric-status.test.ts`.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const nativeBiometric = require('@specs/NativeBiometricVault').default;
 
 jest.mock('@/lib/storage/secure-storage', () => ({
@@ -200,7 +200,7 @@ describe('useSessionStore', () => {
       // resolve yet because the underlying setSecureItem write is
       // still pending on the deferred promise above.
       for (let i = 0; i < 5; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
+         
         await Promise.resolve();
       }
       expect(resolved).toBe(false);

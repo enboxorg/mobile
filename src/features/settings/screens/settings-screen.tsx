@@ -10,7 +10,7 @@ import { useAppTheme, type AppTheme } from '@/theme';
 // app's declared version (VAL-UX-053). Importing the field directly keeps
 // tests honest — they read the same constant — without pulling in any
 // runtime-only dependency.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const APP_VERSION: string = require('../../../../package.json').version;
 
 // External-link targets surfaced in the About section. Hardcoded so the
@@ -142,6 +142,8 @@ export function SettingsScreen({ onLock }: SettingsScreenProps) {
         <SettingsRow
           label="Privacy policy"
           onPress={() => {
+            // `void` marks a deliberately-unawaited fire-and-forget promise.
+            // eslint-disable-next-line no-void
             void Linking.openURL(PRIVACY_POLICY_URL);
           }}
           theme={theme}
@@ -149,6 +151,8 @@ export function SettingsScreen({ onLock }: SettingsScreenProps) {
         <SettingsRow
           label="Terms of service"
           onPress={() => {
+            // `void` marks a deliberately-unawaited fire-and-forget promise.
+            // eslint-disable-next-line no-void
             void Linking.openURL(TERMS_OF_SERVICE_URL);
           }}
           theme={theme}

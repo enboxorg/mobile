@@ -234,6 +234,8 @@ export function BiometricUnlockScreen({
     if (!autoPrompt) return;
     if (autoPromptFiredRef.current) return;
     autoPromptFiredRef.current = true;
+    // `void` marks a deliberately-unawaited fire-and-forget promise.
+    // eslint-disable-next-line no-void
     void handlePress();
   }, [autoPrompt, handlePress]);
 

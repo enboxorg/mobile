@@ -129,6 +129,8 @@ export function WalletConnectScannerScreen() {
               accessibilityLabel="Open Settings"
               label="Open Settings"
               onPress={() => {
+                // `void` marks a deliberately-unawaited fire-and-forget promise.
+                // eslint-disable-next-line no-void
                 void openCameraPermissionSettings();
               }}
             />

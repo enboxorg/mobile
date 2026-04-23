@@ -7,7 +7,7 @@
  * document. Biometric/PIN copy must not leak into Search.
  */
 
-/* eslint-disable @typescript-eslint/no-var-requires */
+ 
 
 jest.mock('@/lib/enbox/agent-store', () => {
   const { create } = require('zustand');

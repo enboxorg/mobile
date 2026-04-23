@@ -668,7 +668,7 @@ export class BiometricVault
         // Rollback itself failed — surface a warning but still throw
         // the ORIGINAL derivation error below so the caller sees the
         // real root cause rather than a secondary rollback failure.
-        // eslint-disable-next-line no-console
+         
         console.warn(
           '[BiometricVault] Failed to roll back native secret after partial init failure',
           deleteErr,

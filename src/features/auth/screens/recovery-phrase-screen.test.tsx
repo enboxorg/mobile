@@ -49,17 +49,17 @@ import { act, fireEvent, render } from '@testing-library/react-native';
 import { AppState, Platform, type AppStateStatus } from 'react-native';
 
 import { RecoveryPhraseScreen } from '@/features/auth/screens/recovery-phrase-screen';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const {
   enableFlagSecure: mockEnableFlagSecure,
   disableFlagSecure: mockDisableFlagSecure,
 } = require('@/lib/native/flag-secure');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const {
   setSecureItem: mockSetSecureItem,
   deleteSecureItem: mockDeleteSecureItem,
 } = require('@/lib/storage/secure-storage');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const NativeBiometricVault = require('@specs/NativeBiometricVault').default;
 
 /**

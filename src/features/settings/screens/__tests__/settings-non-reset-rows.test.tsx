@@ -20,7 +20,7 @@
  *     label, a11y label, or body text.
  */
 
-/* eslint-disable @typescript-eslint/no-var-requires */
+ 
 
 jest.mock('@/lib/enbox/agent-store', () => {
   const { create } = require('zustand');
@@ -82,7 +82,7 @@ import { SettingsScreen } from '@/features/settings/screens/settings-screen';
 // Import the package.json version the SettingsScreen About row sources
 // its string from, so the test and the screen share a single source of
 // truth for the asserted version string (VAL-UX-053).
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const PACKAGE_VERSION: string = require('../../../../../package.json').version;
 
 const agentStoreMocks = require('@/lib/enbox/agent-store') as {

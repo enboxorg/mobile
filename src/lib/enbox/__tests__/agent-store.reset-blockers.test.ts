@@ -28,7 +28,7 @@ jest.mock(
       public _localDwnStrategy: string | undefined;
       public _localDwnDiscovery: unknown;
       public _localManagedDidCache: Map<string, unknown> = new Map();
-      // eslint-disable-next-line accessor-pairs
+       
       set agent(value: unknown) {
         this._agent = value;
       }

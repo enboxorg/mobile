@@ -28,7 +28,7 @@ jest.mock(
       public _localDwnStrategy: string | undefined;
       public _localDwnDiscovery: unknown;
       public _localManagedDidCache: Map<string, unknown> = new Map();
-      // eslint-disable-next-line accessor-pairs
+       
       set agent(value: unknown) {
         this._agent = value;
       }
@@ -170,7 +170,7 @@ jest.mock(
 // Import modules under test AFTER all mocks are registered.
 import { initializeAgent, createBiometricVault } from '@/lib/enbox/agent-init';
 import { BiometricVault } from '@/lib/enbox/biometric-vault';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const agentModule: any = require('@enbox/agent');
 const { AgentDwnApi, LocalDwnDiscovery } = agentModule;
 const mockAgentCreate = agentModule.EnboxUserAgent.create as jest.Mock;

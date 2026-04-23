@@ -68,6 +68,12 @@ function mockBiometricVaultMakeError(code, message) {
 // Deterministic hex generator so tests can assert the "non-empty lowercase
 // hex" contract without relying on randomness. Seeded by alias so the same
 // alias gets the same stored material within a test.
+//
+// The `>>> 0` and `& 0xff` operations below are legitimate uses of bitwise
+// arithmetic: we need an unsigned-32-bit wraparound for a linear-congruential
+// PRNG and a low-byte mask to peel off the high-entropy top bits. There is
+// no non-bitwise equivalent in JS for either operation.
+/* eslint-disable no-bitwise */
 function mockBiometricVaultDeterministicHex(seed, byteLength) {
   const input = String(seed);
   let acc = 0;
@@ -82,6 +88,7 @@ function mockBiometricVaultDeterministicHex(seed, byteLength) {
   }
   return out;
 }
+/* eslint-enable no-bitwise */
 
 function mockBiometricVaultDefaultGenerate(alias, options) {
   // Caller may pre-seed the wallet secret by passing a 64-char lower-case

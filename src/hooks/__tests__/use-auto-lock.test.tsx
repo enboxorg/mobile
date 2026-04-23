@@ -203,10 +203,10 @@ describe('useAutoLock', () => {
 
 describe('useAutoLock — static contract', () => {
   it('does not reference the legacy auto-lock timeout constant in the hook source (VAL-UX-035 static grep)', () => {
-    /* eslint-disable @typescript-eslint/no-var-requires */
+     
     const fs = require('fs') as typeof import('fs');
     const path = require('path') as typeof import('path');
-    /* eslint-enable @typescript-eslint/no-var-requires */
+     
 
     const source = fs.readFileSync(
       path.resolve(__dirname, '../use-auto-lock.ts'),

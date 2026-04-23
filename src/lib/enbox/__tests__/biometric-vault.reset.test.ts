@@ -51,7 +51,7 @@ jest.mock(
   '@enbox/agent',
   () => {
     class MockAgentCryptoApi {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       async bytesToPrivateKey(args: any) {
         const algorithm = args.algorithm as string;
         const bytes = args[`private` + `KeyBytes`] as Uint8Array;

@@ -30,7 +30,7 @@ jest.mock(
       public _localDwnStrategy: string | undefined;
       public _localDwnDiscovery: unknown;
       public _localManagedDidCache: Map<string, unknown> = new Map();
-      // eslint-disable-next-line accessor-pairs
+       
       set agent(value: unknown) {
         this._agent = value;
       }
@@ -64,7 +64,7 @@ jest.mock(
     }
 
     class AgentCryptoApi {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       async bytesToPrivateKey(args: any) {
         const algorithm = args.algorithm as string;
         const bytes = args[`private` + `KeyBytes`] as Uint8Array;
@@ -195,7 +195,7 @@ const nativeSecureStorage = NativeSecureStorage as unknown as {
   deleteItem: jest.Mock;
 };
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const agentModule: any = require('@enbox/agent');
 const mockAgentInitialize = agentModule.__mocks__.initialize as jest.Mock;
 
@@ -289,7 +289,7 @@ describe('useAgentStore — recoveryPhrase surfacing (VAL-VAULT-018)', () => {
     // A freshly created store has a `persist`-backed store only if
     // zustand's middleware was wired; since we do not use persist,
     // `useAgentStore.persist` must be undefined.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     expect((useAgentStore as any).persist).toBeUndefined();
   });
 });

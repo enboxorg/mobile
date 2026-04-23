@@ -19,7 +19,7 @@
  *     valid mnemonic restore rewires the vault back to `'ready'`.
  */
 
-/* eslint-disable @typescript-eslint/no-var-requires */
+ 
 
 const WALLET_ROOT_ALIAS_FOR_MOCK = 'enbox.wallet.root';
 const MNEMONIC_DEFAULT =
@@ -31,6 +31,10 @@ function mockDeriveDidFromSecret(secretHex: string): string {
   return `did:dht:stub:${secretHex.slice(0, 32)}`;
 }
 
+// The bitwise operators below (`>>> 0`, `^=`, `& 0xff`) are the idiomatic
+// way to implement an FNV-1a hash + LCG PRNG in JS with unsigned-32-bit
+// wraparound semantics. There is no non-bitwise equivalent.
+/* eslint-disable no-bitwise */
 function mockHashMnemonicToSecret(mnemonic: string): string {
   const chars = Array.from(mnemonic);
   let h = 2166136261 >>> 0;
@@ -47,6 +51,7 @@ function mockHashMnemonicToSecret(mnemonic: string): string {
   }
   return out;
 }
+/* eslint-enable no-bitwise */
 
 jest.mock(
   '@enbox/agent',
@@ -79,6 +84,9 @@ jest.mock(
 
           // Derive deterministic secret hex and seed the native store so
           // `same mnemonic → same stored secret → same DID`.
+          // The bitwise operators (`>>> 0`, `^=`, `& 0xff`) below are
+          // required for FNV-1a / LCG with unsigned-32-bit wraparound.
+          /* eslint-disable no-bitwise */
           const chars = Array.from(mnemonic);
           let h = 2166136261 >>> 0;
           for (const c of chars) {
@@ -92,6 +100,7 @@ jest.mock(
             seed = (seed + 1013904223) >>> 0;
             secretHex += (seed & 0xff).toString(16).padStart(2, '0');
           }
+          /* eslint-enable no-bitwise */
 
           await NativeBiometricVault.generateAndStoreSecret(
             'enbox.wallet.root',
@@ -135,7 +144,7 @@ jest.mock(
       );
     }
     class AgentCryptoApi {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       async bytesToPrivateKey(args: any) {
         const bytesKey = 'private' + 'Key' + 'Bytes';
         const keyBytes = args[bytesKey] as ArrayLike<number>;
@@ -148,7 +157,7 @@ jest.mock(
     }
     class AgentDwnApi {
       public _agent: unknown;
-      // eslint-disable-next-line accessor-pairs
+       
       set agent(value: unknown) {
         this._agent = value;
       }

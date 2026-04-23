@@ -23,7 +23,7 @@
  *     content.
  */
 
-/* eslint-disable @typescript-eslint/no-var-requires */
+ 
 
 jest.mock(
   '@enbox/agent',
@@ -91,7 +91,7 @@ jest.mock(
       );
     }
     class AgentCryptoApi {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       async bytesToPrivateKey(args: any) {
         const bytesKey = 'private' + 'Key' + 'Bytes';
         const keyBytes = args[bytesKey] as ArrayLike<number>;
@@ -104,7 +104,7 @@ jest.mock(
     }
     class AgentDwnApi {
       public _agent: unknown;
-      // eslint-disable-next-line accessor-pairs
+       
       set agent(value: unknown) {
         this._agent = value;
       }

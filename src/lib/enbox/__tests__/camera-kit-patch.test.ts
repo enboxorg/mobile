@@ -148,11 +148,11 @@ describe('react-native-camera-kit deferred-start patch (script behavior)', () =>
       const preState = patched
         .replace(new RegExp('    ' + MARKER + '\\r?\\n'), '')
         .replace(
-          /    \/\/ iOS 26-only APIs[\s\S]*?\n(    private func applyDeferredStartConfiguration\(\) \{)/,
+          / {4}\/\/ iOS 26-only APIs[\s\S]*?\n( {4}private func applyDeferredStartConfiguration\(\) \{)/,
           '$1',
         )
         .replace(
-          /    private func applyDeferredStartConfiguration\(\) \{[\s\S]*?\n    \}/,
+          / {4}private func applyDeferredStartConfiguration\(\) \{[\s\S]*?\n {4}\}/,
           PRE_PATCH_BLOCK,
         );
 

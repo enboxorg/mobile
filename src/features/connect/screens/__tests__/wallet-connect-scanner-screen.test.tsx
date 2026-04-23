@@ -21,7 +21,7 @@
  * directly.
  */
 
-/* eslint-disable @typescript-eslint/no-var-requires */
+ 
 
 // ---------------------------------------------------------------------------
 // Mock react-native-camera-kit so the scanner component mounts in Jest
