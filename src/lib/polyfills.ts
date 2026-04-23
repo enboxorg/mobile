@@ -14,6 +14,33 @@ if (typeof globalThis.TextDecoder === 'undefined') {
   }
 }
 
+// AbortSignal.timeout — WHATWG 2022 static factory missing in RN/Hermes.
+// @enbox/dids' pkarrPut calls `AbortSignal.timeout(30_000)` at runtime;
+// without this shim the call throws "TypeError: undefined is not a function"
+// and surfaces as `internalError: Failed to put Pkarr record for identifier
+// <zbase32>: undefined is not a function` on device. Node >= 18 (Jest) has
+// this natively, so Jest passes without the shim; the RN release build is
+// the only failure surface.
+//
+// Idempotent via the `typeof` guard so module reloads in dev/HMR do not
+// replace the shim every time, preserving referential identity.
+if (
+  typeof AbortSignal !== 'undefined' &&
+  typeof (AbortSignal as any).timeout !== 'function'
+) {
+  (AbortSignal as any).timeout = (ms: number): AbortSignal => {
+    const controller = new AbortController();
+    setTimeout(() => {
+      try {
+        controller.abort(new DOMException('TimeoutError', 'TimeoutError'));
+      } catch {
+        controller.abort();
+      }
+    }, ms);
+    return controller.signal;
+  };
+}
+
 // crypto.subtle + crypto.getRandomValues
 import { install as installCrypto } from 'react-native-quick-crypto';
 installCrypto();
@@ -71,3 +98,4 @@ console.log('[polyfills] ReadableStream:', typeof globalThis.ReadableStream);
 console.log('[polyfills] TextEncoder:', typeof globalThis.TextEncoder);
 console.log('[polyfills] TextDecoder:', typeof globalThis.TextDecoder);
 console.log('[polyfills] Blob:', typeof globalThis.Blob);
+console.log('[polyfills] AbortSignal.timeout:', typeof (AbortSignal as any).timeout);
