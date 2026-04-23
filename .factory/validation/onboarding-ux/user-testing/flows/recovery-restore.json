@@ -1,0 +1,176 @@
+{
+  "groupId": "recovery-restore",
+  "milestone": "onboarding-ux",
+  "testedAt": "2026-04-23T01:12:47.000952+00:00",
+  "surface": "jest-local",
+  "assignedAssertions": [
+    "VAL-UX-023",
+    "VAL-UX-024",
+    "VAL-UX-025",
+    "VAL-UX-026"
+  ],
+  "isolation": {
+    "repoRoot": "/home/liran/src/enboxorg/mobile",
+    "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+    "evidenceDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/recovery-restore",
+    "reportPath": "/home/liran/src/enboxorg/mobile/.factory/validation/onboarding-ux/user-testing/flows/recovery-restore.json"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "LS",
+    "Execute",
+    "python3",
+    "rg",
+    "bun run test"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-UX-023",
+      "title": "RecoveryRestoreScreen \u2014 accepts 12- or 24-word mnemonic input",
+      "status": "pass",
+      "reason": "The focused recovery-restore Jest suite passed and explicitly covered the disabled CTA before a complete phrase, 24-word normalization, and 12-word normalization, with restoreFromMnemonic called exactly once with the canonical lower-cased single-spaced mnemonic.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-jest.log",
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-evidence-lines.log",
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-implementation.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e '^\\s*it\\(' -e 'disables the \"Restore wallet\" CTA before a valid mnemonic has been typed' -e 'calls restoreFromMnemonic exactly once with the normalized 24-word mnemonic on submit' -e 'also supports a 12-word mnemonic' src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e 'normalizeMnemonicInput' -e 'validateMnemonic' -e 'restoreFromMnemonic\\(normalized\\)' src/features/auth/screens/recovery-restore-screen.tsx"
+        ],
+        "testNames": [
+          "disables the \"Restore wallet\" CTA before a valid mnemonic has been typed",
+          "calls restoreFromMnemonic exactly once with the normalized 24-word mnemonic on submit",
+          "also supports a 12-word mnemonic"
+        ],
+        "evidenceLines": [
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:184",
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:209",
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:235",
+          "src/features/auth/screens/recovery-restore-screen.tsx:71-72",
+          "src/features/auth/screens/recovery-restore-screen.tsx:201",
+          "src/features/auth/screens/recovery-restore-screen.tsx:221"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-024",
+      "title": "RecoveryRestoreScreen \u2014 valid mnemonic restores vault + routes to Main",
+      "status": "pass",
+      "reason": "The success-path tests passed: after restore the session snapshot is atomically hydrated back to the Main-eligible state (`biometricStatus: 'ready'`, `hasCompletedOnboarding: true`, `hasIdentity: true`, `isLocked: false`) and the screen fires `onRestored` exactly once after awaiting `hydrateRestored()`, which is the navigator handoff for the declarative route back to Main.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-jest.log",
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-evidence-lines.log",
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-implementation.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e 'sets session.biometricStatus to \"ready\" and hydrates identity flags on successful restore' -e 'awaits hydrateRestored before calling onRestored \\(cold-kill durability race fix\\)' -e 'commits the restored session exactly once via useSessionStore.hydrateRestored\\(\\)' src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e 'hydrateRestored\\(\\)' -e 'onRestored\\(' src/features/auth/screens/recovery-restore-screen.tsx"
+        ],
+        "testNames": [
+          "sets session.biometricStatus to \"ready\" and hydrates identity flags on successful restore",
+          "awaits hydrateRestored before calling onRestored (cold-kill durability race fix)",
+          "commits the restored session exactly once via useSessionStore.hydrateRestored()"
+        ],
+        "evidenceLines": [
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:259",
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:306",
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:424",
+          "src/features/auth/screens/recovery-restore-screen.tsx:235-258"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-025",
+      "title": "RecoveryRestoreScreen \u2014 invalid mnemonic surfaces error",
+      "status": "pass",
+      "reason": "The invalid-mnemonic path passed: an invalid BIP-39 phrase never reaches restoreFromMnemonic, an inline `role=\"alert\"` error remains visible with user-readable recovery-phrase copy, and the typed input value is retained for retry.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-jest.log",
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-evidence-lines.log",
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-implementation.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e 'shows a clear role=\"alert\" message on an invalid mnemonic and does NOT call restore' -e 'rejects a short mnemonic with an inline alert and never calls restore' src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e 'validateMnemonic' -e 'accessibilityRole=\"alert\"' src/features/auth/screens/recovery-restore-screen.tsx"
+        ],
+        "testNames": [
+          "shows a clear role=\"alert\" message on an invalid mnemonic and does NOT call restore",
+          "rejects a short mnemonic with an inline alert and never calls restore"
+        ],
+        "evidenceLines": [
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:497",
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:533",
+          "src/features/auth/screens/recovery-restore-screen.tsx:201-203",
+          "src/features/auth/screens/recovery-restore-screen.tsx:331"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-026",
+      "title": "RecoveryRestoreScreen \u2014 re-arms biometric setup after restore",
+      "status": "pass",
+      "reason": "The biometric resealing coverage passed: the successful-restore test drives the restore mock through `NativeBiometricVault.generateAndStoreSecret(...)` and asserts exactly one reseal plus `biometricStatus === 'ready'`, confirming the restore flow re-arms biometric protection instead of only hydrating JS state.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-jest.log",
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-evidence-lines.log",
+          "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-implementation.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e 're-arms biometric protection exactly once after a successful restore' src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e 'restoreFromMnemonic\\(normalized\\)' src/features/auth/screens/recovery-restore-screen.tsx"
+        ],
+        "testNames": [
+          "re-arms biometric protection exactly once after a successful restore"
+        ],
+        "evidenceLines": [
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:461",
+          "src/features/auth/screens/recovery-restore-screen.tsx:109-111",
+          "src/features/auth/screens/recovery-restore-screen.tsx:221"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "bun run test -- src/features/auth/screens/recovery-restore-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the focused recovery-restore suite passed all 17 tests.",
+      "evidence": [
+        "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-jest.log"
+      ]
+    },
+    {
+      "command": "rg -n -e '^\\s*it\\(' -e 'disables the \"Restore wallet\" CTA before a valid mnemonic has been typed' -e 'calls restoreFromMnemonic exactly once with the normalized 24-word mnemonic on submit' -e 'also supports a 12-word mnemonic' -e 'sets session.biometricStatus to \"ready\" and hydrates identity flags on successful restore' -e 'shows a clear role=\"alert\" message on an invalid mnemonic and does NOT call restore' -e 're-arms biometric protection exactly once after a successful restore' src/features/auth/screens/recovery-restore-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the test-file scan located the exact Jest cases backing normalization, success-path hydration, invalid-phrase error handling, and biometric resealing coverage.",
+      "evidence": [
+        "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-evidence-lines.log"
+      ]
+    },
+    {
+      "command": "rg -n -e 'normalizeMnemonicInput' -e 'validateMnemonic' -e 'restoreFromMnemonic\\(normalized\\)' -e 'hydrateRestored\\(\\)' -e 'onRestored\\(' -e 'accessibilityRole=\"alert\"' -e 'Restore wallet' src/features/auth/screens/recovery-restore-screen.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the implementation scan captured the mnemonic normalization helper, BIP-39 validation gate, restore call, durable session hydration, navigator handoff, and inline alert rendering points.",
+      "evidence": [
+        "onboarding-ux/recovery-restore/val-ux-023-026-recovery-restore-implementation.log"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 4 assigned assertions on the jest-local surface: 4 passed, 0 failed, 0 blocked. The focused recovery-restore suite passed all 17 tests, and the saved evidence logs map normalized input handling, success-path session hydration, invalid-phrase errors, and biometric resealing to explicit test and implementation lines."
+}

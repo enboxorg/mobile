@@ -1,0 +1,315 @@
+{
+  "groupId": "welcome-settings-anchors",
+  "milestone": "onboarding-ux",
+  "testedAt": "2026-04-23T01:23:40.686624+00:00",
+  "surface": "jest-local",
+  "assignedAssertions": [
+    "VAL-UX-006",
+    "VAL-UX-036",
+    "VAL-UX-037",
+    "VAL-UX-038",
+    "VAL-UX-039"
+  ],
+  "isolation": {
+    "repoRoot": "/home/liran/src/enboxorg/mobile",
+    "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+    "evidenceDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/welcome-settings-anchors",
+    "reportPath": "/home/liran/src/enboxorg/mobile/.factory/validation/onboarding-ux/user-testing/flows/welcome-settings-anchors.json"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "Execute",
+    "python3",
+    "rg",
+    "bun run test"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-UX-006",
+      "title": "WelcomeScreen rendering/behavior is preserved",
+      "status": "pass",
+      "reason": "The WelcomeScreen Jest suite passed 5/5, including the CTA press, matching accessibility label, header role, and no-PIN checks, and the source scan shows the preserved Secure by default / Own your identity / Connect anywhere feature rows remain rendered with the Get started anchor.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/welcome-settings-anchors/val-ux-006-welcome-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-006-welcome-evidence-lines.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/onboarding/screens/welcome-screen.test.tsx",
+          "rg -n -e 'Secure by default' -e 'Own your identity' -e 'Connect anywhere' -e 'Get started' -e 'accessibilityLabel=\"Get started\"' -e 'accessibilityRole=\"header\"' src/features/onboarding/screens/welcome-screen.tsx src/features/onboarding/screens/welcome-screen.test.tsx"
+        ],
+        "testNames": [
+          "renders the product value proposition",
+          "invokes the start callback",
+          "exposes the Get started CTA with a matching accessibility label",
+          "sets accessibilityRole=\"header\" on the hero title",
+          "does not mention PIN in any feature-row copy"
+        ],
+        "evidenceLines": [
+          "src/features/onboarding/screens/welcome-screen.test.tsx:23-39",
+          "src/features/onboarding/screens/welcome-screen.tsx:32-52"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-036",
+      "title": "Settings — \"Reset wallet\" wipes biometric secret and returns to first launch",
+      "status": "pass",
+      "reason": "The SettingsScreen suite passed 9/9 and proved the destructive confirmation copy stays biometric-specific, reset cancellation is inert, confirm triggers deleteSecret → teardown → session reset → hydrate in order, and the wallet-root alias is used. A targeted reset-flow Jest check also passed and showed the reset snapshot routes back to Welcome after the post-reset biometric re-probe.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/welcome-settings-anchors/val-ux-036-037-settings-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-036-037-settings-evidence-lines.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-036-037-settings-no-pin.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-036-reset-navigation-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-036-reset-navigation-evidence-lines.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/settings/screens/settings-screen.test.tsx",
+          "rg -n -e 'Reset wallet' -e 'biometric-protected wallet' -e 'deleteSecret' -e '__mockSessionHydrate' -e '__mockSessionReset' -e '__mockTeardown' -e 'queryByText\\(/PIN/i\\)' -e 'queryByLabelText\\(/change pin/i\\)' -e 'Biometric unlock' src/features/settings/screens/settings-screen.tsx src/features/settings/screens/settings-screen.test.tsx",
+          "rg -n 'Change PIN|\\bPIN\\b' src/features/settings/screens/settings-screen.tsx",
+          "bun run test -- src/__tests__/cross-area/reset-and-restore-flow.test.tsx -t \"reset clears all state\"",
+          "rg -n -e 'hasCompletedOnboarding\\)\\.toBe\\(false\\)' -e 'hasIdentity\\)\\.toBe\\(false\\)' -e 'isLocked\\)\\.toBe\\(true\\)' -e 'biometricStatus' -e 'postResetRoute' -e \"toBe\\('Welcome'\\)\" src/__tests__/cross-area/reset-and-restore-flow.test.tsx"
+        ],
+        "testNames": [
+          "shows a confirmation alert with biometric-referenced copy (no PIN) when Reset wallet is pressed",
+          "does NOT invoke any reset primitive when the user cancels the confirmation alert",
+          "calls NativeBiometricVault.deleteSecret + teardown + sessionStore.reset + hydrate in order when the user confirms",
+          "calls deleteSecret against the canonical wallet-root keystore alias",
+          "still triggers hydrate even if agentStore.reset() rejects (best-effort cleanup)",
+          "reset clears all state + a second first-launch produces a different DID"
+        ],
+        "evidenceLines": [
+          "src/features/settings/screens/settings-screen.tsx:61-68,162",
+          "src/features/settings/screens/settings-screen.test.tsx:209-304",
+          "src/__tests__/cross-area/reset-and-restore-flow.test.tsx:343-362"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-037",
+      "title": "Settings — stale \"Change PIN\" row is removed",
+      "status": "pass",
+      "reason": "The SettingsScreen suite passed the explicit no-PIN assertions, and the direct source scan returned no matches for either 'Change PIN' or standalone 'PIN' text in settings-screen.tsx.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/welcome-settings-anchors/val-ux-036-037-settings-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-036-037-settings-evidence-lines.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-036-037-settings-no-pin.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/settings/screens/settings-screen.test.tsx",
+          "rg -n 'Change PIN|\\bPIN\\b' src/features/settings/screens/settings-screen.tsx"
+        ],
+        "testNames": [
+          "does not render a \"Change PIN\" row",
+          "never renders the literal `PIN` anywhere on the settings tree",
+          "still renders the post-refactor Security rows (Lock wallet + Biometric unlock)"
+        ],
+        "evidenceLines": [
+          "src/features/settings/screens/settings-screen.test.tsx:181-201",
+          "src/features/settings/screens/settings-screen.tsx (negative scan; exit=1)"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-038",
+      "title": "Accessibility anchors on all new screens",
+      "status": "pass",
+      "reason": "All six referenced screen suites passed on the local Jest surface, and the combined anchor scan shows getByLabelText/getByRole('header') coverage plus matching accessibilityLabel/header-role implementation for Open Settings, Enable biometric unlock, Unlock with…, I’ve saved it, Restore wallet, and the preserved Get started CTA.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/welcome-settings-anchors/val-ux-006-welcome-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-unavailable-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-setup-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-unlock-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-recovery-phrase-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-recovery-restore-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-anchor-evidence-lines.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/onboarding/screens/welcome-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/biometric-unavailable-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/biometric-setup-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/recovery-phrase-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e 'Open Settings' -e 'Enable biometric unlock' -e 'Unlock with' -e 'I.u2019ve saved it|I.ve saved it' -e 'Restore wallet' -e 'getByRole\\('header'\\)' -e 'getByLabelText' -e 'accessibilityRole=\"header\"' -e 'accessibilityLabel=' src/features/auth/screens/biometric-unavailable-screen.tsx src/features/auth/screens/biometric-unavailable-screen.test.tsx src/features/auth/screens/biometric-setup-screen.tsx src/features/auth/screens/biometric-setup-screen.test.tsx src/features/auth/screens/biometric-unlock-screen.tsx src/features/auth/screens/biometric-unlock-screen.test.tsx src/features/auth/screens/recovery-phrase-screen.tsx src/features/auth/screens/recovery-phrase-screen.test.tsx src/features/auth/screens/recovery-restore-screen.tsx src/features/auth/screens/recovery-restore-screen.test.tsx src/features/onboarding/screens/welcome-screen.tsx src/features/onboarding/screens/welcome-screen.test.tsx"
+        ],
+        "testNames": [
+          "exposes the Get started CTA with a matching accessibility label",
+          "renders an Open Settings button with accessibilityLabel",
+          "renders the \"Enable biometric unlock\" CTA with matching a11y label",
+          "renders a CTA whose label and a11y label both start with \"Unlock with\"",
+          "renders the confirm button with matching text and accessibilityLabel",
+          "exposes the recovery-restore-screen testID + \"Restore wallet\" CTA anchors"
+        ],
+        "evidenceLines": [
+          "src/features/onboarding/screens/welcome-screen.test.tsx:23-39",
+          "src/features/auth/screens/biometric-unavailable-screen.test.tsx:13-39",
+          "src/features/auth/screens/biometric-setup-screen.test.tsx:75-91",
+          "src/features/auth/screens/biometric-unlock-screen.test.tsx:74-96",
+          "src/features/auth/screens/recovery-phrase-screen.test.tsx:177-191",
+          "src/features/auth/screens/recovery-restore-screen.test.tsx:162-178"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-039",
+      "title": "Stable string anchors for CI UI driver",
+      "status": "pass",
+      "reason": "The anchor source/test scan shows all required literal anchors are present on their respective screens—Get started, Open Settings, Enable biometric unlock, Unlock with… prefix, I’ve saved it, and Restore wallet—and each corresponding Jest suite passed on the assigned local surface.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/welcome-settings-anchors/val-ux-006-welcome-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-unavailable-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-setup-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-unlock-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-recovery-phrase-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-recovery-restore-jest.log",
+          "onboarding-ux/welcome-settings-anchors/val-ux-038-039-anchor-evidence-lines.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/onboarding/screens/welcome-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/biometric-unavailable-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/biometric-setup-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/recovery-phrase-screen.test.tsx",
+          "bun run test -- src/features/auth/screens/recovery-restore-screen.test.tsx",
+          "rg -n -e 'Open Settings' -e 'Enable biometric unlock' -e 'Unlock with' -e 'I.u2019ve saved it|I.ve saved it' -e 'Restore wallet' -e 'Get started' src/features/auth/screens/biometric-unavailable-screen.tsx src/features/auth/screens/biometric-unavailable-screen.test.tsx src/features/auth/screens/biometric-setup-screen.tsx src/features/auth/screens/biometric-setup-screen.test.tsx src/features/auth/screens/biometric-unlock-screen.tsx src/features/auth/screens/biometric-unlock-screen.test.tsx src/features/auth/screens/recovery-phrase-screen.tsx src/features/auth/screens/recovery-phrase-screen.test.tsx src/features/auth/screens/recovery-restore-screen.tsx src/features/auth/screens/recovery-restore-screen.test.tsx src/features/onboarding/screens/welcome-screen.tsx src/features/onboarding/screens/welcome-screen.test.tsx"
+        ],
+        "testNames": [
+          "exposes the Get started CTA with a matching accessibility label",
+          "renders an Open Settings button with accessibilityLabel",
+          "renders the \"Enable biometric unlock\" CTA with matching a11y label",
+          "renders a CTA whose label and a11y label both start with \"Unlock with\"",
+          "renders the confirm button with matching text and accessibilityLabel",
+          "exposes the recovery-restore-screen testID + \"Restore wallet\" CTA anchors"
+        ],
+        "evidenceLines": [
+          "src/features/onboarding/screens/welcome-screen.tsx:51-52",
+          "src/features/auth/screens/biometric-unavailable-screen.tsx:45-46",
+          "src/features/auth/screens/biometric-setup-screen.tsx:174-175",
+          "src/features/auth/screens/biometric-unlock-screen.tsx:95-104,282-283",
+          "src/features/auth/screens/recovery-phrase-screen.tsx:25,213-214",
+          "src/features/auth/screens/recovery-restore-screen.tsx:30,340-342"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "bun run test -- src/features/onboarding/screens/welcome-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the WelcomeScreen suite passed all 5 tests.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-006-welcome-jest.log"
+      ]
+    },
+    {
+      "command": "rg -n -e 'Secure by default' -e 'Own your identity' -e 'Connect anywhere' -e 'Get started' -e 'accessibilityLabel=\"Get started\"' -e 'accessibilityRole=\"header\"' src/features/onboarding/screens/welcome-screen.tsx src/features/onboarding/screens/welcome-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the welcome source/test scan found the preserved feature rows plus the Get started a11y/header anchors.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-006-welcome-evidence-lines.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/features/settings/screens/settings-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the SettingsScreen suite passed all 9 tests, including reset-wallet orchestration and no-PIN checks.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-036-037-settings-jest.log"
+      ]
+    },
+    {
+      "command": "rg -n -e 'Reset wallet' -e 'biometric-protected wallet' -e 'deleteSecret' -e '__mockSessionHydrate' -e '__mockSessionReset' -e '__mockTeardown' -e 'queryByText\\(/PIN/i\\)' -e 'queryByLabelText\\(/change pin/i\\)' -e 'Biometric unlock' src/features/settings/screens/settings-screen.tsx src/features/settings/screens/settings-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the settings source/test scan found the biometric-only confirmation copy, reset orchestration hooks, and the no-PIN expectations.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-036-037-settings-evidence-lines.log"
+      ]
+    },
+    {
+      "command": "rg -n 'Change PIN|\\bPIN\\b' src/features/settings/screens/settings-screen.tsx",
+      "exitCode": 1,
+      "observation": "PASS; the negative source scan returned no PIN matches in settings-screen.tsx.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-036-037-settings-no-pin.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/__tests__/cross-area/reset-and-restore-flow.test.tsx -t \"reset clears all state\"",
+      "exitCode": 0,
+      "observation": "PASS; the targeted reset-flow check passed and the matched test proved the post-reset route resolves to Welcome.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-036-reset-navigation-jest.log"
+      ]
+    },
+    {
+      "command": "rg -n -e 'hasCompletedOnboarding\\)\\.toBe\\(false\\)' -e 'hasIdentity\\)\\.toBe\\(false\\)' -e 'isLocked\\)\\.toBe\\(true\\)' -e 'biometricStatus' -e 'postResetRoute' -e \"toBe\\('Welcome'\\)\" src/__tests__/cross-area/reset-and-restore-flow.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the reset-flow evidence lines capture the reset snapshot and the Welcome route assertion.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-036-reset-navigation-evidence-lines.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/features/auth/screens/biometric-unavailable-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the unavailable-screen suite passed all 5 tests.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-038-039-unavailable-jest.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/features/auth/screens/biometric-setup-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the biometric-setup suite passed all 8 tests.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-038-039-setup-jest.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/features/auth/screens/biometric-unlock-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the biometric-unlock suite passed all 15 tests.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-038-039-unlock-jest.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/features/auth/screens/recovery-phrase-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the recovery-phrase suite passed all 11 tests.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-038-039-recovery-phrase-jest.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/features/auth/screens/recovery-restore-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the recovery-restore suite passed all 17 tests.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-038-039-recovery-restore-jest.log"
+      ]
+    },
+    {
+      "command": "rg -n -e 'Open Settings' -e 'Enable biometric unlock' -e 'Unlock with' -e 'I.u2019ve saved it|I.ve saved it' -e 'Restore wallet' -e 'getByRole\\('header'\\)' -e 'getByLabelText' -e 'accessibilityRole=\"header\"' -e 'accessibilityLabel=' src/features/auth/screens/biometric-unavailable-screen.tsx src/features/auth/screens/biometric-unavailable-screen.test.tsx src/features/auth/screens/biometric-setup-screen.tsx src/features/auth/screens/biometric-setup-screen.test.tsx src/features/auth/screens/biometric-unlock-screen.tsx src/features/auth/screens/biometric-unlock-screen.test.tsx src/features/auth/screens/recovery-phrase-screen.tsx src/features/auth/screens/recovery-phrase-screen.test.tsx src/features/auth/screens/recovery-restore-screen.tsx src/features/auth/screens/recovery-restore-screen.test.tsx src/features/onboarding/screens/welcome-screen.tsx src/features/onboarding/screens/welcome-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the combined anchor scan found all literal CTA strings, matching accessibility labels, and header-role evidence across the six required screens.",
+      "evidence": [
+        "onboarding-ux/welcome-settings-anchors/val-ux-038-039-anchor-evidence-lines.log"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 5 assigned assertions on the jest-local surface: 5 passed, 0 failed, 0 blocked. Ran 7 targeted screen suites plus 1 reset-flow spot check (71 passing tests total) and saved all cited rg/Jest outputs under the welcome-settings-anchors evidence directory."
+}

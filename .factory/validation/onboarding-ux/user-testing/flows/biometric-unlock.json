@@ -1,0 +1,197 @@
+{
+  "groupId": "biometric-unlock",
+  "milestone": "onboarding-ux",
+  "testedAt": "2026-04-23T01:04:36.497338+00:00",
+  "surface": "jest-local",
+  "assignedAssertions": [
+    "VAL-UX-015",
+    "VAL-UX-016",
+    "VAL-UX-017",
+    "VAL-UX-018",
+    "VAL-UX-019"
+  ],
+  "isolation": {
+    "repoRoot": "/home/liran/src/enboxorg/mobile",
+    "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+    "evidenceDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/biometric-unlock",
+    "reportPath": "/home/liran/src/enboxorg/mobile/.factory/validation/onboarding-ux/user-testing/flows/biometric-unlock.json"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "LS",
+    "Execute",
+    "python3",
+    "rg",
+    "bun run test"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-UX-015",
+      "title": "BiometricUnlockScreen \u2014 renders unlock CTA on mount / focus",
+      "status": "pass",
+      "reason": "The focused Jest suite passed, and the saved line scan shows the CTA text and accessibility label both start with \"Unlock with\" while the optional auto-prompt path fires exactly once on mount and stays off when disabled.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-jest.log",
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-evidence-lines.log",
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-implementation.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "rg -n -e '^\\s*it(\\.each)?\\(' -e 'Unlock with' -e \"queryByRole\\('alert'\\)\" -e 'USER_CANCELED' -e 'queryByText\\(/use pin/i\\)' -e 'BIOMETRY_LOCKOUT' -e 'VAULT_ERROR_BIOMETRY_LOCKOUT' -e 'KEY_INVALIDATED' -e 'VAULT_ERROR_KEY_INVALIDATED' -e \"biometricStatus\\).toBe\\('invalidated'\\)\" src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "rg -n -e 'deriveUnlockLabel' -e 'MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT = 5' -e \"setBiometricStatus\\('invalidated'\\)\" -e \"errorState\\?\\.kind === 'cancelled'\" -e \"errorState\\?\\.kind === 'lockout'\" -e 'accessibilityLabel=\\{label\\}' -e 'label=\\{label\\}' src/features/auth/screens/biometric-unlock-screen.tsx"
+        ],
+        "testNames": [
+          "renders a CTA whose label and a11y label both start with \"Unlock with\"",
+          "auto-prompts the biometric unlock exactly once on initial mount when autoPrompt is true",
+          "does NOT auto-prompt when autoPrompt is false"
+        ],
+        "evidenceLines": [
+          "src/features/auth/screens/biometric-unlock-screen.test.tsx:74-123",
+          "src/features/auth/screens/biometric-unlock-screen.tsx:93-104",
+          "src/features/auth/screens/biometric-unlock-screen.tsx:282-283"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-016",
+      "title": "BiometricUnlockScreen \u2014 success invokes onUnlock",
+      "status": "pass",
+      "reason": "The success-path Jest test passed: pressing the unlock CTA resolved the mocked biometric unlock once, called onUnlock exactly once, and left the screen free of any alert state.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-jest.log",
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-evidence-lines.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "rg -n -e '^\\s*it(\\.each)?\\(' -e 'Unlock with' -e \"queryByRole\\('alert'\\)\" -e 'USER_CANCELED' -e 'queryByText\\(/use pin/i\\)' -e 'BIOMETRY_LOCKOUT' -e 'VAULT_ERROR_BIOMETRY_LOCKOUT' -e 'KEY_INVALIDATED' -e 'VAULT_ERROR_KEY_INVALIDATED' -e \"biometricStatus\\).toBe\\('invalidated'\\)\" src/features/auth/screens/biometric-unlock-screen.test.tsx"
+        ],
+        "testNames": [
+          "invokes onUnlock exactly once and renders no error alert on a successful unlock"
+        ],
+        "evidenceLines": [
+          "src/features/auth/screens/biometric-unlock-screen.test.tsx:127-143"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-017",
+      "title": "BiometricUnlockScreen \u2014 cancel keeps the user on the screen",
+      "status": "pass",
+      "reason": "The cancel-path coverage passed: USER_CANCELED left onUnlock at zero calls, kept biometricStatus at ready, preserved a pressable unlock CTA for retry, and only rendered the allowed inline cancel alert.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-jest.log",
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-evidence-lines.log",
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-implementation.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "rg -n -e '^\\s*it(\\.each)?\\(' -e 'Unlock with' -e \"queryByRole\\('alert'\\)\" -e 'USER_CANCELED' -e 'queryByText\\(/use pin/i\\)' -e 'BIOMETRY_LOCKOUT' -e 'VAULT_ERROR_BIOMETRY_LOCKOUT' -e 'KEY_INVALIDATED' -e 'VAULT_ERROR_KEY_INVALIDATED' -e \"biometricStatus\\).toBe\\('invalidated'\\)\" src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "rg -n -e 'deriveUnlockLabel' -e 'MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT = 5' -e \"setBiometricStatus\\('invalidated'\\)\" -e \"errorState\\?\\.kind === 'cancelled'\" -e \"errorState\\?\\.kind === 'lockout'\" -e 'accessibilityLabel=\\{label\\}' -e 'label=\\{label\\}' src/features/auth/screens/biometric-unlock-screen.tsx"
+        ],
+        "testNames": [
+          "stays on screen and keeps the CTA pressable on USER_CANCELED (no onUnlock, no invalidated transition)",
+          "surfaces an inline cancel alert (role=\"alert\") without navigating away on USER_CANCELED"
+        ],
+        "evidenceLines": [
+          "src/features/auth/screens/biometric-unlock-screen.test.tsx:149-203",
+          "src/features/auth/screens/biometric-unlock-screen.tsx:254-261"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-018",
+      "title": "BiometricUnlockScreen \u2014 repeated lockout shows clear message",
+      "status": "pass",
+      "reason": "Lockout coverage passed for BIOMETRY_LOCKOUT, BIOMETRY_LOCKOUT_PERMANENT, the canonical VAULT_ERROR_BIOMETRY_LOCKOUT path, and the repeated AUTH_FAILED threshold path; each showed lockout copy and exposed no PIN fallback.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-jest.log",
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-evidence-lines.log",
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-implementation.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "rg -n -e '^\\s*it(\\.each)?\\(' -e 'Unlock with' -e \"queryByRole\\('alert'\\)\" -e 'USER_CANCELED' -e 'queryByText\\(/use pin/i\\)' -e 'BIOMETRY_LOCKOUT' -e 'VAULT_ERROR_BIOMETRY_LOCKOUT' -e 'KEY_INVALIDATED' -e 'VAULT_ERROR_KEY_INVALIDATED' -e \"biometricStatus\\).toBe\\('invalidated'\\)\" src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "rg -n -e 'deriveUnlockLabel' -e 'MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT = 5' -e \"setBiometricStatus\\('invalidated'\\)\" -e \"errorState\\?\\.kind === 'cancelled'\" -e \"errorState\\?\\.kind === 'lockout'\" -e 'accessibilityLabel=\\{label\\}' -e 'label=\\{label\\}' src/features/auth/screens/biometric-unlock-screen.tsx"
+        ],
+        "testNames": [
+          "renders a clear lockout message with no PIN fallback on BIOMETRY_LOCKOUT",
+          "renders a clear lockout message with no PIN fallback on BIOMETRY_LOCKOUT_PERMANENT",
+          "renders a clear lockout message with no PIN fallback on VAULT_ERROR_BIOMETRY_LOCKOUT",
+          "shows a lockout message once repeated failures reach the lockout threshold"
+        ],
+        "evidenceLines": [
+          "src/features/auth/screens/biometric-unlock-screen.test.tsx:213-269",
+          "src/features/auth/screens/biometric-unlock-screen.tsx:19",
+          "src/features/auth/screens/biometric-unlock-screen.tsx:263-270"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-019",
+      "title": "BiometricUnlockScreen \u2014 invalidation routes to RecoveryRestore",
+      "status": "pass",
+      "reason": "The invalidation-path tests passed via both contract-allowed routes: key-invalidated errors set session.biometricStatus to invalidated by default, and the optional onInvalidated callback fired exactly once when supplied; onUnlock never fired.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-jest.log",
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-evidence-lines.log",
+          "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-implementation.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "rg -n -e '^\\s*it(\\.each)?\\(' -e 'Unlock with' -e \"queryByRole\\('alert'\\)\" -e 'USER_CANCELED' -e 'queryByText\\(/use pin/i\\)' -e 'BIOMETRY_LOCKOUT' -e 'VAULT_ERROR_BIOMETRY_LOCKOUT' -e 'KEY_INVALIDATED' -e 'VAULT_ERROR_KEY_INVALIDATED' -e \"biometricStatus\\).toBe\\('invalidated'\\)\" src/features/auth/screens/biometric-unlock-screen.test.tsx",
+          "rg -n -e 'deriveUnlockLabel' -e 'MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT = 5' -e \"setBiometricStatus\\('invalidated'\\)\" -e \"errorState\\?\\.kind === 'cancelled'\" -e \"errorState\\?\\.kind === 'lockout'\" -e 'accessibilityLabel=\\{label\\}' -e 'label=\\{label\\}' src/features/auth/screens/biometric-unlock-screen.tsx"
+        ],
+        "testNames": [
+          "transitions session.biometricStatus to \"invalidated\" on KEY_INVALIDATED and does not call onUnlock",
+          "transitions session.biometricStatus to \"invalidated\" on KEY_PERMANENTLY_INVALIDATED and does not call onUnlock",
+          "transitions session.biometricStatus to \"invalidated\" on VAULT_ERROR_KEY_INVALIDATED and does not call onUnlock",
+          "invokes onInvalidated (navigation.replace path) when provided on KEY_INVALIDATED"
+        ],
+        "evidenceLines": [
+          "src/features/auth/screens/biometric-unlock-screen.test.tsx:274-313",
+          "src/features/auth/screens/biometric-unlock-screen.tsx:204"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "bun run test -- src/features/auth/screens/biometric-unlock-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the biometric-unlock screen suite passed all 15 tests.",
+      "evidence": [
+        "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-jest.log"
+      ]
+    },
+    {
+      "command": "rg -n -e '^\\s*it(\\.each)?\\(' -e 'Unlock with' -e \"queryByRole\\('alert'\\)\" -e 'USER_CANCELED' -e 'queryByText\\(/use pin/i\\)' -e 'BIOMETRY_LOCKOUT' -e 'VAULT_ERROR_BIOMETRY_LOCKOUT' -e 'KEY_INVALIDATED' -e 'VAULT_ERROR_KEY_INVALIDATED' -e \"biometricStatus\\).toBe\\('invalidated'\\)\" src/features/auth/screens/biometric-unlock-screen.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the test-file line scan captured the CTA, success, cancel, lockout, and invalidation test names plus their core expectation lines.",
+      "evidence": [
+        "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-evidence-lines.log"
+      ]
+    },
+    {
+      "command": "rg -n -e 'deriveUnlockLabel' -e 'MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT = 5' -e \"setBiometricStatus\\('invalidated'\\)\" -e \"errorState\\?\\.kind === 'cancelled'\" -e \"errorState\\?\\.kind === 'lockout'\" -e 'accessibilityLabel=\\{label\\}' -e 'label=\\{label\\}' src/features/auth/screens/biometric-unlock-screen.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the component implementation scan confirmed stable unlock-label derivation, the lockout threshold constant, inline cancel/lockout branches, invalidated-session transition, and CTA accessibility wiring.",
+      "evidence": [
+        "onboarding-ux/biometric-unlock/val-ux-015-019-biometric-unlock-implementation.log"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 5 biometric unlock assertions on the jest-local surface: 5 passed, 0 failed, 0 blocked. The focused Jest suite passed 15/15 tests, and the saved evidence logs map each assertion to explicit test names, line references, and supporting implementation anchors."
+}

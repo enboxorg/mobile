@@ -1,0 +1,161 @@
+{
+  "groupId": "cross-first-launch",
+  "milestone": "onboarding-ux",
+  "testedAt": "2026-04-23T01:30:57.865026+00:00",
+  "surface": "jest-local",
+  "assignedAssertions": [
+    "VAL-CROSS-001",
+    "VAL-CROSS-002",
+    "VAL-CROSS-003",
+    "VAL-CROSS-010"
+  ],
+  "isolation": {
+    "repoRoot": "/home/liran/src/enboxorg/mobile",
+    "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+    "evidenceDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/cross-first-launch",
+    "reportPath": "/home/liran/src/enboxorg/mobile/.factory/validation/onboarding-ux/user-testing/flows/cross-first-launch.json"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "LS",
+    "Execute",
+    "python3",
+    "rg",
+    "bun run test"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-CROSS-001",
+      "title": "First-launch happy path reaches Main with agent + authManager and correct session flags",
+      "status": "pass",
+      "reason": "The focused Jest flow suite passed, and the saved line scan shows the pristine route matrix advancing Welcome → BiometricSetup → RecoveryPhrase → Main while generateAndStoreSecret fires once, the recovery phrase is shown, and the agent store finishes with non-null agent and authManager state.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-jest.log",
+          "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-test-lines.log"
+        ],
+        "commands": [
+          "bun run test -- src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx",
+          "rg -n -e 'VAL-CROSS-001' -e 'Welcome → Setup → RecoveryPhrase → Main with correct session \\+ agent flags' -e 'generateAndStoreSecret' -e 'getInitialRoute' -e 'RecoveryPhrase' -e 'VAL-CROSS-002 \\+ VAL-CROSS-003' -e 'restored agent after lock/unlock preserves the first-launch DID and new identities' -e 'createIdentity\\(' -e 'identity\\.create' -e 'identity\\.list' -e 'VAL-CROSS-010' -e 'AuthManager\\.create' -e \"localDwnStrategy: 'off'\" -e 'password' src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx"
+        ],
+        "testNames": [
+          "Welcome → Setup → RecoveryPhrase → Main with correct session + agent flags"
+        ],
+        "evidenceLines": [
+          "src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx:409-554",
+          "src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx:466-467",
+          "src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx:490-526"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "title": "Subsequent-launch unlock preserves DID deterministically",
+      "status": "pass",
+      "reason": "The same Jest flow suite passed its relaunch scenario, and the saved evidence lines show the post-shutdown route matrix selecting BiometricUnlock, the biometric getSecret path running on unlock, and the restored agentDid matching the first-launch DID across repeated lock/unlock cycles.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-jest.log",
+          "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-test-lines.log"
+        ],
+        "commands": [
+          "bun run test -- src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx",
+          "rg -n -e 'VAL-CROSS-001' -e 'Welcome → Setup → RecoveryPhrase → Main with correct session \\+ agent flags' -e 'generateAndStoreSecret' -e 'getInitialRoute' -e 'RecoveryPhrase' -e 'VAL-CROSS-002 \\+ VAL-CROSS-003' -e 'restored agent after lock/unlock preserves the first-launch DID and new identities' -e 'createIdentity\\(' -e 'identity\\.create' -e 'identity\\.list' -e 'VAL-CROSS-010' -e 'AuthManager\\.create' -e \"localDwnStrategy: 'off'\" -e 'password' src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx"
+        ],
+        "testNames": [
+          "restored agent after lock/unlock preserves the first-launch DID and new identities"
+        ],
+        "evidenceLines": [
+          "src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx:563-646",
+          "src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx:656-663"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-003",
+      "title": "Identity create/list works after unlock with real EnboxUserAgent.identity surface",
+      "status": "pass",
+      "reason": "The relaunch Jest flow also verified post-unlock identity operations: createIdentity('Work') called the mocked agent.identity.create surface, identity.list returned the created DID, and the created identity remained present after an additional lock/unlock cycle.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-jest.log",
+          "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-test-lines.log"
+        ],
+        "commands": [
+          "bun run test -- src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx",
+          "rg -n -e 'VAL-CROSS-001' -e 'Welcome → Setup → RecoveryPhrase → Main with correct session \\+ agent flags' -e 'generateAndStoreSecret' -e 'getInitialRoute' -e 'RecoveryPhrase' -e 'VAL-CROSS-002 \\+ VAL-CROSS-003' -e 'restored agent after lock/unlock preserves the first-launch DID and new identities' -e 'createIdentity\\(' -e 'identity\\.create' -e 'identity\\.list' -e 'VAL-CROSS-010' -e 'AuthManager\\.create' -e \"localDwnStrategy: 'off'\" -e 'password' src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx"
+        ],
+        "testNames": [
+          "restored agent after lock/unlock preserves the first-launch DID and new identities"
+        ],
+        "evidenceLines": [
+          "src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx:582-654",
+          "src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx:656-663"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-010",
+      "title": "@enbox/auth AuthManager wallet-connect boundary is unchanged by the refactor",
+      "status": "pass",
+      "reason": "The focused Jest flow proved AuthManager.create still receives storage with localDwnStrategy 'off' and that neither agent.initialize nor any started agent.start call receives a password argument, while the saved boundary scan confirms walletConnectStore still calls getConnectRequest, prepareProtocol, and submitConnectResponse with the unchanged signature chain.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-jest.log",
+          "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-test-lines.log",
+          "onboarding-ux/cross-first-launch/val-cross-010-boundary-lines.log"
+        ],
+        "commands": [
+          "bun run test -- src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx",
+          "rg -n -e 'VAL-CROSS-001' -e 'Welcome → Setup → RecoveryPhrase → Main with correct session \\+ agent flags' -e 'generateAndStoreSecret' -e 'getInitialRoute' -e 'RecoveryPhrase' -e 'VAL-CROSS-002 \\+ VAL-CROSS-003' -e 'restored agent after lock/unlock preserves the first-launch DID and new identities' -e 'createIdentity\\(' -e 'identity\\.create' -e 'identity\\.list' -e 'VAL-CROSS-010' -e 'AuthManager\\.create' -e \"localDwnStrategy: 'off'\" -e 'password' src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx",
+          "rg -n -e 'AuthManager\\.create' -e \"localDwnStrategy: 'off'\" -e 'EnboxConnectProtocol\\.getConnectRequest' -e 'prepareProtocol\\(' -e 'EnboxConnectProtocol\\.submitConnectResponse' src/lib/enbox/agent-init.ts src/lib/enbox/wallet-connect-store.ts src/lib/enbox/prepare-protocol.ts"
+        ],
+        "testNames": [
+          "Welcome → Setup → RecoveryPhrase → Main with correct session + agent flags",
+          "restored agent after lock/unlock preserves the first-launch DID and new identities"
+        ],
+        "evidenceLines": [
+          "src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx:528-553",
+          "src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx:665-680",
+          "src/lib/enbox/agent-init.ts:72-88",
+          "src/lib/enbox/wallet-connect-store.ts:63-90",
+          "src/lib/enbox/prepare-protocol.ts:61"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "bun run test -- src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the assigned cross-area Jest suite passed both tests covering first launch, relaunch unlock determinism, identity create/list persistence, and AuthManager password-boundary expectations.",
+      "evidence": [
+        "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-jest.log"
+      ]
+    },
+    {
+      "command": "rg -n -e 'VAL-CROSS-001' -e 'Welcome → Setup → RecoveryPhrase → Main with correct session \\+ agent flags' -e 'generateAndStoreSecret' -e 'getInitialRoute' -e 'RecoveryPhrase' -e 'VAL-CROSS-002 \\+ VAL-CROSS-003' -e 'restored agent after lock/unlock preserves the first-launch DID and new identities' -e 'createIdentity\\(' -e 'identity\\.create' -e 'identity\\.list' -e 'VAL-CROSS-010' -e 'AuthManager\\.create' -e \"localDwnStrategy: 'off'\" -e 'password' src/__tests__/cross-area/first-launch-and-unlock-flow.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; the saved test-file line scan captured the concrete first-launch, unlock determinism, identity create/list, and no-password/AuthManager expectations used by the assigned assertions.",
+      "evidence": [
+        "onboarding-ux/cross-first-launch/val-cross-001-002-003-010-test-lines.log"
+      ]
+    },
+    {
+      "command": "rg -n -e 'AuthManager\\.create' -e \"localDwnStrategy: 'off'\" -e 'EnboxConnectProtocol\\.getConnectRequest' -e 'prepareProtocol\\(' -e 'EnboxConnectProtocol\\.submitConnectResponse' src/lib/enbox/agent-init.ts src/lib/enbox/wallet-connect-store.ts src/lib/enbox/prepare-protocol.ts",
+      "exitCode": 0,
+      "observation": "PASS; the boundary source scan confirmed the unchanged AuthManager localDwnStrategy wiring and wallet-connect getConnectRequest → prepareProtocol → submitConnectResponse call chain.",
+      "evidence": [
+        "onboarding-ux/cross-first-launch/val-cross-010-boundary-lines.log"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 4 cross-area first-launch assertions on the jest-local surface: 4 passed, 0 failed, 0 blocked. The assigned Jest suite passed 2/2 tests, and the saved evidence logs capture the route progression, unlock determinism, identity persistence, and unchanged AuthManager/wallet-connect boundary."
+}

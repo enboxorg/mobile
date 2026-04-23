@@ -1,0 +1,154 @@
+{
+  "groupId": "pin-removal",
+  "milestone": "onboarding-ux",
+  "testedAt": "2026-04-23T00:51:02.222545+00:00",
+  "surface": "jest-local",
+  "assignedAssertions": [
+    "VAL-UX-001",
+    "VAL-UX-002",
+    "VAL-UX-003",
+    "VAL-UX-004",
+    "VAL-UX-005"
+  ],
+  "isolation": {
+    "repoRoot": "/home/liran/src/enboxorg/mobile",
+    "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+    "evidenceDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal",
+    "reportPath": "/home/liran/src/enboxorg/mobile/.factory/validation/onboarding-ux/user-testing/flows/pin-removal.json"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "LS",
+    "Execute",
+    "python3",
+    "rg",
+    "bun run test"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-UX-001",
+      "title": "PIN module files are deleted",
+      "status": "pass",
+      "reason": "All eight required PIN-era screen and auth helper files are absent from the repository.",
+      "evidence": {
+        "logs": [
+          "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-001-filesystem-check.log"
+        ],
+        "commands": [
+          "python3 inline filesystem absence check for the eight VAL-UX-001 paths"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-002",
+      "title": "No PIN symbols remain referenced under src/",
+      "status": "fail",
+      "reason": "The required src/ token sweep still finds PIN-era strings inside src/__tests__/cross-area/no-leakage-flow.test.tsx, including hasPinSet, failedAttempts, lockedUntil, lockoutCycle, and a pin-hash leak-scan regex.",
+      "evidence": {
+        "logs": [
+          "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-002-src-token-scan.log"
+        ],
+        "commands": [
+          "rg -n --hidden -e 'pin-hash' -e 'pin-format' -e 'MAX_UNLOCK_ATTEMPTS' -e 'LOCKOUT_SCHEDULE_MS' -e '\\bcreatePin\\b' -e '\\bhasPinSet\\b' -e '\\bhashPin\\b' -e '\\bverifyPin\\b' -e 'isValidPinFormat' -e '\\bPIN_LENGTH\\b' -e 'PIN_HASH_KEY' -e '\\blockedUntil\\b' -e '\\blockoutCycle\\b' -e '\\bfailedAttempts\\b' src/"
+        ]
+      },
+      "issues": "Contract expected rg exit code 1 (no matches), but the scan returned matches in src/__tests__/cross-area/no-leakage-flow.test.tsx at lines 342, 344, 345, 346, and 676."
+    },
+    {
+      "id": "VAL-UX-003",
+      "title": "Auto-lock hook no longer depends on PIN timeout constant",
+      "status": "pass",
+      "reason": "src/hooks/use-auto-lock.ts contains no AUTO_LOCK_TIMEOUT_MS or @/constants/auth references.",
+      "evidence": {
+        "logs": [
+          "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-003-auto-lock-scan.log"
+        ],
+        "commands": [
+          "rg -n 'AUTO_LOCK_TIMEOUT_MS|@/constants/auth' src/hooks/use-auto-lock.ts"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-004",
+      "title": "PIN tests are removed from the Jest run",
+      "status": "fail",
+      "reason": "The contract-specified listTests grep still matches because Jest lists src/features/auth/screens/biometric-unlock-screen.test.tsx, which contains the substring unlock-screen.",
+      "evidence": {
+        "logs": [
+          "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-004-list-tests.log"
+        ],
+        "commands": [
+          "bun run test -- --listTests 2>&1 | rg -i 'pin-hash|pin-format|create-pin-screen|unlock-screen'"
+        ]
+      },
+      "issues": "Contract expected no grep matches, but the list-tests output includes src/features/auth/screens/biometric-unlock-screen.test.tsx."
+    },
+    {
+      "id": "VAL-UX-005",
+      "title": "Full Jest suite is green after PIN removal",
+      "status": "pass",
+      "reason": "The full Jest suite completed successfully with 38 passing suites and 360 passing tests.",
+      "evidence": {
+        "logs": [
+          "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-005-full-jest.log"
+        ],
+        "commands": [
+          "bun run test --ci --reporters=default"
+        ],
+        "summaryLines": [
+          "Test Suites: 38 passed, 38 total",
+          "Tests:       360 passed, 360 total"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "python3 inline filesystem absence check for the eight VAL-UX-001 paths",
+      "exitCode": 0,
+      "observation": "PASS; all eight required PIN-era files were absent.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-001-filesystem-check.log"
+      ]
+    },
+    {
+      "command": "rg -n --hidden -e 'pin-hash' -e 'pin-format' -e 'MAX_UNLOCK_ATTEMPTS' -e 'LOCKOUT_SCHEDULE_MS' -e '\\bcreatePin\\b' -e '\\bhasPinSet\\b' -e '\\bhashPin\\b' -e '\\bverifyPin\\b' -e 'isValidPinFormat' -e '\\bPIN_LENGTH\\b' -e 'PIN_HASH_KEY' -e '\\blockedUntil\\b' -e '\\blockoutCycle\\b' -e '\\bfailedAttempts\\b' src/",
+      "exitCode": 0,
+      "observation": "FAIL; PIN-era tokens were still found in src/__tests__/cross-area/no-leakage-flow.test.tsx.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-002-src-token-scan.log"
+      ]
+    },
+    {
+      "command": "rg -n 'AUTO_LOCK_TIMEOUT_MS|@/constants/auth' src/hooks/use-auto-lock.ts",
+      "exitCode": 1,
+      "observation": "PASS; no forbidden auto-lock import or timeout token was found.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-003-auto-lock-scan.log"
+      ]
+    },
+    {
+      "command": "bun run test -- --listTests 2>&1 | rg -i 'pin-hash|pin-format|create-pin-screen|unlock-screen'",
+      "exitCode": 0,
+      "observation": "FAIL; the grep matched src/features/auth/screens/biometric-unlock-screen.test.tsx from the Jest listTests output.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-004-list-tests.log"
+      ]
+    },
+    {
+      "command": "bun run test --ci --reporters=default",
+      "exitCode": 0,
+      "observation": "PASS; full suite green with 38/38 suites and 360/360 tests passing.",
+      "evidence": [
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/pin-removal/val-ux-005-full-jest.log"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 5 assertions on the jest-local surface: 3 passed, 2 failed, 0 blocked. Full Jest is green, but VAL-UX-002 still finds PIN-era tokens under src/ and VAL-UX-004 still matches biometric-unlock-screen.test.tsx under the contract-specified listTests grep."
+}

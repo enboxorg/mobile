@@ -1,0 +1,267 @@
+{
+  "groupId": "session-auto-lock",
+  "milestone": "onboarding-ux",
+  "testedAt": "2026-04-23T00:56:08.905404+00:00",
+  "surface": "jest-local",
+  "assignedAssertions": [
+    "VAL-UX-027",
+    "VAL-UX-035",
+    "VAL-UX-040",
+    "VAL-UX-041",
+    "VAL-UX-042",
+    "VAL-VAULT-020",
+    "VAL-VAULT-021"
+  ],
+  "isolation": {
+    "repoRoot": "/home/liran/src/enboxorg/mobile",
+    "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+    "evidenceDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/onboarding-ux/session-auto-lock",
+    "reportPath": "/home/liran/src/enboxorg/mobile/.factory/validation/onboarding-ux/user-testing/flows/session-auto-lock.json"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "LS",
+    "Execute",
+    "python3",
+    "rg",
+    "bun run test",
+    "bun run typecheck",
+    "bun run lint"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-UX-027",
+      "title": "SessionStore \u2014 biometricStatus state machine",
+      "status": "pass",
+      "reason": "Focused session-store Jest coverage passed for hydrate, hydrateRestored, reset, and biometricStatus transitions; the legacy PIN token scan on session-store.ts returned no matches.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/session-auto-lock/val-ux-027-session-store-test.log",
+          "onboarding-ux/session-auto-lock/val-ux-027-session-store-biometric-status-test.log",
+          "onboarding-ux/session-auto-lock/val-ux-027-session-store-pin-token-scan.log"
+        ],
+        "commands": [
+          "bun run test -- src/features/session/session-store.test.ts",
+          "bun run test -- src/features/session/__tests__/session-store.biometric-status.test.ts",
+          "rg -n '\\b(hasPinSet|failedAttempts|lockedUntil|lockoutCycle|createPin)\\b' src/features/session/session-store.ts"
+        ],
+        "summaryLines": [
+          "session-store.test.ts: 13 passed",
+          "session-store.biometric-status.test.ts: 7 passed",
+          "Legacy PIN token scan exit code: 1 (no matches)"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-035",
+      "title": "useAutoLock \u2014 backgrounding locks AND tears down the agent",
+      "status": "pass",
+      "reason": "The focused useAutoLock Jest suite passed all 9 tests, covering exactly-once lock+teardown on active\u2192background/inactive, no double teardown on inactive\u2192background, skip-when-locked behavior, and the static AUTO_LOCK_TIMEOUT_MS absence check.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/session-auto-lock/val-ux-035-val-vault-020-use-auto-lock-test.log"
+        ],
+        "commands": [
+          "bun run test -- src/hooks/__tests__/use-auto-lock.test.tsx"
+        ],
+        "summaryLines": [
+          "use-auto-lock.test.tsx: 9 passed"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-040",
+      "title": "No legacy PIN UI strings remain in new auth screens",
+      "status": "fail",
+      "reason": "The contract rg scan still finds PIN/passcode strings under src/features/auth/screens/, including source comments and test assertions in biometric-setup, biometric-unavailable, and biometric-unlock files.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/session-auto-lock/val-ux-040-auth-screen-pin-copy-scan.log"
+        ],
+        "commands": [
+          "rg -n -w -i 'pin|passcode|digit code|4-digit' src/features/auth/screens/"
+        ]
+      },
+      "issues": "Matches include src/features/auth/screens/biometric-setup-screen.tsx:70, biometric-unavailable-screen.tsx:11, biometric-unlock-screen.tsx:14 and multiple *.test.tsx assertions referencing PIN/passcode fallback text."
+    },
+    {
+      "id": "VAL-UX-041",
+      "title": "TypeScript + lint clean after migration",
+      "status": "pass",
+      "reason": "Both authoritative repo validators exited 0: bun run typecheck completed without TypeScript errors and bun run lint completed without lint errors under the repo's configured rules.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/session-auto-lock/val-ux-041-typecheck.log",
+          "onboarding-ux/session-auto-lock/val-ux-041-lint.log"
+        ],
+        "commands": [
+          "bun run typecheck",
+          "bun run lint"
+        ],
+        "summaryLines": [
+          "typecheck exit code: 0",
+          "lint exit code: 0 (84 warnings, 0 errors)"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UX-042",
+      "title": "No orphaned exports from constants/auth",
+      "status": "fail",
+      "reason": "No src/ imports from '@/constants/auth' remain, but the removed-constants token scan still matches AUTO_LOCK_TIMEOUT_MS in src/constants/auth.ts and in src/hooks/__tests__/use-auto-lock.test.tsx.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/session-auto-lock/val-ux-042-constants-auth-import-scan.log",
+          "onboarding-ux/session-auto-lock/val-ux-042-removed-constants-token-scan.log"
+        ],
+        "commands": [
+          "rg -n \"from '@/constants/auth'\" src/",
+          "rg -n 'AUTO_LOCK_TIMEOUT_MS|PIN_LENGTH|MAX_UNLOCK_ATTEMPTS|LOCKOUT_SCHEDULE_MS' src/"
+        ]
+      },
+      "issues": "rg found AUTO_LOCK_TIMEOUT_MS at src/constants/auth.ts:2 plus references in the static contract test at src/hooks/__tests__/use-auto-lock.test.tsx:20, :204, and :215."
+    },
+    {
+      "id": "VAL-VAULT-020",
+      "title": "useAutoLock tears down the agent on background and inactive",
+      "status": "pass",
+      "reason": "The focused useAutoLock Jest suite passed the teardown coverage for both background and inactive AppState changes, and verified teardown is skipped when the session is already locked.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/session-auto-lock/val-ux-035-val-vault-020-use-auto-lock-test.log"
+        ],
+        "commands": [
+          "bun run test -- src/hooks/__tests__/use-auto-lock.test.tsx"
+        ],
+        "summaryLines": [
+          "use-auto-lock.test.tsx: 9 passed"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-VAULT-021",
+      "title": "After auto-lock teardown, next unlock requires a fresh biometric prompt",
+      "status": "pass",
+      "reason": "The supporting cross-area auto-lock flow test passed: backgrounding dropped the agent and locked the session, foreground did not auto-call NativeBiometricVault.getSecret, and the explicit unlock path called biometrics again.",
+      "evidence": {
+        "logs": [
+          "onboarding-ux/session-auto-lock/val-vault-021-auto-lock-flow-test-rerun.log"
+        ],
+        "commands": [
+          "bun run test -- src/__tests__/cross-area/auto-lock-flow.test.tsx"
+        ],
+        "summaryLines": [
+          "auto-lock-flow.test.tsx: 2 passed"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "bun run test -- src/features/session/session-store.test.ts",
+      "exitCode": 0,
+      "observation": "PASS; session-store core coverage passed with 13/13 tests.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-ux-027-session-store-test.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/features/session/__tests__/session-store.biometric-status.test.ts",
+      "exitCode": 0,
+      "observation": "PASS; biometricStatus hydration matrix coverage passed with 7/7 tests.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-ux-027-session-store-biometric-status-test.log"
+      ]
+    },
+    {
+      "command": "rg -n '\\b(hasPinSet|failedAttempts|lockedUntil|lockoutCycle|createPin)\\b' src/features/session/session-store.ts",
+      "exitCode": 1,
+      "observation": "PASS; the session store no longer contains the listed PIN-era fields/actions.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-ux-027-session-store-pin-token-scan.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/hooks/__tests__/use-auto-lock.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; useAutoLock hook coverage passed with 9/9 tests.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-ux-035-val-vault-020-use-auto-lock-test.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/__tests__/cross-area/auto-lock-flow.test.tsx -t \"background drops agent + locks session; foreground does NOT auto-prompt biometrics\"",
+      "exitCode": 0,
+      "observation": "FRICTION; Jest reported 1 skipped suite / 2 skipped tests for the exact -t filter, so this run did not provide usable VAL-VAULT-021 evidence.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-vault-021-auto-lock-flow-test.log"
+      ]
+    },
+    {
+      "command": "bun run test -- src/__tests__/cross-area/auto-lock-flow.test.tsx",
+      "exitCode": 0,
+      "observation": "PASS; supporting auto-lock integration coverage passed with 2/2 tests.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-vault-021-auto-lock-flow-test-rerun.log"
+      ]
+    },
+    {
+      "command": "rg -n -w -i 'pin|passcode|digit code|4-digit' src/features/auth/screens/",
+      "exitCode": 0,
+      "observation": "FAIL; PIN/passcode strings are still present under src/features/auth/screens/.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-ux-040-auth-screen-pin-copy-scan.log"
+      ]
+    },
+    {
+      "command": "bun run typecheck",
+      "exitCode": 0,
+      "observation": "PASS; TypeScript completed with no errors.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-ux-041-typecheck.log"
+      ]
+    },
+    {
+      "command": "bun run lint",
+      "exitCode": 0,
+      "observation": "PASS; ESLint exited 0, reporting warnings but no errors.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-ux-041-lint.log"
+      ]
+    },
+    {
+      "command": "rg -n \"from '@/constants/auth'\" src/",
+      "exitCode": 1,
+      "observation": "PASS; no current src/ import from '@/constants/auth' was found.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-ux-042-constants-auth-import-scan.log"
+      ]
+    },
+    {
+      "command": "rg -n 'AUTO_LOCK_TIMEOUT_MS|PIN_LENGTH|MAX_UNLOCK_ATTEMPTS|LOCKOUT_SCHEDULE_MS' src/",
+      "exitCode": 0,
+      "observation": "FAIL; AUTO_LOCK_TIMEOUT_MS still exists under src/.",
+      "evidence": [
+        "onboarding-ux/session-auto-lock/val-ux-042-removed-constants-token-scan.log"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "The exact Jest -t filter for the auto-lock flow unexpectedly produced a fully skipped run even though the named test exists in src/__tests__/cross-area/auto-lock-flow.test.tsx.",
+      "resolved": true,
+      "resolution": "Reran the minimum supporting file without -t and used the passing full-file output as VAL-VAULT-021 evidence.",
+      "affectedAssertions": [
+        "VAL-VAULT-021"
+      ]
+    }
+  ],
+  "blockers": [],
+  "summary": "Tested 7 assertions on the jest-local surface: 5 passed, 2 failed, 0 blocked. VAL-UX-040 fails because PIN/passcode strings still appear under src/features/auth/screens/, and VAL-UX-042 fails because AUTO_LOCK_TIMEOUT_MS remains in src/constants/auth.ts and a hook test. Focused session-store, useAutoLock, cross-area auto-lock, typecheck, and lint commands otherwise passed."
+}
