@@ -1,0 +1,49 @@
+{
+  "milestone": "onboarding-ux",
+  "round": 3,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "bun run test",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "bun run typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "bun run lint",
+      "exitCode": 0,
+      "warnings": 84
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "failedFeatures": [
+      "fix-restore-session-persistence-durability"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "fix-restore-session-persistence-durability",
+      "severity": "blocking",
+      "description": "The durability fix now awaits the persistence helper, but `persistSession()` still catches and swallows `setSecureItem(SESSION_KEY, ...)` failures, so `hydrateRestored()` can resolve and `RecoveryRestoreScreen` can navigate away even when the restored `session:state` snapshot never committed durably."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "mobile-feature-worker",
+      "suggestion": "Enforce the skill honesty gate from transcript evidence: do not allow `skillFeedback.followedProcedure=true` unless the saved transcript skeleton shows the required `.factory/library` reads and a red-first test cycle before implementation edits.",
+      "evidence": "The round-3 fix review for session `c30c7ef5-5df7-4782-a6c6-b043368ff7b5` repeated the same issue seen in earlier onboarding-ux fixes: the saved transcript skeleton showed source/test-file reads plus a green targeted test run before edits, but no reads of `.factory/library/architecture.md`, `.factory/library/environment.md`, or `.factory/library/user-testing.md`, and no failing test run before the implementation.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/onboarding-ux/scrutiny/synthesis.round-2.json"
+}
