@@ -1,13 +1,13 @@
 {
   "milestone": "onboarding-ux",
-  "round": 4,
-  "status": "fail",
+  "round": 5,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
       "command": "bun run test",
       "exitCode": 0,
-      "observation": "Jest ran 38 suites / 360 tests and all passed. Output still included the expected test-exercised agent-store/agent-init console logging and the wallet-connect error-path console.error."
+      "observation": "Jest ran 38 suites / 360 tests and all passed. Output still included the expected test-harness console logging from agent-store/agent-init plus the wallet-connect error-path console.error."
     },
     "typecheck": {
       "passed": true,
@@ -20,33 +20,31 @@
       "command": "bun run lint",
       "exitCode": 0,
       "warnings": 84,
-      "observation": "ESLint exited 0 but reported 84 warnings, primarily pre-existing no-bitwise, no-void, and eslint-comments/no-unused-disable findings across tests and a few screens/stores."
+      "observation": "ESLint exited 0 with 84 warnings, primarily pre-existing no-bitwise, no-void, and eslint-comments/no-unused-disable warnings across tests and a few screens/stores."
     }
   },
   "reviewsSummary": {
     "total": 1,
-    "passed": 0,
-    "failed": 1,
-    "failedFeatures": [
-      "fix-restore-session-persistence-propagate-errors"
-    ]
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "fix-restore-session-persistence-propagate-errors",
-      "severity": "blocking",
-      "description": "`hydrateRestored()` still mutates the route-driving session flags to the ready state before awaiting the durable `SESSION_KEY` write, while AppNavigator derives gates declaratively from those flags. A SecureStorage write failure can therefore still move the app off RecoveryRestore before the rejection path can keep the user in place."
-    }
-  ],
+  "blockingIssues": [],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
-      "target": "AGENTS.md",
-      "suggestion": "Add guidance that onboarding/restore navigation is declarative from `session-store` flags, so validators and workers must verify gate-changing flows through `AppNavigator` or integration coverage rather than relying only on screen-level callback assertions like `onRestored` or `navigation.reset`.",
-      "evidence": "The round-4 review for `fix-restore-session-persistence-propagate-errors` found that even after the screen skipped `onRestored()` on persistence failure, `hydrateRestored()` still flipped `biometricStatus` / `hasCompletedOnboarding` / `hasIdentity` / `isLocked`, and `AppNavigator` immediately re-routed from those fields (`src/navigation/app-navigator.tsx`, `src/features/session/get-initial-route.ts`). The isolated screen rejection test passed while the real declarative navigation bug remained.",
+      "target": "mobile-feature-worker skill",
+      "suggestion": "Require transcript-visible red\u2192green evidence before workers mark skill procedure compliance as fully followed, or require them to record a deviation when that evidence is absent.",
+      "evidence": "The review for fix-restore-session-persistence-persist-before-flip notes that the worker handoff claimed followedProcedure=true, but the transcript skeleton only shows a green scoped test run before edits and later green reruns, not a visible red-first step for the added session-store cases.",
+      "isSystemic": false
+    },
+    {
+      "target": "validation-contract.md",
+      "suggestion": "Update RecoveryRestore success evidence (VAL-UX-024) to validate declarative routing from session-store flags and durability ordering, rather than imperative navigation.reset/navigation.replace calls.",
+      "evidence": "AGENTS.md now documents that AppNavigator gates declaratively from biometricStatus/hasCompletedOnboarding/hasIdentity/isLocked, but validation-contract.md still expects navigation.reset/replace to Main even though handleRestored is a no-op and routing now follows store state.",
       "isSystemic": false
     }
   ],
   "rejectedObservations": [],
-  "previousRound": ".factory/validation/onboarding-ux/scrutiny/synthesis.round-3.json"
+  "previousRound": ".factory/validation/onboarding-ux/scrutiny/synthesis.round-4.json"
 }

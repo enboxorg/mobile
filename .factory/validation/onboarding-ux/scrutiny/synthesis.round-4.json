@@ -1,0 +1,52 @@
+{
+  "milestone": "onboarding-ux",
+  "round": 4,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "bun run test",
+      "exitCode": 0,
+      "observation": "Jest ran 38 suites / 360 tests and all passed. Output still included the expected test-exercised agent-store/agent-init console logging and the wallet-connect error-path console.error."
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "bun run typecheck",
+      "exitCode": 0,
+      "observation": "tsc --noEmit completed successfully with no TypeScript diagnostics."
+    },
+    "lint": {
+      "passed": true,
+      "command": "bun run lint",
+      "exitCode": 0,
+      "warnings": 84,
+      "observation": "ESLint exited 0 but reported 84 warnings, primarily pre-existing no-bitwise, no-void, and eslint-comments/no-unused-disable findings across tests and a few screens/stores."
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "failedFeatures": [
+      "fix-restore-session-persistence-propagate-errors"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "fix-restore-session-persistence-propagate-errors",
+      "severity": "blocking",
+      "description": "`hydrateRestored()` still mutates the route-driving session flags to the ready state before awaiting the durable `SESSION_KEY` write, while AppNavigator derives gates declaratively from those flags. A SecureStorage write failure can therefore still move the app off RecoveryRestore before the rejection path can keep the user in place."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add guidance that onboarding/restore navigation is declarative from `session-store` flags, so validators and workers must verify gate-changing flows through `AppNavigator` or integration coverage rather than relying only on screen-level callback assertions like `onRestored` or `navigation.reset`.",
+      "evidence": "The round-4 review for `fix-restore-session-persistence-propagate-errors` found that even after the screen skipped `onRestored()` on persistence failure, `hydrateRestored()` still flipped `biometricStatus` / `hasCompletedOnboarding` / `hasIdentity` / `isLocked`, and `AppNavigator` immediately re-routed from those fields (`src/navigation/app-navigator.tsx`, `src/features/session/get-initial-route.ts`). The isolated screen rejection test passed while the real declarative navigation bug remained.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/onboarding-ux/scrutiny/synthesis.round-3.json"
+}
