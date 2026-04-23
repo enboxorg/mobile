@@ -1,0 +1,33 @@
+{
+  "featureId": "misc-vault-determinism-snapshot",
+  "reviewedAt": "2026-04-23T03:04:13Z",
+  "commitId": "8b50a0c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature adds a useful mnemonic snapshot and clarifies the Jest ESM allowlist, but the new determinism guard does not actually verify BiometricVault's full three-key derivation recipe, so the main regression it was meant to catch can still slip through.",
+    "issues": [
+      {
+        "file": "src/lib/enbox/__tests__/biometric-vault.determinism.test.ts",
+        "line": 255,
+        "severity": "blocking",
+        "description": "The '3 derived public keys' snapshot is computed from hard-coded test paths (`IDENTITY_PATHS` at lines 205-208) and never compares those keys to what `BiometricVault` / `defaultDidFactory` actually derives. The end-to-end DID assertion also uses a mock `DidDht.create` that only looks at `keys[0]` (lines 78-87), while production code derives three keys in `src/lib/enbox/biometric-vault.ts:212-226`. A regression in the signing/encryption derivation paths or in non-first key ordering would therefore keep this new guard green, which means the feature does not fully satisfy its stated goal of loudly catching derivation drift."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The mission shared state is missing guidance about Droid-Shield falsely flagging `privateKeyBytes` in jest.mock factories. The worker hit repeated commit failures and had to use a dynamic property-name workaround (`ARG_KEY`) to get the test committed; that quirk is likely to recur in future vault/crypto tests.",
+      "evidence": "Handoff discoveredIssues at /home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-23T02-53-51-831Z__misc-vault-determinism-snapshot__0db8ccc2-8c2f-4c07-850b-79032e94feb2.json lines 59-61 documents the false positive and the `ARG_KEY` workaround."
+    },
+    {
+      "area": "skills",
+      "observation": "`mobile-feature-worker`'s honesty gate says vault-related work must read `.factory/library/architecture.md` and mark `followedProcedure: false` if skipped, but this session's transcript shows mission/validation-contract/AGENTS/environment reads only while the handoff still reports `followedProcedure: true`. Either the skill needs stronger enforcement/examples, or validators should expect this gap.",
+      "evidence": "Skill requirement: /home/liran/src/enboxorg/mobile/.factory/skills/mobile-feature-worker/SKILL.md lines 20-32. Session 0db8ccc2-8c2f-4c07-850b-79032e94feb2 transcript excerpt in /home/liran/.factory/artifacts/tool-outputs/grep_tool_cli-call_BhdMaCSMyuvsnjudtPdRiCLf-13439999.log shows reads of mission.md, validation-contract.md, AGENTS.md, and .factory/library/environment.md but no architecture.md before implementation; the handoff JSON records `skillFeedback.followedProcedure: true`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The Jest comment change is fine, but the new determinism snapshot only pins independently-derived fixture values plus a DID mock that depends on the first key, so it can miss real BiometricVault drift in the second/third derived keys."
+}

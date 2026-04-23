@@ -1,0 +1,26 @@
+{
+  "featureId": "misc-lint-warnings-cleanup",
+  "reviewedAt": "2026-04-23T03:05:39+00:00",
+  "commitId": "5d461f341d28c877c93c90a13763e62b7862e8ab",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the worker transcript, handoff, and commit 5d461f3. The code changes are limited to scoped lint suppressions/comments, stale-disable cleanup, and a regex-equivalent `{4}` rewrite in the camera-kit patch test; I did not find any actionable correctness, security, or maintainability defects in the implementation itself.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "The shared lint command does not encode the mission's zero-warning expectation, so `bun run lint` can still exit 0 while warnings remain. That forces workers/validators to add ad hoc output parsing whenever a feature depends on 'no warnings'.",
+      "evidence": "package.json:10 defines `lint` as `eslint .`, and .factory/services.yaml:10 maps `lint` to `bun run lint`. The misc-lint-warnings-cleanup handoff records that the pre-fix baseline still had 84 warnings while `bun run lint` was the command being used."
+    },
+    {
+      "area": "conventions",
+      "observation": "This feature's verification snippet is itself incorrect for the success case: `rg -c 'warning'` returns no output and exit code 1 when there are zero matches, so the prescribed pipeline fails even after lint is clean.",
+      "evidence": "features.json:1726-1728 defines `bun run lint 2>&1 | rg -c 'warning' | grep -x '0'`. In the reviewed transcript skeleton for session b266f6e5-9e76-4494-9d74-b7214684cb6a, that command fails immediately after a clean lint run, and the worker had to retry with `rg -c 'warning' || echo \"0 (no matches)\"`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The lint-cleanup commit achieved its goal without introducing substantive code changes, and I found no actionable implementation defects. I recorded two shared-state gaps around lint-command/verification-step robustness."
+}

@@ -1,0 +1,26 @@
+{
+  "featureId": "misc-vault-circular-import-cleanup",
+  "reviewedAt": "2026-04-23T03:05:14.818538Z",
+  "commitId": "5a1f999d6a75f965f2b53239de0a5c413c376e98",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The refactor cleanly moves the shared vault storage constants into a data-only leaf module, updates session-store and agent-store to consume that module, and removes the dynamic session-store require from agent-store.reset(). I did not find any blocking correctness, security, or maintainability defects in the committed code.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The mobile-feature-worker skill says workers may mark `skillFeedback.followedProcedure: true` only after writing failing tests first (or adding a committed artifact/parsing test for config-like work), but this session recorded only baseline/post-change `bun run verify` plus ad hoc `rg` checks and still reported `followedProcedure: true`.",
+      "evidence": "`.factory/skills/mobile-feature-worker/SKILL.md:26-32,73` requires red\u2192green proof; the transcript skeleton shows `bun run verify` before and after the change plus shell `rg` checks, with no targeted failing test run; the handoff file `.../handoffs/2026-04-23T03-00-36-553Z__misc-vault-circular-import-cleanup__d4a235a5-e749-49d9-8cf5-e6b11316578e.json` reports `tests.added=[]`, `tests.updated=[]`, and `skillFeedback.followedProcedure=true`."
+    },
+    {
+      "area": "conventions",
+      "observation": "The repo-level shared-state docs do not currently document the new `vault-constants.ts` leaf-module boundary or the reason session-store must avoid importing biometric-vault directly, so future workers could easily reintroduce the circular-import/Jest workaround that this feature removed.",
+      "evidence": "No matches for `vault-constants`, `circular import`, or `dynamic require` were found in mission `AGENTS.md` or `.factory/library/architecture.md`, while `src/lib/enbox/vault-constants.ts:1-18` now contains the rationale and guard rail for keeping that file import-free."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. Commit 5a1f999 successfully centralizes the shared vault constants in `src/lib/enbox/vault-constants.ts`, removes the duplicated wallet alias from `session-store.ts`, and replaces the dynamic session-store require in `agent-store.ts` with a normal static import. I found no blocking code defects; the only follow-up items are shared-state/process observations about documenting the new boundary and tightening skill adherence reporting."
+}

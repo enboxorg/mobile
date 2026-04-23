@@ -1,0 +1,33 @@
+{
+  "featureId": "misc-patch-injection-polish",
+  "reviewedAt": "2026-04-23T03:05:49+00:00",
+  "commitId": "fef23bca237903aad788f5112a78e8deb5639112",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The feature implements the two requested patch-injection polish items: missing-target observability was added to patchEnboxAgent(), and the new subprocess-backed e2e smoke imports the real patched @enbox/agent and verifies stub-vault injection through agent.initialize(). I found no blocking correctness or security defect in the reviewed diff. One non-blocking test-maintainability gap remains.",
+    "issues": [
+      {
+        "file": "src/lib/enbox/__tests__/enbox-agent-patch.test.ts",
+        "line": 284,
+        "severity": "non_blocking",
+        "description": "The new observability tests only assert on child-process stderr, not on console.warn itself. Because console.error() or direct process.stderr.write() would satisfy the same assertion, the suite does not fully lock in the feature contract's requested console.warn behavior."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The mobile-feature-worker skill's honesty gate is not being enforced consistently: this worker marked skillFeedback.followedProcedure=true even though the session record does not show the required .factory/library/environment.md / .factory/library/user-testing.md reads for an install/test flow, and the code edit to scripts/apply-patches.mjs happened before the new tests were added.",
+      "evidence": "mobile-feature-worker/SKILL.md lines 21-32 require reading environment.md for install/test flows, user-testing.md when tests assert user-facing flows, and marking followedProcedure=false when skipped; line 66 requires writing failing tests first. In session cd7b22ee-0c96-4c8f-84b8-26f855e1080c, the transcript shows Edit scripts/apply-patches.mjs before the later Edit src/lib/enbox/__tests__/enbox-agent-patch.test.ts / Create src/lib/enbox/__tests__/enbox-agent-patch.e2e.test.ts entries, and grep for environment.md / user-testing.md in that session returned no matches. The handoff still records followedProcedure=true with empty deviations (handoffs/2026-04-23T02-24-54-223Z__misc-patch-injection-polish__cd7b22ee-0c96-4c8f-84b8-26f855e1080c.json lines 73-74)."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The repo now has a concrete workaround for testing the real ESM-only @enbox/agent surface under Jest\u2014run a Node subprocess instead of importing it in-process unless the Jest ESM allowlist is expanded\u2014but that guidance only lives in the new test file comments, not in shared library or validator docs.",
+      "evidence": "src/lib/enbox/__tests__/enbox-agent-patch.e2e.test.ts lines 18-23 explain that in-process Jest import is impractical because @enbox/agent and its dependency chain are ESM and jest.config.js transformIgnorePatterns only allowlists ed25519-keygen (jest.config.js lines 14-38). .factory/library/user-testing.md mentions smoke scripts against patched @enbox/agent (line 93) but does not document the subprocess pattern or the Jest/ESM constraint."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass: the diff closes the prior non-blocking scrutiny follow-ups without introducing a blocking regression. Missing-target warnings and the real-package stub-vault smoke test are both present; only a small non-blocking test-specificity gap remains."
+}
