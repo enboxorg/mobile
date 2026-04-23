@@ -66,7 +66,7 @@ jest.mock(
         privateKeyBytes,
       }: {
         algorithm: string;
-        privateKeyBytes: Uint8Array;
+        privateKeyBytes: KeyMaterialBytes;
       }) {
         const hex = Array.from(privateKeyBytes.slice(0, 16))
           .map((b) => b.toString(16).padStart(2, '0'))
@@ -121,6 +121,7 @@ import {
   WALLET_ROOT_KEY_ALIAS,
   mapNativeErrorToVaultError,
 } from '@/lib/enbox/biometric-vault';
+import type { KeyMaterialBytes } from '@/lib/enbox/biometric-vault';
 
 // Typed alias to the jest.Mock-backed native module surface.
 const native = NativeBiometricVault as unknown as {

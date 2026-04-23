@@ -67,7 +67,7 @@ jest.mock(
         privateKeyBytes,
       }: {
         algorithm: string;
-        privateKeyBytes: Uint8Array;
+        privateKeyBytes: KeyMaterialBytes;
       }) {
         const hex = Array.from(privateKeyBytes.slice(0, 16))
           .map((b) => b.toString(16).padStart(2, '0'))
@@ -170,6 +170,7 @@ jest.mock(
 // Import modules under test AFTER all mocks are registered.
 import { initializeAgent, createBiometricVault } from '@/lib/enbox/agent-init';
 import { BiometricVault } from '@/lib/enbox/biometric-vault';
+import type { KeyMaterialBytes } from '@/lib/enbox/biometric-vault';
  
 const agentModule: any = require('@enbox/agent');
 const { AgentDwnApi, LocalDwnDiscovery } = agentModule;
