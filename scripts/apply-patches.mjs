@@ -84,6 +84,23 @@ function patchEnboxAgent() {
     },
   ];
 
+  // Observability pass: emit a clear warning for every targeted file that is
+  // absent. This makes upstream layout drift visible in postinstall output
+  // without failing the install (exit code stays 0). The ESM runtime file is
+  // also considered an observability target even though it is not rewritten
+  // (only read below as a diagnostic).
+  const observabilityTargets = [
+    ...targets.map((t) => t.path),
+    resolve(agentRoot, 'dist/esm/enbox-user-agent.js'),
+  ];
+  for (const path of observabilityTargets) {
+    if (!existsSync(path)) {
+      console.warn(
+        `[apply-patches] @enbox/agent target missing: ${path}; skipping (layout drift?)`,
+      );
+    }
+  }
+
   for (const { path, label } of targets) {
     if (!existsSync(path)) continue;
     const original = readFileSync(path, 'utf8');

@@ -22,7 +22,7 @@
  *      (b) the default path still produces an HdIdentityVault instance.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
@@ -51,6 +51,19 @@ const runScript = () => execFileSync('node', [SCRIPT], { cwd: ROOT, stdio: 'pipe
 
 const runScriptCapture = (): string =>
   execFileSync('node', [SCRIPT], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
+
+const runScriptCaptureAll = (): {
+  stdout: string;
+  stderr: string;
+  status: number | null;
+} => {
+  const result = spawnSync('node', [SCRIPT], { cwd: ROOT, encoding: 'utf8' });
+  return {
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    status: result.status,
+  };
+};
 
 describe('@enbox/agent vault-injection patch (filesystem)', () => {
   it('widens AgentParams.agentVault and EnboxUserAgent.vault to IdentityVault in dist/types', () => {
@@ -238,6 +251,77 @@ describe('postinstall patch logging (VAL-PATCH-001)', () => {
     runScript();
     const stdout = runScriptCapture();
     expect(stdout).not.toMatch(/\[postinstall\] Patched/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Missing-target observability (scrutiny follow-up, misc-patch-injection-polish)
+// ---------------------------------------------------------------------------
+//
+// The patch script now emits a clear `[apply-patches] @enbox/agent target
+// missing: <path>; skipping (layout drift?)` console.warn on stderr whenever
+// a targeted @enbox/agent file is absent, so upstream layout drift or a
+// production-only install is visible in postinstall output without failing
+// the install. The hot path — all targeted files present — must not emit
+// the warning for those present files.
+//
+// Note: `dist/types/enbox-user-agent.d.cts` is not shipped by
+// @enbox/agent@0.6.x, so the hot path may still emit exactly one warning
+// for that optional target. These tests therefore assert specifically on
+// the file that is being toggled (d.ts), not on the full absence of any
+// missing-target warning in stderr.
+describe('@enbox/agent missing-target observability (layout-drift warning)', () => {
+  it('emits a console.warn on stderr when a targeted @enbox/agent file is absent', () => {
+    // Stage a missing-target scenario: temporarily move the d.ts aside
+    // (it is normally present and patched). The script must warn and
+    // continue without throwing or rewriting anything.
+    const stash = DTS + '.test-missing-observability';
+    const backup = DTS + '.test-missing-observability-bak';
+    copyFileSync(DTS, backup);
+    renameSync(DTS, stash);
+    try {
+      expect(existsSync(DTS)).toBe(false);
+      const result = runScriptCaptureAll();
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain(
+        `[apply-patches] @enbox/agent target missing: ${DTS}; skipping (layout drift?)`,
+      );
+    } finally {
+      if (existsSync(stash)) {
+        renameSync(stash, DTS);
+      }
+      if (!existsSync(DTS) && existsSync(backup)) {
+        copyFileSync(backup, DTS);
+      }
+      if (existsSync(backup)) {
+        unlinkSync(backup);
+      }
+      // Ensure the file is fully patched for downstream tests.
+      runScript();
+    }
+  });
+
+  it('does NOT warn about a present+patched target on the idempotent hot path', () => {
+    // Guarantee every target is in the patched state (hot path).
+    runScript();
+    const result = runScriptCaptureAll();
+    expect(result.status).toBe(0);
+    // The specific "missing" warn for the d.ts (the primary widening
+    // target) must not fire when the file is present and already patched.
+    expect(result.stderr).not.toContain(
+      `[apply-patches] @enbox/agent target missing: ${DTS};`,
+    );
+    // The ESM and src/ts targets are also normally present on an install;
+    // their "missing" warns must likewise not appear on the hot path.
+    expect(result.stderr).not.toContain(
+      `[apply-patches] @enbox/agent target missing: ${ESM};`,
+    );
+    expect(result.stderr).not.toContain(
+      `[apply-patches] @enbox/agent target missing: ${resolve(
+        ROOT,
+        'node_modules/@enbox/agent/src/enbox-user-agent.ts',
+      )};`,
+    );
   });
 });
 
