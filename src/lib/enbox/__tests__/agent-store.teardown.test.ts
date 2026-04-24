@@ -63,6 +63,12 @@ jest.mock(
       public firstLaunch: jest.Mock = firstLaunch;
       public initialize: jest.Mock = initialize;
       public start: jest.Mock = start;
+      // Mock the post-`start()` state: real `EnboxUserAgent` assigns
+      // `agentDid` from `vault.getDid()` inside `start()`. The teardown
+      // suite simulates a fully-booted agent so `refreshIdentities()`
+      // (which now gates on `agentDid` being set to suppress the race
+      // warning) still populates the store.
+      public agentDid: { uri: string } = { uri: 'did:dht:teardown-test' };
       constructor(createParams: any) {
         this.params = createParams;
         this.vault = createParams?.agentVault;

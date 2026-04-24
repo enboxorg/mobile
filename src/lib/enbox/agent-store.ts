@@ -129,6 +129,37 @@ export interface AgentStore {
 }
 
 /**
+ * Safely determine whether the agent's `agentDid` property has been
+ * assigned. Upstream `EnboxUserAgent` exposes `agentDid` as a getter
+ * that THROWS when the underlying `_agentDid` private field is still
+ * `undefined` (the default between `new EnboxUserAgent({ ... })` and
+ * the first `start()` call). Calling code — in particular
+ * `AgentIdentityApi.list()` via the `tenant` getter — dereferences
+ * `agent.agentDid.uri` unconditionally, so invoking it during the
+ * short window after `agent.initialize({})` returns but before
+ * `agent.start({})` has assigned the DID from `vault.getDid()` produces
+ * a benign but noisy W-level log line:
+ *
+ *     [agent] identity list failed: ... The "agentDid" property is not set.
+ *
+ * `refreshIdentities()` below gates on this helper so callers that
+ * fire optimistically (navigation-change effects, manual refresh) can
+ * skip the call silently instead of warning. The helper treats any
+ * throw from the getter, or a missing `.uri`, as "not yet assigned".
+ */
+function hasAgentDid(agent: EnboxUserAgent | null): boolean {
+  if (!agent) return false;
+  try {
+    // Access the getter inside try/catch so upstream's
+    // `_agentDid === undefined` throw is turned into a boolean.
+    const did = (agent as unknown as { agentDid?: { uri?: string } }).agentDid;
+    return Boolean(did && typeof did.uri === 'string' && did.uri.length > 0);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Preserve the native error's `.code` while wrapping it into a short
  * store-facing error string. We intentionally re-throw the original
  * error so the caller still receives `.code === 'VAULT_ERROR_*'`.
@@ -346,6 +377,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   refreshIdentities: async () => {
     const { agent } = get();
     if (!agent) return;
+
+    // Race gate: `agent.identity.list()` dereferences `agent.agentDid.uri`
+    // (via `AgentIdentityApi`'s `tenant` getter). Upstream leaves
+    // `_agentDid` unset until the first `start()` call assigns it from
+    // `vault.getDid()`; calls that land in the short window between
+    // `agent.initialize({})` returning and that assignment happening
+    // would otherwise log a benign W-level warning. Skip silently
+    // until the DID is observed — onboarding / unlock flows trigger a
+    // follow-up `refreshIdentities()` once `agentDid` is set, so no
+    // coverage is lost by the early return.
+    if (!hasAgentDid(agent)) return;
 
     try {
       const identities = await agent.identity.list();
