@@ -1,0 +1,21 @@
+{
+  "featureId": "fix-restore-path-assign-agent-did",
+  "reviewedAt": "2026-04-24T07:25:51Z",
+  "commitId": "bc7b2da",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The fix directly closes the prior blocker. `restoreFromMnemonic()` and the initialize-only first-launch branch now assign `agent.agentDid` from `vault.getDid()` immediately after `agent.initialize(...)`, which matches the upstream `start()` side effect without forcing a second biometric prompt. Because `BiometricVault.initialize()` stores `_bearerDid` in memory before returning and `getDid()` simply returns that in-memory value when unlocked, the subsequent `refreshIdentities()` call can now reach `agent.identity.list()` immediately instead of relying on the 2s retry poller that the original failed feature left waiting forever on restore. The new restore regression suite covers the repaired restore path, the immediate identity refresh, and the defensive `getDid()` warning branch. I did not find an in-scope correctness regression introduced by this fix.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker handoff still claims `skillFeedback.followedProcedure: true` even though the transcript skeleton does not show the required `validation-contract.md`, `architecture.md`, or `environment.md` reads for this test-running store-layer change, and it shows `agent-store.ts` edits before the new restore test file was created or any red test run was observed.",
+      "evidence": "`.factory/skills/mobile-feature-worker/SKILL.md:19-29,32` requires reading `validation-contract.md`, at minimum `.factory/library/architecture.md`, plus `.factory/library/environment.md` when running tests, and it requires writing failing tests first. The transcript skeleton entry at `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/worker-transcripts.jsonl:99` shows reads of `mission.md`, `AGENTS.md`, `agent-store.ts`, `.factory/services.yaml`, `biometric-vault.ts`, and existing tests, then `Edit` calls against `src/lib/enbox/agent-store.ts`; the first new test-file creation and the first test execution appear later. The handoff still records `\"followedProcedure\": true` at `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-24T07-20-10-462Z__fix-restore-path-assign-agent-did__29a26b78-c1af-4c64-82ad-17d85b83c9f9.json:64`."
+    }
+  ],
+  "addressesFailureFrom": "/home/liran/src/enboxorg/mobile/.factory/validation/misc-3/scrutiny/reviews/fix-agent-did-race-retry-when-ready.json",
+  "summary": "Review passed. This fix adequately addresses the prior restore-path blocker by assigning `agentDid` immediately after initialize-only flows, so restored wallets can refresh identities without waiting for `start()`. I found no blocking correctness issues in scope and noted one skill-procedure observation from the worker transcript."
+}
