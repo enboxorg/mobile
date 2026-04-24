@@ -1,0 +1,33 @@
+{
+  "featureId": "misc-suppress-agent-did-race-warnings",
+  "reviewedAt": "2026-04-24T06:16:04Z",
+  "commitId": "76c2abbbb663fa954bdc9545552d0bbc9962c749",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The patch does remove the noisy `[agent] identity list failed ... agentDid property is not set` warning by short-circuiting `refreshIdentities()` when `agentDid` is missing, and the new unit suite covers manual retry scenarios. But it does not implement the requested \"wait until agentDid is observed, then refresh\" behavior: the initialize/restore flows still call `refreshIdentities()` immediately after `agent.initialize(...)`, while upstream only assigns `agentDid` inside `start()`. Because the only other automatic caller is a one-shot screen-mount effect, a pre-DID call can now silently leave the identities list stale instead of retrying once the DID becomes available.",
+    "issues": [
+      {
+        "file": "src/lib/enbox/agent-store.ts",
+        "line": 390,
+        "severity": "blocking",
+        "description": "`refreshIdentities()` now returns early at `src/lib/enbox/agent-store.ts:390` whenever `agentDid` is absent, but nothing subscribes to `agentDid` becoming available and re-runs the fetch. The first-launch and restore paths still invoke `refreshIdentities()` immediately after `agent.initialize(...)` (`src/lib/enbox/agent-store.ts:207,223,331,347`), even though upstream only assigns `agentDid` inside `EnboxUserAgent.start()` (`node_modules/@enbox/agent/dist/esm/enbox-user-agent.js:171`). The only other automatic refresh is the one-shot `useEffect` in `src/features/identities/screens/identities-screen.tsx:48-50`, so if that call also lands before the DID is assigned, the list stays stale until the user manually refreshes or cold-launches again. This suppresses the warning, but it does not actually gate the fetch until observation/retry as the feature description required."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker marked `skillFeedback.followedProcedure: true`, but the transcript skeleton does not show compliance with the mobile-feature-worker honesty gate.",
+      "evidence": "`.factory/skills/mobile-feature-worker/SKILL.md:20-32` requires reading `architecture.md` (and `environment.md` when running tests) plus writing failing tests first. The transcript skeleton at `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/worker-transcripts.jsonl:94` shows reads of `mission.md`, `validation-contract.md`, `AGENTS.md`, `.factory/services.yaml`, and target source files, but no read of `.factory/library/architecture.md` or `.factory/library/environment.md`; it also shows `Edit` calls for `src/lib/enbox/agent-store.ts` and `src/lib/enbox/__tests__/agent-store.teardown.test.ts` before the new `agent-store.refreshIdentities.race.test.ts` is created and before the first targeted Jest run. The handoff still records `\"followedProcedure\": true` in `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-24T06-01-18-454Z__misc-suppress-agent-did-race-warnings__628153b6-dd4b-4fb0-b57a-00283875aac3.json:82`."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The mission shared state does not document the crucial upstream asymmetry that `EnboxUserAgent.initialize()` leaves `agentDid` unset while `start()` assigns it, so workers have to rediscover it from `node_modules` when touching agent/store code.",
+      "evidence": "A grep over `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/AGENTS.md` and `/home/liran/src/enboxorg/mobile/.factory/library/architecture.md` found no `agentDid` guidance, while the transcript skeleton at `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/worker-transcripts.jsonl:94` shows repeated searches through `node_modules/@enbox/agent/dist/esm/enbox-user-agent.js` and related files to discover the behavior. The worker's own handoff (`.../2026-04-24T06-01-18-454Z__misc-suppress-agent-did-race-warnings__628153b6-dd4b-4fb0-b57a-00283875aac3.json`) records the same finding in `discoveredIssues`, which makes this a good candidate for `.factory/library/architecture.md` or mission guidance."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed. The patch suppresses the warning, but it only skips early `refreshIdentities()` calls; it never wires the promised retry when `agentDid` becomes available, so initialize/restore flows can silently leave identities stale. I also recorded shared-state gaps around the undocumented `initialize()`/`start()` `agentDid` behavior and the worker's overstated skill-procedure compliance."
+}

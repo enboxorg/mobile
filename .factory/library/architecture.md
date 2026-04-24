@@ -246,6 +246,11 @@ Zustand store exposing:
   via the vault.
 - `teardown()` — disposes the in-memory agent; the next unlock rebuilds from
   scratch.
+- Upstream `@enbox/agent` currently leaves `agentDid` unset after
+  `agent.initialize()` and assigns it during `agent.start()`. Any flow that
+  needs DID-backed identity refreshes must therefore wait for `agentDid` to be
+  observed (or explicitly call `start()`) instead of assuming it is ready
+  immediately after initialize/restore.
 
 ### 3.9 Session store — `src/features/session/session-store.ts`
 
