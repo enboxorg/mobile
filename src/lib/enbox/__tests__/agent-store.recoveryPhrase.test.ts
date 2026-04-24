@@ -200,6 +200,12 @@ const agentModule: any = require('@enbox/agent');
 const mockAgentInitialize = agentModule.__mocks__.initialize as jest.Mock;
 
 function resetAgentStore() {
+  // `teardown()` also cancels the refreshIdentities() agentDid-race
+  // poller that `initializeFirstLaunch` may have scheduled when the mock
+  // agent leaves `agentDid` unset. Without this the real setInterval
+  // ticks past test completion and Jest emits "did not exit one second
+  // after the test run".
+  useAgentStore.getState().teardown();
   useAgentStore.setState({
     agent: null,
     authManager: null,

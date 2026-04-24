@@ -160,6 +160,108 @@ function hasAgentDid(agent: EnboxUserAgent | null): boolean {
 }
 
 /**
+ * Polling-retry configuration for the `refreshIdentities()` race gate.
+ *
+ * When `refreshIdentities()` is called in the short window between
+ * `agent.initialize({})` returning and `agent.start({})` assigning
+ * `agentDid` via `vault.getDid()`, the race gate (see `hasAgentDid`)
+ * causes a silent early-return. Without a retry, the store's
+ * `identities` list could remain stale if no later path happens to
+ * retrigger a refresh.
+ *
+ * The poller closes that correctness gap: on every early-skip we (at
+ * most once per agent) start a `setInterval` that polls `hasAgentDid`
+ * every `AGENT_DID_POLL_INTERVAL_MS` for up to `AGENT_DID_POLL_MAX_MS`.
+ * As soon as the DID is observed, the poller stops and
+ * `refreshIdentities()` is retriggered. If the cap is reached without
+ * the DID becoming available, the poller gives up cleanly — no
+ * `identity.list()` call was ever made so no warning is emitted.
+ *
+ * The state is module-scoped (not stored in zustand) because it is
+ * purely an ephemeral coordination primitive between polling ticks and
+ * the teardown path; leaking it into persisted state would serve no
+ * purpose and could introduce a re-hydration edge case.
+ */
+const AGENT_DID_POLL_INTERVAL_MS = 50;
+const AGENT_DID_POLL_MAX_ITERATIONS = 40; // 40 * 50ms = 2000ms cap
+
+interface PendingIdentityPoller {
+  intervalId: ReturnType<typeof setInterval>;
+  agent: EnboxUserAgent;
+}
+
+let pendingIdentityPoller: PendingIdentityPoller | null = null;
+
+/**
+ * Cancel any in-flight `refreshIdentities()` retry poller. Called from
+ * `teardown()` so `useAutoLock` (or an explicit lock / reset) never
+ * leaves a timer leaking.
+ *
+ * Idempotent — safe to call when no poller is running.
+ */
+function stopPendingIdentityPoller(): void {
+  if (pendingIdentityPoller !== null) {
+    clearInterval(pendingIdentityPoller.intervalId);
+    pendingIdentityPoller = null;
+  }
+}
+
+/**
+ * Start polling for `agent.agentDid` assignment. The first call for a
+ * given `agent` wins; subsequent calls are no-ops (idempotent). When
+ * `agentDid` is observed, `retrigger` is invoked so the caller can
+ * resubmit `refreshIdentities()`. When the `AGENT_DID_POLL_MAX_MS`
+ * cap is reached, the poller gives up silently (no warning, no
+ * retrigger).
+ *
+ * The poller also exits early if the store's `agent` field no longer
+ * matches the agent we were tracking (teardown, lock, or a store-level
+ * replacement by a subsequent unlock).
+ */
+function startPendingIdentityPoller(
+  agent: EnboxUserAgent,
+  getStoreAgent: () => EnboxUserAgent | null,
+  retrigger: () => void,
+): void {
+  // Idempotency: if a poller is already active for ANY agent, don't
+  // start another one. The existing poller will either observe the DID
+  // or cap out on its own.
+  if (pendingIdentityPoller !== null) return;
+
+  let iterations = 0;
+  const intervalId = setInterval(() => {
+    iterations += 1;
+
+    // Store agent was replaced or torn down — stop without retrigger.
+    if (getStoreAgent() !== agent) {
+      stopPendingIdentityPoller();
+      return;
+    }
+
+    if (hasAgentDid(agent)) {
+      stopPendingIdentityPoller();
+      retrigger();
+      return;
+    }
+
+    if (iterations >= AGENT_DID_POLL_MAX_ITERATIONS) {
+      stopPendingIdentityPoller();
+    }
+  }, AGENT_DID_POLL_INTERVAL_MS);
+
+  pendingIdentityPoller = { intervalId, agent };
+}
+
+/**
+ * Test-only accessor for the poller state. Exported so unit tests can
+ * assert idempotency without reaching into private module state.
+ * Returns `null` when no poller is active.
+ */
+export function __getPendingIdentityPollerForTests(): PendingIdentityPoller | null {
+  return pendingIdentityPoller;
+}
+
+/**
  * Preserve the native error's `.code` while wrapping it into a short
  * store-facing error string. We intentionally re-throw the original
  * error so the caller still receives `.code === 'VAULT_ERROR_*'`.
@@ -384,10 +486,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // `vault.getDid()`; calls that land in the short window between
     // `agent.initialize({})` returning and that assignment happening
     // would otherwise log a benign W-level warning. Skip silently
-    // until the DID is observed — onboarding / unlock flows trigger a
-    // follow-up `refreshIdentities()` once `agentDid` is set, so no
-    // coverage is lost by the early return.
-    if (!hasAgentDid(agent)) return;
+    // until the DID is observed, and kick off a short-lived poller so
+    // the refresh retrigger happens automatically when `agentDid`
+    // becomes available — even if no other caller happens to fire a
+    // follow-up `refreshIdentities()`.
+    if (!hasAgentDid(agent)) {
+      startPendingIdentityPoller(
+        agent,
+        () => get().agent,
+        () => {
+          void get().refreshIdentities();
+        },
+      );
+      return;
+    }
+
+    // DID is now observable — any lingering poller is redundant.
+    stopPendingIdentityPoller();
 
     try {
       const identities = await agent.identity.list();
@@ -420,6 +535,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   teardown: () => {
+    // Cancel the refreshIdentities() agentDid-race poller (if any) so
+    // background / lock / reset paths never leak an interval. The stop
+    // helper is idempotent so calling it when no poller is active is
+    // a cheap no-op.
+    stopPendingIdentityPoller();
     set({
       agent: null,
       authManager: null,

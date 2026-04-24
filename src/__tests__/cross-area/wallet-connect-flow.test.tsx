@@ -195,6 +195,14 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  // `teardown()` also cancels the refreshIdentities() agentDid-race
+  // poller that `initializeFirstLaunch` may have scheduled: this test
+  // suite's mock `EnboxUserAgent` leaves `agentDid` unset, so the
+  // optimistic `get().refreshIdentities()` at the end of
+  // `initializeFirstLaunch` early-returns and starts a poller. Without
+  // this teardown, that setInterval keeps ticking past test completion
+  // and Jest emits "did not exit one second after the test run".
+  useAgentStore.getState().teardown();
   useAgentStore.setState({
     agent: null,
     authManager: null,

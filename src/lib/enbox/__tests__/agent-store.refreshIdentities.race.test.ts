@@ -143,6 +143,12 @@ jest.mock(
 import { useAgentStore } from '@/lib/enbox/agent-store';
 
 function resetStore() {
+  // teardown() also cancels any in-flight agentDid-race poller that
+  // `refreshIdentities()` may have scheduled during the previous test.
+  // Without this, the real setInterval (this suite runs on real timers)
+  // keeps ticking past test completion and produces Jest's
+  // "asynchronous operations that weren't stopped" warning.
+  useAgentStore.getState().teardown();
   useAgentStore.setState({
     agent: null,
     authManager: null,
@@ -158,6 +164,13 @@ function resetStore() {
 describe('useAgentStore.refreshIdentities() — agentDid race gate', () => {
   beforeEach(() => {
     resetStore();
+  });
+
+  afterEach(() => {
+    // Ensure the post-race-gate poller (`setInterval` scheduled by the
+    // early-return path in `refreshIdentities()`) is stopped before the
+    // next test runs. `teardown()` cancels it idempotently.
+    useAgentStore.getState().teardown();
   });
 
   it('is a no-op when no agent is set (pre-existing contract)', async () => {

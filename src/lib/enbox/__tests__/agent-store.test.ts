@@ -194,6 +194,12 @@ const mockIdentityList = agentModule.__mocks__.identityList as jest.Mock;
 const AGENT_STORE_PATH = resolve(__dirname, '../agent-store.ts');
 
 function resetStore() {
+  // `teardown()` also cancels the refreshIdentities() agentDid-race
+  // poller that `initializeFirstLaunch` / `unlockAgent` may have
+  // scheduled on tests whose mock agents leave `agentDid` unset. Without
+  // this the real setInterval keeps ticking past the end of the suite
+  // and Jest emits "did not exit one second after the test run".
+  useAgentStore.getState().teardown();
   useAgentStore.setState({
     agent: null,
     authManager: null,
