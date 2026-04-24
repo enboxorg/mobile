@@ -17,13 +17,10 @@
  * 2. `web-streams-polyfill/polyfill` installs globals Node 18+ already
  *    has; stubbing avoids duplicate installs across isolateModules.
  * 3. `polyfills.ts` runs `wrapSubtleMethod(...)` which mutates
- *    `globalThis.crypto.subtle` by wrapping each method. On Node this
- *    leaks an open handle during the rest of the Jest run (the wrapped
- *    async functions leave promise chains around), which surfaces as a
- *    non-zero exit code despite all tests passing. We hide `crypto.subtle`
- *    from polyfills.ts while loading it and restore it afterwards — the
- *    wrappers are irrelevant to the `AbortSignal.timeout` behavior we're
- *    actually testing.
+ *    `globalThis.crypto.subtle` on device. That mutation is now gated
+ *    behind `process.env.NODE_ENV !== 'test'` inside the module itself,
+ *    so under Jest the wrappers are skipped entirely. No local
+ *    `globalThis.crypto.subtle` workaround is required here.
  */
 
 jest.mock('react-native-quick-crypto', () => ({
@@ -33,15 +30,7 @@ jest.mock('react-native-quick-crypto', () => ({
 }));
 jest.mock('web-streams-polyfill/polyfill', () => ({}), { virtual: true });
 
-const realCrypto = (globalThis as any).crypto;
-(globalThis as any).crypto = {
-  // Preserve getRandomValues so polyfills.ts's final diagnostic log still
-  // prints a valid `function` for it — but hide `subtle` so
-  // wrapSubtleMethod() has nothing to mutate.
-  getRandomValues: realCrypto?.getRandomValues?.bind(realCrypto),
-};
 require('../polyfills');
-(globalThis as any).crypto = realCrypto;
 
 describe('polyfills — AbortSignal.timeout', () => {
   it('exposes AbortSignal.timeout as a function after the polyfills module loads', () => {
@@ -57,14 +46,9 @@ describe('polyfills — AbortSignal.timeout', () => {
 
   it('installs a working shim when AbortSignal.timeout is missing (RN/Hermes case)', async () => {
     const originalTimeout = (AbortSignal as any).timeout;
-    const cryptoBackup = (globalThis as any).crypto;
     try {
       // Simulate the Hermes environment: the static factory is undefined.
       (AbortSignal as any).timeout = undefined;
-      // Re-hide subtle so the isolateModules reload does not re-wrap.
-      (globalThis as any).crypto = {
-        getRandomValues: realCrypto?.getRandomValues?.bind(realCrypto),
-      };
       jest.isolateModules(() => {
         require('../polyfills');
       });
@@ -78,7 +62,6 @@ describe('polyfills — AbortSignal.timeout', () => {
       expect(signal.aborted).toBe(true);
     } finally {
       (AbortSignal as any).timeout = originalTimeout;
-      (globalThis as any).crypto = cryptoBackup;
     }
   });
 
@@ -87,19 +70,11 @@ describe('polyfills — AbortSignal.timeout', () => {
     const first = (AbortSignal as any).timeout;
     expect(typeof first).toBe('function');
 
-    const cryptoBackup = (globalThis as any).crypto;
-    try {
-      (globalThis as any).crypto = {
-        getRandomValues: realCrypto?.getRandomValues?.bind(realCrypto),
-      };
-      // Reload the polyfills module. The `typeof ... !== 'function'` guard
-      // must prevent the shim from overwriting the existing function.
-      jest.isolateModules(() => {
-        require('../polyfills');
-      });
-    } finally {
-      (globalThis as any).crypto = cryptoBackup;
-    }
+    // Reload the polyfills module. The `typeof ... !== 'function'` guard
+    // must prevent the shim from overwriting the existing function.
+    jest.isolateModules(() => {
+      require('../polyfills');
+    });
     const second = (AbortSignal as any).timeout;
 
     expect(second).toBe(first);
@@ -108,5 +83,34 @@ describe('polyfills — AbortSignal.timeout', () => {
   it('does not regress existing polyfills: TextDecoder/TextEncoder remain available after the module loads', () => {
     expect(typeof (globalThis as any).TextDecoder).toBe('function');
     expect(typeof (globalThis as any).TextEncoder).toBe('function');
+  });
+
+  it('does not wrap globalThis.crypto.subtle methods under Jest (NODE_ENV=test)', () => {
+    // Sanity check: NODE_ENV should be 'test' when running under Jest.
+    expect(process.env.NODE_ENV).toBe('test');
+
+    const subtle = (globalThis as any).crypto?.subtle;
+    // Node provides a real SubtleCrypto — confirm polyfills.ts did NOT
+    // replace any of its methods with our diagnostic wrapper. The wrapper
+    // defined inside `wrapSubtleMethod` emits log lines tagged
+    // `[subtle.<method>]`; the marker would appear in the wrapped
+    // function's source. Node's original implementation never contains
+    // that marker.
+    if (subtle) {
+      for (const name of [
+        'generateKey',
+        'importKey',
+        'encrypt',
+        'decrypt',
+        'wrapKey',
+        'unwrapKey',
+      ] as const) {
+        const fn = subtle[name];
+        if (typeof fn === 'function') {
+          const source = Function.prototype.toString.call(fn);
+          expect(source).not.toContain(`[subtle.${name}]`);
+        }
+      }
+    }
   });
 });

@@ -60,12 +60,15 @@ This orchestrator host has 257 GB RAM / 32 cores. Workers may run multiple `rg`/
 ## Jest + polyfills quirk (local-only)
 
 `src/lib/polyfills.ts` installs diagnostic wrappers around
-`globalThis.crypto.subtle` methods. Under Node/Jest, those wrappers can
-mutate the built-in `SubtleCrypto` object and leave Jest hanging on exit
-even when all tests pass. If a test needs to `require()` the polyfills
-module directly, temporarily hide `globalThis.crypto.subtle` before the
-module load (the current `polyfills.test.ts` does this) so the wrappers
-do not patch Node's native implementation.
+`globalThis.crypto.subtle` methods for RN/Hermes diagnostics. Those
+wrappers used to mutate Node's built-in `SubtleCrypto` when the module
+was loaded under Jest and left the runner hanging on exit (open-handle
+leaks exit 1 even when every test passes). The module now gates the
+`wrapSubtleMethod(...)` calls behind
+`if (process.env.NODE_ENV !== 'test')`, so Jest skips them while RN
+still installs them on device. Tests that need to `require()` the
+polyfills module can do so directly — no `globalThis.crypto.subtle`
+workaround is required.
 
 ## Bun cache gotcha (local-only)
 

@@ -81,12 +81,21 @@ function wrapSubtleMethod<T extends keyof SubtleCrypto>(name: T) {
   };
 }
 
-wrapSubtleMethod('generateKey');
-wrapSubtleMethod('importKey');
-wrapSubtleMethod('encrypt');
-wrapSubtleMethod('decrypt');
-wrapSubtleMethod('wrapKey');
-wrapSubtleMethod('unwrapKey');
+// Gate the diagnostic wrappers off under Jest. Node/Jest already provides a
+// working WebCrypto implementation, and wrapping its built-in SubtleCrypto
+// leaves async promise chains attached to the shared singleton that keep
+// Jest's event loop alive — the runner then exits 1 with open-handle leaks
+// even when every test passes. RN/Hermes (`NODE_ENV` = 'development' or
+// 'production') continues to install the wrappers so the diagnostic logs
+// remain available on device.
+if (process.env.NODE_ENV !== 'test') {
+  wrapSubtleMethod('generateKey');
+  wrapSubtleMethod('importKey');
+  wrapSubtleMethod('encrypt');
+  wrapSubtleMethod('decrypt');
+  wrapSubtleMethod('wrapKey');
+  wrapSubtleMethod('unwrapKey');
+}
 
 // ReadableStream / WritableStream / TransformStream
 import 'web-streams-polyfill/polyfill';
