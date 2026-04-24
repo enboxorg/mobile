@@ -128,61 +128,140 @@ def adb_emu(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]
 # Uploading the raw XML through ``actions/upload-artifact`` would leak the
 # 24-word recovery phrase into the GitHub Actions artifact store.
 #
-# We scrub the XML before it leaves the device-shaped file layout by
-# replacing every node ``text`` / ``content-desc`` whose value is a
-# BIP-39 word (lowercase, 3-8 letters, member of the canonical 2048-word
-# wordlist) with the literal string ``[redacted]``. Structural nodes
-# (ViewGroup wrappers, the "Back up your recovery phrase" title, the
-# "Write these 24 words…" body, word-cell index labels like ``"1."``)
-# stay intact so validators can still prove the RecoveryPhrase screen
-# was reached and rendered the expected number of cells.
+# The sanitizer is **content-aware**, not filename-aware: every XML dump
+# (regardless of the name it will eventually be written under) is scanned
+# for a RecoveryPhrase indicator. If detected, ALL nodes whose ``text``
+# or ``content-desc`` attribute matches the frozen 2048-entry BIP-39
+# English wordlist are replaced with the literal string ``[redacted]``.
+# Structural nodes (ViewGroup wrappers, the "Back up your recovery
+# phrase" title, the "Write these 24 words…" body, word-cell index
+# labels like ``"1."``, the ``content-desc="Recovery phrase"`` grid
+# wrapper) stay intact so validators can still prove the RecoveryPhrase
+# screen was reached and rendered the expected number of cells.
 #
-# This scrub ONLY runs for dumps destined for files starting with
-# ``recovery-phrase`` — every other screen (main-wallet, after-relaunch,
-# biometric-prompt-1, etc.) is passed through untouched so the upload
-# contract in VAL-CI-014 is unaffected.
+# RecoveryPhrase detection (either condition triggers redaction):
+#
+# 1. Any node ``text`` / ``content-desc`` contains the substring
+#    ``recovery phrase`` (case-insensitive) — matches the screen title
+#    "Back up your recovery phrase" and the grid wrapper's
+#    ``content-desc="Recovery phrase"``.
+# 2. Three or more distinct ``<node>`` attributes match the BIP-39
+#    wordlist — a conservative clustering threshold that still catches
+#    the RecoveryPhrase screen (24 hits) while tolerating a single
+#    stray wordlist word ("update", "other", "program", etc.) that
+#    might appear on a Settings / wallet / system UI screen without
+#    triggering a false positive redaction.
+#
+# When neither condition fires, the XML is returned byte-for-byte
+# unchanged — there is no parse round-trip, no structural difference
+# from what uiautomator emitted, and no risk of truncating or reshaping
+# unrelated dumps. This makes it safe to route EVERY XML write path
+# (named dumps, ``window_dump.xml``, ``flow-error.xml``) through the
+# sanitizer: the RecoveryPhrase screen is scrubbed wherever it shows
+# up, and every other dump is untouched.
 
 _BIP39_WORD_RE = re.compile(r"^[a-z]{3,8}$")
 _SANITIZED_PLACEHOLDER = "[redacted]"
 _UIAUTOMATOR_XML_DECLARATION = (
     b"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
 )
+# Cluster threshold for the "3+ BIP-39 wordlist hits" indicator. A
+# single stray wordlist hit (e.g. a Settings screen literally showing
+# the verb "update") is tolerated. Three or more hits on one XML is a
+# reliable signal that the RecoveryPhrase cells rendered, which is the
+# leak we're guarding against.
+_BIP39_CLUSTER_THRESHOLD = 3
+# Substring (case-insensitive) whose presence in any node's ``text`` or
+# ``content-desc`` attribute is treated as a positive RecoveryPhrase
+# indicator on its own, regardless of the BIP-39 hit count. Matches the
+# screen title "Back up your recovery phrase" and the grid wrapper's
+# ``content-desc="Recovery phrase"``.
+_RECOVERY_PHRASE_TITLE_NEEDLE = "recovery phrase"
+
+
+def _is_bip39_word(value: str) -> bool:
+    """Return True if ``value`` (after strip) is a BIP-39 wordlist entry."""
+
+    candidate = value.strip()
+    return bool(_BIP39_WORD_RE.match(candidate)) and candidate in BIP39_WORDS
+
+
+def _has_recovery_phrase_content(root: ET.Element) -> bool:
+    """Return True when ``root`` looks like a RecoveryPhrase-bearing dump.
+
+    Two independent indicators, either of which is sufficient:
+
+    - A ``<node>`` whose ``text`` or ``content-desc`` contains the
+      substring ``recovery phrase`` (case-insensitive) — the screen
+      title "Back up your recovery phrase" and the grid wrapper's
+      ``content-desc="Recovery phrase"`` both satisfy this.
+    - Three or more ``<node>`` attribute values match the canonical
+      BIP-39 English wordlist. One stray match is tolerated so that a
+      Settings / wallet / system UI screen containing a single real
+      English word that happens to be a BIP-39 entry (e.g.
+      "update") does not trigger a false-positive redaction.
+    """
+
+    bip39_hits = 0
+    for node in root.iter("node"):
+        for attr in ("text", "content-desc"):
+            value = node.attrib.get(attr) or ""
+            if not value:
+                continue
+            if _RECOVERY_PHRASE_TITLE_NEEDLE in value.lower():
+                return True
+            if _is_bip39_word(value):
+                bip39_hits += 1
+                if bip39_hits >= _BIP39_CLUSTER_THRESHOLD:
+                    return True
+    return False
 
 
 def _sanitize_bip39_xml(xml_bytes: bytes) -> bytes:
-    """Return ``xml_bytes`` with every BIP-39 word replaced by ``[redacted]``.
+    """Return ``xml_bytes`` with BIP-39 words redacted **iff** the dump
+    contains RecoveryPhrase content.
 
-    Only ``text`` and ``content-desc`` attributes on ``<node>`` elements
-    are scanned; all other structure (tree, index/resource-id/bounds,
-    non-word text content like "Back up your recovery phrase") is
-    preserved byte-for-byte through ``xml.etree.ElementTree`` re-
-    serialization. The uiautomator XML declaration is re-prepended
-    because ElementTree strips it on parse.
+    See :func:`_has_recovery_phrase_content` for the indicator rules.
 
-    Matching criteria (intentionally narrow so the sanitizer can't
-    accidentally redact legitimate UI copy):
+    If no RecoveryPhrase indicator is present, ``xml_bytes`` is returned
+    **byte-for-byte unchanged** (no parse round-trip). This makes it
+    safe to pipe every dump through this function: non-RecoveryPhrase
+    screens (welcome, biometric-setup, biometric-prompt-1, main-wallet,
+    after-relaunch, …) emerge identical to what uiautomator produced.
 
-    - attribute value, after ``.strip()``, is exactly 3–8 lowercase
-      ASCII letters (regex ``^[a-z]{3,8}$``);
-    - and that value is present in the frozen 2048-entry BIP-39
-      English wordlist.
-
-    The title ("Back up your recovery phrase"), body copy, index
-    labels ("1.", "2.", …), and the ``content-desc="Recovery phrase"``
-    on the grid wrapper all fail the regex and are therefore preserved.
+    When an indicator IS present, every ``<node>`` ``text`` and
+    ``content-desc`` attribute whose value (after ``.strip()``) is
+    exactly 3–8 lowercase ASCII letters AND is a member of the frozen
+    2048-entry BIP-39 English wordlist is replaced with the literal
+    string ``[redacted]``. All other structure (tree, bounds, index,
+    resource-id, non-word text like "Back up your recovery phrase") is
+    preserved through ``xml.etree.ElementTree`` re-serialization; the
+    uiautomator XML declaration is re-prepended because ElementTree
+    strips it on parse.
     """
 
-    root = ET.fromstring(xml_bytes)
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        # Malformed dump: return unchanged so we don't silently hide
+        # debug data the operator still needs. Any leakage guard is
+        # weakest here but not weaker than the pre-sanitization status
+        # quo for unparseable XML.
+        return xml_bytes
+
+    if not _has_recovery_phrase_content(root):
+        # No RecoveryPhrase indicator — byte-exact passthrough. This is
+        # the typical path (welcome.xml, biometric-setup.xml,
+        # main-wallet.xml, after-relaunch.xml, most flow-error.xml
+        # captures, etc.).
+        return xml_bytes
+
     for node in root.iter("node"):
         for attr in ("text", "content-desc"):
             value = node.attrib.get(attr, "")
             if not value:
                 continue
-            candidate = value.strip()
-            if (
-                _BIP39_WORD_RE.match(candidate)
-                and candidate in BIP39_WORDS
-            ):
+            if _is_bip39_word(value):
                 node.attrib[attr] = _SANITIZED_PLACEHOLDER
     body = ET.tostring(root, encoding="utf-8")
     return _UIAUTOMATOR_XML_DECLARATION + body
@@ -195,29 +274,38 @@ def dump_ui(name: Optional[str] = None) -> ET.Element:
     ``/tmp/emulator-ui/<name>.xml`` so downstream validators can read it
     alongside the matching screenshot.
 
-    For dumps whose ``name`` starts with ``recovery-phrase`` the XML is
-    sanitized through :func:`_sanitize_bip39_xml` before being written
-    to BOTH the named file AND the working ``window_dump.xml``. The
-    working file is overwritten too so that a mid-flow failure — which
-    would leave ``window_dump.xml`` as the "last dump" uploaded
-    alongside the named artifacts — cannot leak the phrase either.
+    **Content-aware sanitization** is applied to every dump via
+    :func:`_sanitize_bip39_xml` — regardless of the value of ``name``,
+    including the nameless case where only ``window_dump.xml`` is
+    written. If the dumped hierarchy contains a RecoveryPhrase
+    indicator (title substring ``recovery phrase`` or 3+ BIP-39
+    wordlist hits) the BIP-39 cells are redacted before the bytes are
+    written to disk; otherwise the pulled bytes are passed through
+    unchanged (byte-exact). This closes the leak vector opened by
+    failure-path dumps such as ``flow-error.xml`` or the working
+    ``window_dump.xml`` overwritten on every ``uidump`` call: if the
+    driver crashes while the RecoveryPhrase screen is active, the dump
+    captured for debugging is still scrubbed before upload, while
+    typical non-RecoveryPhrase dumps (welcome, biometric-setup,
+    biometric-prompt-1, main-wallet, after-relaunch, etc.) remain
+    byte-identical to what uiautomator emitted.
     """
 
     adb("shell", "uiautomator", "dump", "/sdcard/window_dump.xml")
     local = ROOT / "window_dump.xml"
     adb("pull", "/sdcard/window_dump.xml", str(local))
     raw_bytes = local.read_bytes()
-    if name and name.startswith("recovery-phrase"):
-        raw_bytes = _sanitize_bip39_xml(raw_bytes)
+    sanitized = _sanitize_bip39_xml(raw_bytes)
+    if sanitized is not raw_bytes and sanitized != raw_bytes:
         # Overwrite the working file so the mnemonic cannot leak via
         # ``window_dump.xml`` if the driver crashes before the next
         # ``dump_ui`` call overwrites it with a non-RecoveryPhrase
         # hierarchy.
-        local.write_bytes(raw_bytes)
+        local.write_bytes(sanitized)
     if name:
         named = ROOT / f"{name}.xml"
-        named.write_bytes(raw_bytes)
-    return ET.fromstring(raw_bytes)
+        named.write_bytes(sanitized)
+    return ET.fromstring(sanitized)
 
 
 def parse_bounds(bounds: str) -> tuple[int, int]:
@@ -1581,25 +1669,20 @@ def _dump_flow_error(exc: BaseException) -> None:
     print(f"FLOW_ERROR: {exc}", file=sys.stderr)
 
 
-def _self_test_sanitizer() -> int:
-    """Exercise :func:`_sanitize_bip39_xml` against a synthetic
-    RecoveryPhrase-shaped XML dump and assert that:
+def _build_recovery_phrase_xml(
+    *,
+    root_tag: str = "hierarchy",
+    include_title: bool = True,
+    include_grid_wrapper: bool = True,
+) -> bytes:
+    """Return a synthetic RecoveryPhrase uiautomator dump (24-word grid).
 
-    - every BIP-39 word cell is replaced with ``[redacted]`` (0 BIP-39
-      words remain as ``text`` / ``content-desc`` values);
-    - the screen title, body copy, index labels (``"1."``…), and
-      structural wrappers (``content-desc="Recovery phrase"``) are
-      preserved;
-    - the ``<?xml ... ?>`` declaration survives so downstream
-      validators' uiautomator-shape checks continue to pass.
-
-    Returns 0 on success, non-zero on failure. Designed to be runnable
-    without any device or emulator.
+    Factored out so both the direct RecoveryPhrase dump case and the
+    ``flow-error.xml while RecoveryPhrase was active`` case can share
+    the same cell shape. Every one of the 24 words is a real BIP-39
+    wordlist entry.
     """
 
-    # 24-word sample drawn directly from ``node_modules/@scure/bip39``'s
-    # wordlist so every word is a real BIP-39 member (worst case for the
-    # sanitizer — every cell must be scrubbed).
     sample_words = [
         "abandon", "ability", "able", "about", "above", "absent",
         "absorb", "abstract", "absurd", "abuse", "access", "accident",
@@ -1624,49 +1707,80 @@ def _self_test_sanitizer() -> int:
         )
         for i, word in enumerate(sample_words)
     )
-    title_body = (
-        '<node index="0" text="Back up your recovery phrase" resource-id="" '
-        'class="android.view.View" package="org.enbox.mobile" content-desc="" '
-        'bounds="[0,0][1000,200]" />'
-        '<node index="1" text="Write these 24 words down in order." resource-id="" '
-        'class="android.widget.TextView" package="org.enbox.mobile" content-desc="" '
-        'bounds="[0,0][1000,300]" />'
-        '<node index="2" text="" resource-id="recovery-phrase-word-grid" '
-        'class="android.view.ViewGroup" package="org.enbox.mobile" '
-        'content-desc="Recovery phrase" bounds="[0,0][1000,2000]" />'
-    )
-    sample_xml = (
+    chrome: list[str] = []
+    if include_title:
+        chrome.append(
+            '<node index="0" text="Back up your recovery phrase" resource-id="" '
+            'class="android.view.View" package="org.enbox.mobile" content-desc="" '
+            'bounds="[0,0][1000,200]" />'
+        )
+        chrome.append(
+            '<node index="1" text="Write these 24 words down in order." resource-id="" '
+            'class="android.widget.TextView" package="org.enbox.mobile" content-desc="" '
+            'bounds="[0,0][1000,300]" />'
+        )
+    if include_grid_wrapper:
+        chrome.append(
+            '<node index="2" text="" resource-id="recovery-phrase-word-grid" '
+            'class="android.view.ViewGroup" package="org.enbox.mobile" '
+            'content-desc="Recovery phrase" bounds="[0,0][1000,2000]" />'
+        )
+    chrome_xml = "".join(chrome)
+    return (
         "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
-        f"<hierarchy rotation=\"0\">{title_body}{cells_xml}</hierarchy>"
+        f'<{root_tag} rotation="0">{chrome_xml}{cells_xml}</{root_tag}>'
     ).encode("utf-8")
 
-    sanitized = _sanitize_bip39_xml(sample_xml)
-    sanitized_text = sanitized.decode("utf-8")
+
+def _self_test_sanitizer() -> int:
+    """Exercise :func:`_sanitize_bip39_xml` against both positive and
+    negative fixtures.
+
+    Positive cases (MUST redact BIP-39 words, MUST preserve structure):
+
+    (a) Direct RecoveryPhrase dump — the screen's rendered hierarchy,
+        named ``recovery-phrase.xml`` in a real run.
+    (b) ``flow-error.xml`` captured while the RecoveryPhrase screen was
+        active — same shape as (a) but would reach disk under a
+        different filename when the flow crashes at that stage.
+
+    Negative cases (MUST return the input byte-for-byte):
+
+    (c) ``welcome.xml`` with no RecoveryPhrase content and zero BIP-39
+        wordlist hits — the typical non-RecoveryPhrase dump.
+    (d) ``welcome.xml`` with one stray BIP-39 word ("update") — tolerated
+        by the 3+ cluster threshold so we don't false-positive on
+        incidental wordlist matches in unrelated screens.
+
+    Returns 0 on success, non-zero on failure. Designed to be runnable
+    without any device or emulator.
+    """
 
     failures: list[str] = []
 
-    # 1) XML declaration preserved.
-    if not sanitized.startswith(_UIAUTOMATOR_XML_DECLARATION):
-        failures.append(
-            "XML declaration missing from sanitized output"
-        )
+    # ---------- (a) positive: direct RecoveryPhrase dump ---------------
+    rp_xml = _build_recovery_phrase_xml()
+    rp_sanitized = _sanitize_bip39_xml(rp_xml)
+    rp_text = rp_sanitized.decode("utf-8")
 
-    # 2) Zero BIP-39 words remain in any ``text`` / ``content-desc``
-    # attribute value. Re-parse rather than string-search so the check
-    # ignores word fragments inside resource-ids / class names.
-    root = ET.fromstring(sanitized)
-    for node in root.iter("node"):
+    if not rp_sanitized.startswith(_UIAUTOMATOR_XML_DECLARATION):
+        failures.append(
+            "case (a): XML declaration missing from sanitized output"
+        )
+    if rp_sanitized == rp_xml:
+        failures.append(
+            "case (a): RecoveryPhrase dump returned byte-for-byte — "
+            "sanitizer did not run"
+        )
+    # Zero BIP-39 words remain.
+    rp_root = ET.fromstring(rp_sanitized)
+    for node in rp_root.iter("node"):
         for attr in ("text", "content-desc"):
             value = (node.attrib.get(attr) or "").strip()
-            if (
-                _BIP39_WORD_RE.match(value)
-                and value in BIP39_WORDS
-            ):
+            if _is_bip39_word(value):
                 failures.append(
-                    f"BIP-39 word {value!r} leaked through on attr={attr!r}"
+                    f"case (a): BIP-39 word {value!r} leaked through on attr={attr!r}"
                 )
-
-    # 3) Structural + non-mnemonic content survived intact.
     for required in (
         "Back up your recovery phrase",
         "Write these 24 words down in order.",
@@ -1677,32 +1791,98 @@ def _self_test_sanitizer() -> int:
         'text="1."',
         'text="24."',
     ):
-        if required not in sanitized_text:
-            failures.append(f"expected fragment missing after sanitize: {required!r}")
-
-    # 4) Every word cell was actually replaced — we should see at least
-    # 24 ``[redacted]`` occurrences.
-    redaction_count = sanitized_text.count(_SANITIZED_PLACEHOLDER)
-    if redaction_count < 24:
+        if required not in rp_text:
+            failures.append(
+                f"case (a): expected fragment missing after sanitize: {required!r}"
+            )
+    rp_redactions = rp_text.count(_SANITIZED_PLACEHOLDER)
+    if rp_redactions < 24:
         failures.append(
-            f"expected >=24 [redacted] replacements, saw {redaction_count}"
+            f"case (a): expected >=24 [redacted] replacements, saw {rp_redactions}"
         )
 
-    # 5) Non-RecoveryPhrase dumps (e.g. main-wallet) must be pass-through
-    # — guard here so we notice if the helper ever grows an unconditional
-    # scrub path.
-    passthrough_sample = (
+    # ---------- (b) positive: flow-error.xml while RecoveryPhrase active ----
+    # Same shape as (a) but the file would be written under a
+    # RecoveryPhrase-agnostic name. Content-aware sanitization must
+    # still trigger and redact every cell.
+    flow_error_xml = _build_recovery_phrase_xml()
+    flow_error_sanitized = _sanitize_bip39_xml(flow_error_xml)
+    if flow_error_sanitized == flow_error_xml:
+        failures.append(
+            "case (b): flow-error-shaped RecoveryPhrase dump returned "
+            "byte-for-byte — content detection failed"
+        )
+    fe_text = flow_error_sanitized.decode("utf-8")
+    fe_root = ET.fromstring(flow_error_sanitized)
+    for node in fe_root.iter("node"):
+        for attr in ("text", "content-desc"):
+            value = (node.attrib.get(attr) or "").strip()
+            if _is_bip39_word(value):
+                failures.append(
+                    f"case (b): BIP-39 word {value!r} leaked through on attr={attr!r}"
+                )
+    fe_redactions = fe_text.count(_SANITIZED_PLACEHOLDER)
+    if fe_redactions < 24:
+        failures.append(
+            f"case (b): expected >=24 [redacted] replacements, saw {fe_redactions}"
+        )
+    # Structural chrome must survive even under the flow-error filename.
+    for required in (
+        "Back up your recovery phrase",
+        'content-desc="Recovery phrase"',
+    ):
+        if required not in fe_text:
+            failures.append(
+                f"case (b): expected fragment missing after sanitize: {required!r}"
+            )
+
+    # ---------- (c) negative: welcome.xml with no RecoveryPhrase content ----
+    welcome_xml = (
         "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
-        "<hierarchy rotation=\"0\"><node index=\"0\" text=\"Identities\" "
-        "resource-id=\"\" class=\"android.widget.TextView\" "
-        "package=\"org.enbox.mobile\" content-desc=\"\" "
-        "bounds=\"[0,0][100,100]\" /></hierarchy>"
+        '<hierarchy rotation="0">'
+        '<node index="0" text="Welcome to enbox" resource-id="" '
+        'class="android.view.View" package="org.enbox.mobile" '
+        'content-desc="" bounds="[0,0][1080,400]" />'
+        '<node index="1" text="Get started" resource-id="" '
+        'class="android.widget.Button" package="org.enbox.mobile" '
+        'content-desc="" bounds="[100,1000][900,1200]" />'
+        '<node index="2" text="Restore wallet" resource-id="" '
+        'class="android.widget.Button" package="org.enbox.mobile" '
+        'content-desc="" bounds="[100,1300][900,1500]" />'
+        "</hierarchy>"
     ).encode("utf-8")
-    # The sanitizer itself should not be invoked from ``dump_ui`` for
-    # non-recovery-phrase names; calling it directly still leaves the
-    # "Identities" string alone because it's 10 chars — outside the
-    # 3..8 BIP-39 word window.
-    assert b"Identities" in _sanitize_bip39_xml(passthrough_sample)
+    welcome_sanitized = _sanitize_bip39_xml(welcome_xml)
+    if welcome_sanitized != welcome_xml:
+        failures.append(
+            "case (c): clean welcome.xml was modified — expected byte-"
+            "exact passthrough"
+        )
+
+    # ---------- (d) negative: welcome.xml with a single stray BIP-39 word ---
+    # "update" is a BIP-39 wordlist entry; a Settings / release-notes /
+    # error screen can legitimately contain it. With 1 hit and no title
+    # match, the cluster threshold keeps the dump byte-for-byte.
+    assert "update" in BIP39_WORDS, "wordlist drift: expected 'update' ∈ BIP-39"
+    stray_xml = (
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+        '<hierarchy rotation="0">'
+        '<node index="0" text="System update available" resource-id="" '
+        'class="android.view.View" package="org.enbox.mobile" '
+        'content-desc="" bounds="[0,0][1080,400]" />'
+        '<node index="1" text="update" resource-id="" '
+        'class="android.widget.Button" package="org.enbox.mobile" '
+        'content-desc="" bounds="[100,1000][900,1200]" />'
+        '<node index="2" text="Dismiss" resource-id="" '
+        'class="android.widget.Button" package="org.enbox.mobile" '
+        'content-desc="" bounds="[100,1300][900,1500]" />'
+        "</hierarchy>"
+    ).encode("utf-8")
+    stray_sanitized = _sanitize_bip39_xml(stray_xml)
+    if stray_sanitized != stray_xml:
+        failures.append(
+            "case (d): welcome.xml with 1 stray BIP-39 word was modified — "
+            "cluster threshold should have kept it byte-exact"
+        )
 
     if failures:
         print("== sanitizer self-test FAILED ==", file=sys.stderr)
@@ -1710,7 +1890,20 @@ def _self_test_sanitizer() -> int:
             print(f"  - {line}", file=sys.stderr)
         return 1
     print("== sanitizer self-test OK ==")
-    print(f"  redactions={redaction_count} bytes={len(sanitized)}")
+    print(
+        f"  (a) RecoveryPhrase: redactions={rp_redactions} bytes={len(rp_sanitized)}"
+    )
+    print(
+        f"  (b) flow-error.xml while RP active: redactions={fe_redactions} "
+        f"bytes={len(flow_error_sanitized)}"
+    )
+    print(
+        f"  (c) welcome.xml (clean): passthrough bytes={len(welcome_sanitized)}"
+    )
+    print(
+        f"  (d) welcome.xml + 1 stray BIP-39 hit: passthrough "
+        f"bytes={len(stray_sanitized)}"
+    )
     return 0
 
 

@@ -38,23 +38,41 @@ This mission has two testing surfaces:
   `RecoveryPhrase` screen's dump must be redacted or skipped before
   upload, and validators should scan uploaded XML dumps for mnemonic or
   other secret-bearing text, not just `logcat-*.txt`.
-- **RecoveryPhrase XML sanitization (VAL-CI, scrutiny 2026-04-24):**
-  `scripts/emulator-debug-flow.py` sanitizes the uiautomator dump
-  before writing `recovery-phrase.xml` (and the concurrent
-  `window_dump.xml` working copy). Every `<node>` whose `text` or
-  `content-desc` attribute matches the 3–8 char lowercase BIP-39
-  pattern AND is a member of the canonical 2048-word English
-  wordlist (embedded at `scripts/bip39_wordlist.py`) is replaced
-  with the literal string `[redacted]`. Structural nodes (hierarchy
-  wrappers, the `"Back up your recovery phrase"` title, the body
-  copy, the `"1."`–`"24."` index labels, and the
-  `content-desc="Recovery phrase"` grid wrapper) are preserved
-  verbatim so validators can still assert the screen was reached.
-  Only the `recovery-phrase*` dump is scrubbed — every other dump
-  (`main-wallet.xml`, `after-relaunch.xml`, `biometric-prompt-1.xml`,
-  etc.) passes through untouched. Run
-  `python3 scripts/emulator-debug-flow.py --self-test` for the
-  embedded unit check.
+- **Content-aware RecoveryPhrase XML sanitization (VAL-CI,
+  scrutiny round 2 2026-04-24):**
+  `scripts/emulator-debug-flow.py` runs every uiautomator dump
+  through `_sanitize_bip39_xml` **before** writing it to disk, regardless
+  of the destination filename. Detection is content-driven, not
+  filename-driven: if any `<node>` `text` / `content-desc` attribute
+  contains the case-insensitive substring `recovery phrase` (matches
+  the screen title "Back up your recovery phrase" and the grid
+  wrapper's `content-desc="Recovery phrase"`) **or** ≥3 node
+  attribute values match the canonical 2048-word BIP-39 English
+  wordlist (embedded at `scripts/bip39_wordlist.py`), the dump is
+  treated as RecoveryPhrase-bearing and every 3–8 char lowercase
+  BIP-39 wordlist hit in `text` / `content-desc` is replaced with
+  the literal string `[redacted]`. Otherwise the pulled bytes are
+  returned byte-for-byte unchanged.
+  - This closes the failure-path leak flagged in scrutiny round 2:
+    `window_dump.xml` (overwritten by every `uidump` call) and
+    `flow-error.xml` (captured when the flow crashes) are now
+    scrubbed whenever they contain RecoveryPhrase content, not only
+    when the destination filename happens to start with
+    `recovery-phrase`.
+  - Structural nodes (hierarchy wrappers, the
+    `"Back up your recovery phrase"` title, the body copy, the
+    `"1."`–`"24."` index labels, and the
+    `content-desc="Recovery phrase"` grid wrapper) are preserved
+    verbatim so validators can still assert the screen was reached.
+  - The 3+ wordlist-hit threshold tolerates a single stray BIP-39
+    entry (e.g. a Settings screen literally showing the verb
+    `update`) without a false-positive redaction on unrelated dumps.
+  - Self-test: `python3 scripts/emulator-debug-flow.py --self-test`
+    exercises (a) direct RecoveryPhrase dump — redacts all cells,
+    (b) `flow-error.xml` shape containing the RecoveryPhrase
+    hierarchy — redacts all cells, (c) clean `welcome.xml` — byte-
+    exact passthrough, (d) `welcome.xml` with one stray BIP-39
+    word — byte-exact passthrough.
 
 ## Why `agent-browser` and `tuistory` do not apply
 
