@@ -77,14 +77,30 @@ function MainTabs() {
   const theme = useAppTheme();
   const lock = useSessionStore((s) => s.lock);
 
+  // Manual "Lock wallet" (invoked from Settings) MUST match the
+  // auto-lock hook's teardown ordering: flip the session flag AND
+  // tear down the agent so `BiometricVault.lock()` zeroes
+  // `_secretBytes` / `_rootSeed` / `_contentEncryptionKey` BEFORE the
+  // next unlock (VAL-VAULT-020 / VAL-VAULT-021). Without the
+  // `teardown()` call the previous agent + vault objects continued
+  // holding fully-unlocked key material until GC — a heap snapshot
+  // from "Lock wallet → app backgrounded" could still expose the root
+  // entropy. The hook's auto-lock on `active → background|inactive`
+  // is unchanged; this ensures the manual / settings path reaches
+  // the same end state.
+  const onManualLock = useCallback(() => {
+    lock();
+    useAgentStore.getState().teardown();
+  }, [lock]);
+
   // SettingsScreen orchestrates the full reset flow internally —
   // `useAgentStore.getState().reset()` wipes the biometric secret,
   // the on-disk LevelDB, the in-memory agent, and the session store,
   // then triggers a fresh `useSessionStore.hydrate()` so the navigator
   // routes back to `Welcome`. No wrapper needed here (VAL-UX-036).
   const renderSettings = useCallback(
-    () => <SettingsScreen onLock={lock} />,
-    [lock],
+    () => <SettingsScreen onLock={onManualLock} />,
+    [onManualLock],
   );
 
   return (
@@ -117,8 +133,21 @@ export function AppNavigator() {
   const hasIdentity = useSessionStore((s) => s.hasIdentity);
   const isLocked = useSessionStore((s) => s.isLocked);
   const biometricStatus = useSessionStore((s) => s.biometricStatus);
+  // `isPendingFirstBackup` is the DURABLE half of the backup gate —
+  // see `PersistedSessionState.isPendingFirstBackup` for the VAL-VAULT-028
+  // rationale. It is committed to SecureStorage the moment
+  // `BiometricSetupScreen` lands a native secret and is only cleared
+  // once the user confirms the mnemonic. OR-combined with the in-memory
+  // `recoveryPhrase !== null` signal so a cold-restart or auto-lock
+  // drop BEFORE backup confirmation re-routes to RecoveryPhrase.
+  const isPendingFirstBackup = useSessionStore((s) => s.isPendingFirstBackup);
   const completeOnboarding = useSessionStore((s) => s.completeOnboarding);
-  const setHasIdentity = useSessionStore((s) => s.setHasIdentity);
+  const commitSetupInitialized = useSessionStore(
+    (s) => s.commitSetupInitialized,
+  );
+  const setPendingFirstBackup = useSessionStore(
+    (s) => s.setPendingFirstBackup,
+  );
   const unlockSession = useSessionStore((s) => s.unlockSession);
 
   // --- Agent store signals -----------------------------------------
@@ -127,6 +156,7 @@ export function AppNavigator() {
   // `clearRecoveryPhrase` advances the gate matrix past RecoveryPhrase.
   const recoveryPhrase = useAgentStore((s) => s.recoveryPhrase);
   const clearRecoveryPhrase = useAgentStore((s) => s.clearRecoveryPhrase);
+  const resumePendingBackup = useAgentStore((s) => s.resumePendingBackup);
 
   // --- Wallet-connect deep-link signals -----------------------------
   const pendingWalletRequest = useWalletConnectStore((s) => s.pending);
@@ -143,33 +173,82 @@ export function AppNavigator() {
   const clearWalletConnect = useWalletConnectStore((s) => s.clear);
 
   // Gate matrix (VAL-UX-028).
+  //
+  // `pendingBackup` is the OR of two signals:
+  //
+  //   - `recoveryPhrase !== null` — the normal happy path: a mnemonic
+  //     is sitting in JS memory waiting to be shown.
+  //   - `isPendingFirstBackup` — the durable half that SURVIVES
+  //     `teardown()` / cold kill / auto-lock. It is set the moment
+  //     the native secret is provisioned and cleared only after the
+  //     user confirms the backup. Without it, relaunch between
+  //     "secret provisioned" and "phrase confirmed" would route
+  //     straight to Main and strand the user with an un-backed-up
+  //     wallet (VAL-VAULT-028).
   const route = getInitialRoute({
     biometricStatus,
     hasCompletedOnboarding,
     isLocked,
     vaultInitialized: hasIdentity,
-    pendingBackup: recoveryPhrase !== null,
+    pendingBackup: recoveryPhrase !== null || isPendingFirstBackup,
   });
 
   // --- Handlers bound to each gate --------------------------------
   const handleSetupInitialized = useCallback(
     (_phrase: string) => {
       // The freshly-generated mnemonic already lives in the agent
-      // store (`useAgentStore.recoveryPhrase`). We only need to
-      // persist that the vault has been initialized so the matrix
-      // can advance — on next relaunch we'll route straight to
-      // `BiometricUnlock` instead of re-running first-launch setup.
-      setHasIdentity(true);
+      // store (`useAgentStore.recoveryPhrase`). We commit TWO facts
+      // in a SINGLE atomic SecureStorage write via
+      // `commitSetupInitialized()`:
+      //
+      //   - `hasIdentity = true` — the vault has been initialized, so
+      //     next relaunch skips first-launch setup.
+      //   - `isPendingFirstBackup = true` — the user has NOT confirmed
+      //     the mnemonic yet. If the app backgrounds / is killed
+      //     before confirmation, the navigator uses this durable flag
+      //     (OR'd with `recoveryPhrase`) to re-route back to
+      //     RecoveryPhrase on relaunch, where `resumePendingBackup()`
+      //     can re-derive the mnemonic from the stored entropy
+      //     (VAL-VAULT-028).
+      //
+      // A naive implementation that calls `setHasIdentity(true)` and
+      // `setPendingFirstBackup(true)` separately would issue TWO
+      // persists to the same `SESSION_KEY` payload and — because the
+      // writes are fire-and-forget — could race: the write with
+      // `{hasIdentity: false, isPendingFirstBackup: true}` landing
+      // AFTER the write with `{hasIdentity: true, isPendingFirstBackup:
+      // true}` would leave on-disk state `{hasIdentity: false, ...}`
+      // even though the in-memory state is correct. A cold-kill after
+      // the in-memory flip but before the losing write would then
+      // misroute to BiometricSetup on relaunch. The atomic helper
+      // collapses both into one `setSecureItem` call so no such
+      // interleave is possible.
+      // `void` marks a deliberately-unawaited fire-and-forget promise.
+      // eslint-disable-next-line no-void
+      void commitSetupInitialized();
     },
-    [setHasIdentity],
+    [commitSetupInitialized],
   );
 
   const handlePhraseConfirmed = useCallback(() => {
     // Drop the one-shot mnemonic from JS memory + flip the session
     // into the unlocked state so the matrix advances to `Main`.
+    //
+    // Critically, also clear `isPendingFirstBackup` so a later
+    // relaunch does NOT re-surface RecoveryPhrase. The persist is
+    // fire-and-forget here because the navigator also flips
+    // `isPendingFirstBackup` in-memory synchronously — the matrix
+    // advances on the next render regardless of whether the on-disk
+    // write has landed. On the pathological "kill between confirm
+    // and persist" edge case, the user sees RecoveryPhrase again on
+    // relaunch, enters `resumePendingBackup()` once more, and
+    // re-confirms — annoying but not data-loss (VAL-VAULT-028).
+    // `void` marks a deliberately-unawaited fire-and-forget promise.
+    // eslint-disable-next-line no-void
+    void setPendingFirstBackup(false);
     clearRecoveryPhrase();
     unlockSession();
-  }, [clearRecoveryPhrase, unlockSession]);
+  }, [clearRecoveryPhrase, setPendingFirstBackup, unlockSession]);
 
   const handleUnlocked = useCallback(() => {
     unlockSession();
@@ -275,6 +354,17 @@ export function AppNavigator() {
                 mnemonic={recoveryPhrase ?? ''}
                 navigation={navigation}
                 onConfirm={handlePhraseConfirmed}
+                // Resume-pending-backup flow (VAL-VAULT-028). When the
+                // in-memory `recoveryPhrase` is null but
+                // `isPendingFirstBackup` forced us back here, the screen
+                // surfaces a "Show recovery phrase" CTA that calls this
+                // handler; the agent store re-seats the vault,
+                // re-derives the mnemonic from the stored entropy, and
+                // writes it into `recoveryPhrase` so the screen re-
+                // renders with the words visible.
+                onResumeBackup={
+                  recoveryPhrase === null ? resumePendingBackup : undefined
+                }
               />
             )}
           </RootStack.Screen>

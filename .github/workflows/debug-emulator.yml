@@ -4,9 +4,31 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+    # Expanded trigger coverage (VAL-CI-018):
+    #
+    # The emulator hardening suite validates the full native-biometric-
+    # first flow, including FLAG_SECURE, native Keychain / Keystore
+    # behaviour, and the emulator driver itself. The original trigger
+    # (src/**, specs/**, a handful of JS config files) missed three
+    # categories of changes that the suite is SUPPOSED to guard:
+    #   - The workflow file itself — updating the runner pins or the
+    #     artifact-upload glob without re-running the suite hides
+    #     breakages until the next unrelated src change.
+    #   - `scripts/emulator-debug-flow.py` / `scripts/**` — the driver
+    #     logic is the suite. A regression in the driver (missing a
+    #     sensitive-screen placeholder, a bad adb invocation, an
+    #     assertion typo) would never run until a src change landed.
+    #   - `android/**` / `ios/**` — the native vault implementations
+    #     and `MainActivity.onCreate`'s FLAG_SECURE baseline live here;
+    #     a regression in either is EXACTLY what the emulator run
+    #     catches.
     paths:
       - 'src/**'
       - 'specs/**'
+      - 'scripts/**'
+      - 'android/**'
+      - 'ios/**'
+      - '.github/workflows/debug-emulator.yml'
       - 'metro.config.js'
       - 'babel.config.js'
       - 'index.js'

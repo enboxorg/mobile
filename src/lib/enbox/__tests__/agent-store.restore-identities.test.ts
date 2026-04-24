@@ -97,6 +97,25 @@ jest.mock(
 );
 
 // -------------------------------------------------------------------
+// Canonical 24-word BIP-39 mnemonic used by restore tests.
+//
+// `restoreFromMnemonic()` front-loads `validateMnemonic` (VAL-VAULT-029
+// — the public store action must not wipe the native secret before the
+// mnemonic is known good), so the fixture MUST be a mnemonic that
+// `@scure/bip39` accepts. The all-zero-entropy 24-word phrase happens
+// to end with `art` (NOT `about`: `about` is the checksum word for
+// the 12-word all-zero entropy case only). Using the correct suffix
+// keeps these tests exercising the real restore path rather than the
+// validation-reject branch.
+// -------------------------------------------------------------------
+
+const VALID_24_WORD_MNEMONIC =
+  'abandon abandon abandon abandon abandon abandon ' +
+  'abandon abandon abandon abandon abandon abandon ' +
+  'abandon abandon abandon abandon abandon abandon ' +
+  'abandon abandon abandon abandon abandon art';
+
+// -------------------------------------------------------------------
 // Fake agent / vault factory used by the tests.
 // -------------------------------------------------------------------
 
@@ -223,11 +242,7 @@ describe('useAgentStore.restoreFromMnemonic() — assigns agentDid from vault.ge
 
     await useAgentStore
       .getState()
-      .restoreFromMnemonic(
-        'plum neck ring tail arm dune shuffle cruise boss arrow bleak ' +
-          'shield thumb curious tape trial tongue ozone vivid flame soap ' +
-          'equal cradle auction',
-      );
+      .restoreFromMnemonic(VALID_24_WORD_MNEMONIC);
 
     // The restore flow must have (a) called `agent.initialize` with the
     // supplied mnemonic and (b) assigned `agent.agentDid` to the
@@ -236,7 +251,7 @@ describe('useAgentStore.restoreFromMnemonic() — assigns agentDid from vault.ge
     const initArgs = agent.initialize.mock.calls[0][0] as {
       recoveryPhrase?: string;
     };
-    expect(initArgs?.recoveryPhrase).toMatch(/^plum /);
+    expect(initArgs?.recoveryPhrase).toBe(VALID_24_WORD_MNEMONIC);
     expect(vault.getDid).toHaveBeenCalledTimes(1);
     expect(agent.agentDid).toBeDefined();
     expect(agent.agentDid?.uri).toBe('did:dht:restored-alice');
@@ -258,7 +273,7 @@ describe('useAgentStore.restoreFromMnemonic() — assigns agentDid from vault.ge
 
     await useAgentStore
       .getState()
-      .restoreFromMnemonic('abandon '.repeat(23).trim() + ' about');
+      .restoreFromMnemonic(VALID_24_WORD_MNEMONIC);
 
     const state = useAgentStore.getState();
     expect(state.agent).toBe(agent as unknown as typeof state.agent);
@@ -297,7 +312,7 @@ describe('useAgentStore.refreshIdentities() after restore — no race-gate skip'
 
     await useAgentStore
       .getState()
-      .restoreFromMnemonic('abandon '.repeat(23).trim() + ' about');
+      .restoreFromMnemonic(VALID_24_WORD_MNEMONIC);
 
     // `restoreFromMnemonic` fires a fire-and-forget `refreshIdentities`
     // (`get().refreshIdentities().catch(() => {})`). Flush the
@@ -339,7 +354,7 @@ describe('useAgentStore.refreshIdentities() after restore — no race-gate skip'
 
     await useAgentStore
       .getState()
-      .restoreFromMnemonic('abandon '.repeat(23).trim() + ' about');
+      .restoreFromMnemonic(VALID_24_WORD_MNEMONIC);
 
     // Wait for the fire-and-forget refresh spawned by restore to finish
     // before asserting on the explicit refresh so the test is not
@@ -387,7 +402,7 @@ describe('useAgentStore.restoreFromMnemonic() — resilient when vault.getDid() 
     await expect(
       useAgentStore
         .getState()
-        .restoreFromMnemonic('abandon '.repeat(23).trim() + ' about'),
+        .restoreFromMnemonic(VALID_24_WORD_MNEMONIC),
     ).resolves.toBeUndefined();
 
     // getDid was attempted and threw.
@@ -411,5 +426,106 @@ describe('useAgentStore.restoreFromMnemonic() — resilient when vault.getDid() 
         call[0].includes('restoreFromMnemonic: could not assign agentDid'),
     );
     expect(assignWarns.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ===================================================================
+// VAL-VAULT-029 — restoreFromMnemonic() MUST validate the mnemonic
+// BEFORE wiping the native secret. A pre-review implementation
+// deleted `WALLET_ROOT_KEY_ALIAS` first and only validated the phrase
+// inside `BiometricVault.initialize()`, which meant any caller that
+// passed an invalid mnemonic permanently destroyed a working wallet.
+// The public store action now validates upfront, so these guardrails
+// pin that behavior and guarantee a future refactor can't regress it.
+// ===================================================================
+
+describe('useAgentStore.restoreFromMnemonic() — validates mnemonic BEFORE touching native state', () => {
+  it('rejects an empty string without invoking initializeAgent or the native module', async () => {
+    const NativeBiometricVault = require('@specs/NativeBiometricVault').default;
+
+    await expect(
+      useAgentStore.getState().restoreFromMnemonic(''),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_INVALID_MNEMONIC' });
+
+    // Native side-effects must not have fired — the pre-review bug
+    // was that `deleteSecret(WALLET_ROOT_KEY_ALIAS)` ran before
+    // validation, stranding any user who fat-fingered a word.
+    expect(mockInitializeAgent).not.toHaveBeenCalled();
+    expect(NativeBiometricVault.deleteSecret).not.toHaveBeenCalled();
+  });
+
+  it('rejects a wrong-length phrase without invoking initializeAgent or the native module', async () => {
+    const NativeBiometricVault = require('@specs/NativeBiometricVault').default;
+
+    await expect(
+      useAgentStore
+        .getState()
+        .restoreFromMnemonic('abandon abandon abandon'),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_INVALID_MNEMONIC' });
+
+    expect(mockInitializeAgent).not.toHaveBeenCalled();
+    expect(NativeBiometricVault.deleteSecret).not.toHaveBeenCalled();
+  });
+
+  it('rejects a 24-word phrase with invalid BIP-39 checksum without touching native state', async () => {
+    const NativeBiometricVault = require('@specs/NativeBiometricVault').default;
+
+    // "abandon" x 23 + "about" — a classic fixture bug: "about" is the
+    // CHECKSUM word for the 12-word all-zero entropy case ONLY. The
+    // 24-word all-zero mnemonic ends in "art". This phrase therefore
+    // has the right SHAPE (24 words, all from the wordlist) but fails
+    // the BIP-39 checksum.
+    const invalid =
+      'abandon abandon abandon abandon abandon abandon ' +
+      'abandon abandon abandon abandon abandon abandon ' +
+      'abandon abandon abandon abandon abandon abandon ' +
+      'abandon abandon abandon abandon abandon about';
+
+    await expect(
+      useAgentStore.getState().restoreFromMnemonic(invalid),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_INVALID_MNEMONIC' });
+
+    expect(mockInitializeAgent).not.toHaveBeenCalled();
+    expect(NativeBiometricVault.deleteSecret).not.toHaveBeenCalled();
+  });
+
+  it('leaves the prior store state intact when validation fails', async () => {
+    // Seed the store with a non-null, populated shape — a caller
+    // supplying garbage must not accidentally tear this down.
+    const preExistingAgent = {
+      agentDid: { uri: 'did:dht:pre-existing' },
+      identity: { list: jest.fn(), create: jest.fn() },
+      initialize: jest.fn(),
+      start: jest.fn(),
+      firstLaunch: jest.fn(),
+    };
+    const preExistingVault = { getDid: jest.fn() };
+    useAgentStore.setState({
+      agent: preExistingAgent as any,
+      authManager: { id: 'pre-existing-auth-manager' } as any,
+      vault: preExistingVault as any,
+      biometricState: 'ready',
+      recoveryPhrase: null,
+      identities: [
+        {
+          metadata: { name: 'pre-existing' },
+          did: { uri: 'did:dht:pre-existing' },
+        } as any,
+      ],
+    });
+
+    await expect(
+      useAgentStore.getState().restoreFromMnemonic('not a real mnemonic'),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_INVALID_MNEMONIC' });
+
+    // The store must still contain the pre-existing shape — a
+    // validation failure is semantically closer to "no-op / user typo"
+    // than "destructive reset".
+    const state = useAgentStore.getState();
+    expect(state.agent).toBe(preExistingAgent as any);
+    expect(state.authManager).toEqual({ id: 'pre-existing-auth-manager' });
+    expect(state.vault).toBe(preExistingVault as any);
+    expect(state.biometricState).toBe('ready');
+    expect(state.identities).toHaveLength(1);
   });
 });

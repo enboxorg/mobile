@@ -49,6 +49,29 @@ export type BiometricStatus =
 interface PersistedSessionState {
   hasCompletedOnboarding: boolean;
   hasIdentity: boolean;
+  /**
+   * Durable `pending-first-backup` flag. Set to `true` the moment
+   * `initializeFirstLaunch()` lands a new biometric-gated secret on
+   * device; cleared only after the user confirms the recovery phrase
+   * via RecoveryPhraseScreen.
+   *
+   * Why it MUST be persisted (VAL-VAULT-028): the one-shot recovery
+   * phrase lives in `useAgentStore.recoveryPhrase` — i.e. in JS memory
+   * — and is wiped by any `teardown()` (auto-lock on background, cold
+   * kill). Without a persisted counterpart, a relaunch between "secret
+   * provisioned" and "user confirmed backup" would observe `hasIdentity
+   * = true` + `recoveryPhrase = null` and route straight to
+   * `BiometricUnlock` → `Main`, stranding the user with a wallet they
+   * never backed up. The persisted flag forces the navigator to route
+   * back to RecoveryPhrase so the mnemonic can be re-derived from the
+   * already-provisioned native secret (see
+   * `useAgentStore.resumePendingBackup()`).
+   *
+   * Optional in the on-disk payload so older installs (persisted
+   * before this field existed) hydrate as `false`, which is the
+   * correct semantic — they have already passed the backup gate.
+   */
+  isPendingFirstBackup?: boolean;
 }
 
 function isPersistedSessionState(
@@ -70,6 +93,15 @@ export interface SessionState {
   hasCompletedOnboarding: boolean;
   hasIdentity: boolean;
   isLocked: boolean;
+  /**
+   * Durable `pending-first-backup` flag — see
+   * `PersistedSessionState.isPendingFirstBackup` for the full rationale.
+   * Hydrated from SecureStorage on launch and persisted on every write;
+   * the AppNavigator OR-combines it with the in-memory
+   * `agentStore.recoveryPhrase !== null` signal to decide whether the
+   * RecoveryPhrase gate should remain in front of the user.
+   */
+  isPendingFirstBackup: boolean;
   /** Biometric availability state (driven by hydrate + vault signals). */
   biometricStatus: BiometricStatus;
 
@@ -78,6 +110,43 @@ export interface SessionState {
   unlockSession: () => void;
   lock: () => void;
   setHasIdentity: (value: boolean) => void;
+  /**
+   * Commit the `pending-first-backup` flag and persist it atomically.
+   *
+   * Set to `true` as soon as `initializeFirstLaunch()` lands a new
+   * biometric-gated secret (alongside `setHasIdentity(true)`). Cleared
+   * only by the user confirming the phrase on RecoveryPhraseScreen.
+   * MUST round-trip through SecureStorage so a relaunch before
+   * confirmation still routes back to the RecoveryPhrase gate.
+   *
+   * Returns a `Promise<void>` so callers that need to coordinate
+   * downstream navigation on a durable write (e.g. the confirm handler
+   * can await before calling `unlockSession()`) can do so. Failures
+   * are swallowed by the underlying `persistSession` — the state flip
+   * still succeeds in memory so the UI remains responsive, and the
+   * next persisted write will re-commit the correct value.
+   */
+  setPendingFirstBackup: (value: boolean) => Promise<void>;
+  /**
+   * Atomically commit the post-setup snapshot.
+   *
+   * Called by `AppNavigator.handleSetupInitialized` the instant
+   * `initializeFirstLaunch()` returns with a freshly provisioned
+   * biometric secret + recovery phrase. Persists BOTH
+   * `hasIdentity = true` and `isPendingFirstBackup = true` in a single
+   * `setSecureItem(SESSION_KEY, ...)` write so there is NO interleaved
+   * state where one flag is on-disk and the other isn't — a
+   * cold-kill that hits between two separate persists (VAL-VAULT-028)
+   * could otherwise leave `{hasIdentity: true, isPendingFirstBackup:
+   * false}` on disk, stranding the user on Main with an un-backed-up
+   * wallet.
+   *
+   * Returns a `Promise<void>` so the navigator can sequence the
+   * in-memory flip after the on-disk commit has at least been
+   * scheduled. Failures are swallowed by the underlying
+   * `persistSession` — identical to `setHasIdentity` / `completeOnboarding`.
+   */
+  commitSetupInitialized: () => Promise<void>;
   /** Transition the biometric status exposed to the navigator. */
   setBiometricStatus: (next: BiometricStatus) => void;
   /**
@@ -175,6 +244,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   hasCompletedOnboarding: false,
   hasIdentity: false,
   isLocked: true,
+  isPendingFirstBackup: false,
   biometricStatus: 'unknown',
 
   hydrate: async () => {
@@ -227,12 +297,79 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         biometricStatus = 'ready';
       }
 
+      // -----------------------------------------------------------------
+      // Orphaned-secret recovery (VAL-VAULT-028)
+      //
+      // If the app crashed between "native secret provisioned inside
+      // `initializeFirstLaunch()`" and "`commitSetupInitialized()`
+      // landed its SecureStorage write", the on-disk session would
+      // hold `hasIdentity: false` while the native keystore already
+      // holds a biometric-gated secret. A naive hydrate would then
+      // route back to BiometricSetup and `initializeFirstLaunch()`
+      // would skip the `agent.initialize({})` branch (since
+      // `agent.firstLaunch()` returns `false` — the LevelDB entry
+      // already exists), returning `recoveryPhrase = ''` and never
+      // surfacing the phrase to the user.
+      //
+      // We detect the orphan by combining the three available signals:
+      //
+      //   - `hasCompletedOnboarding === true` (user at least got past
+      //     Welcome before crashing).
+      //   - `hasIdentity === false` (the post-setup persist never landed).
+      //   - `hasSecret === true` (the native keystore has a secret).
+      //
+      // When all three hold, we promote the session snapshot to
+      // `{hasIdentity: true, isPendingFirstBackup: true}` so the
+      // navigator routes to RecoveryPhrase where the resume-backup
+      // flow (`agentStore.resumePendingBackup()`) can re-derive the
+      // same mnemonic from the stored entropy. The promotion is
+      // committed back to SecureStorage so subsequent relaunches see
+      // the correct snapshot even if the resume flow itself is
+      // interrupted.
+      const committedHasCompletedOnboarding =
+        session.hasCompletedOnboarding ?? false;
+      const committedHasIdentity = session.hasIdentity ?? false;
+      const committedIsPendingFirstBackup = Boolean(
+        session.isPendingFirstBackup,
+      );
+      const isOrphanedSecret =
+        committedHasCompletedOnboarding &&
+        !committedHasIdentity &&
+        hasSecret;
+
+      const effectiveHasIdentity = committedHasIdentity || isOrphanedSecret;
+      const effectiveIsPendingFirstBackup =
+        committedIsPendingFirstBackup || isOrphanedSecret;
+
       set({
-        hasCompletedOnboarding: session.hasCompletedOnboarding ?? false,
-        hasIdentity: session.hasIdentity ?? false,
+        hasCompletedOnboarding: committedHasCompletedOnboarding,
+        hasIdentity: effectiveHasIdentity,
+        // `isPendingFirstBackup` is optional on disk so older installs
+        // (persisted before the field existed) hydrate as `false`, which
+        // matches the semantic "already backed up / never provisioned".
+        isPendingFirstBackup: effectiveIsPendingFirstBackup,
         biometricStatus,
         isHydrated: true,
       });
+
+      // Fire-and-forget re-persist when we promoted an orphaned
+      // secret — best-effort so a failure does not keep the user
+      // from reaching RecoveryPhrase (the in-memory flip above has
+      // already advanced the navigator). On subsequent launches,
+      // `commitSetupInitialized()` effectively runs again because
+      // `hydrate` re-evaluates the orphan condition.
+      if (isOrphanedSecret) {
+        console.warn(
+          '[session] orphaned native secret detected; promoting to isPendingFirstBackup',
+        );
+        // `void` marks a deliberately-unawaited fire-and-forget promise.
+        // eslint-disable-next-line no-void
+        void persistSession({
+          hasCompletedOnboarding: committedHasCompletedOnboarding,
+          hasIdentity: true,
+          isPendingFirstBackup: true,
+        });
+      }
     } catch {
       set({ isHydrated: true });
     }
@@ -244,6 +381,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     persistSession({
       hasCompletedOnboarding: s.hasCompletedOnboarding,
       hasIdentity: s.hasIdentity,
+      isPendingFirstBackup: s.isPendingFirstBackup,
     });
   },
 
@@ -257,6 +395,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     persistSession({
       hasCompletedOnboarding: s.hasCompletedOnboarding,
       hasIdentity: value,
+      isPendingFirstBackup: s.isPendingFirstBackup,
+    });
+  },
+
+  setPendingFirstBackup: async (value) => {
+    set({ isPendingFirstBackup: value });
+    const s = get();
+    await persistSession({
+      hasCompletedOnboarding: s.hasCompletedOnboarding,
+      hasIdentity: s.hasIdentity,
+      isPendingFirstBackup: value,
+    });
+  },
+
+  commitSetupInitialized: async () => {
+    // Flip BOTH flags in a single `set()` call so the navigator
+    // never observes a half-transitioned render.
+    set({ hasIdentity: true, isPendingFirstBackup: true });
+    const s = get();
+    await persistSession({
+      hasCompletedOnboarding: s.hasCompletedOnboarding,
+      hasIdentity: true,
+      isPendingFirstBackup: true,
     });
   },
 
@@ -293,14 +454,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // callers — we must not use it here because a swallowed rejection
     // would make `hydrateRestored` resolve even though the on-disk
     // state is stale, which is the bug this helper exists to prevent.
+    // Recovery-phrase restore gives us a wallet whose mnemonic the user
+    // has JUST typed — they own the phrase, so there is nothing left to
+    // back up. Always commit `isPendingFirstBackup: false` alongside the
+    // identity/onboarding half so a kill/relaunch right after restore
+    // never re-traps the user on RecoveryPhrase (VAL-VAULT-028).
     await persistSessionOrThrow({
       hasCompletedOnboarding: true,
       hasIdentity: true,
+      isPendingFirstBackup: false,
     });
     set({
       biometricStatus: 'ready',
       hasCompletedOnboarding: true,
       hasIdentity: true,
+      isPendingFirstBackup: false,
       isLocked: false,
     });
   },
@@ -317,6 +485,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       hasCompletedOnboarding: false,
       hasIdentity: false,
       isLocked: true,
+      isPendingFirstBackup: false,
       biometricStatus: 'unknown',
     });
   },

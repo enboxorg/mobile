@@ -353,8 +353,21 @@ describe('VAL-CROSS-008 — no PIN/password copy in rendered UI or session paylo
     for (const legacyProp of legacyPinEraProps) {
       expect(parsed).not.toHaveProperty(legacyProp);
     }
+    // Canonical persisted session shape (biometric-first, post VAL-VAULT-028):
+    //   - `hasCompletedOnboarding` — Welcome screen clears this.
+    //   - `hasIdentity`            — native secret provisioned.
+    //   - `isPendingFirstBackup`   — durable "user has not confirmed
+    //                                the mnemonic yet" flag that survives
+    //                                teardown / cold relaunch. See
+    //                                session-store `PersistedSessionState`.
+    // ANY additional key on this payload is a regression — e.g. the
+    // PIN-era fields above MUST NOT reappear.
     expect(Object.keys(parsed).sort()).toEqual(
-      ['hasCompletedOnboarding', 'hasIdentity'].sort(),
+      [
+        'hasCompletedOnboarding',
+        'hasIdentity',
+        'isPendingFirstBackup',
+      ].sort(),
     );
   });
 });

@@ -97,18 +97,19 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
     case errSecUserCanceled:
       return kErrUserCanceled;
     case errSecAuthFailed:
-      // NOTE: errSecAuthFailed is ambiguous on a biometry-current-set
-      // ACL item. It can mean a retryable authentication mismatch (e.g.
-      // presented biometric did not match the enrolled template, but the
-      // key itself is still valid), OR it can mean the underlying
-      // biometry set has been invalidated (enrollment changed) and the
-      // item can no longer be unwrapped. Default to the retryable AUTH_FAILED
-      // here; the biometry-invalidation path is disambiguated by
-      // `codeForGetSecretOSStatus:laContext:` below which surfaces
-      // KEY_INVALIDATED when LAContext confirms the failure is not a
-      // BiometryLockout / BiometryNotAvailable / BiometryNotEnrolled
-      // condition (i.e. the user presented a biometric successfully but
-      // the stored ACL was no longer valid).
+      // `errSecAuthFailed` on a biometry-current-set ACL item is a
+      // retryable biometric mismatch — the user presented a biometric
+      // that did not match the enrolled template (wrong face, wrong
+      // finger, glasses, hat, lighting, etc). The ACL itself is still
+      // valid; a retry with a better biometric presentation will
+      // succeed.
+      //
+      // We deliberately do NOT escalate this to KEY_INVALIDATED.
+      // Enrollment-change invalidation on iOS surfaces as the item
+      // being AUTO-DELETED (`errSecItemNotFound`) or as data the
+      // system can no longer decode (`errSecInvalidData` /
+      // `errSecDecode` / `errSecInteractionNotAllowed`); those codes
+      // land on `kErrKeyInvalidated` below. See VAL-VAULT-023.
       return kErrAuthFailed;
     case errSecInvalidData:
     case errSecDecode:
@@ -124,44 +125,38 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
   }
 }
 
-// Disambiguate the ambiguous errSecAuthFailed on a getSecret call against a
-// biometry-current-set ACL item:
+// Map a `getSecret()` OSStatus to a canonical VAULT_ERROR_* code.
 //
-//   - If LAContext.canEvaluatePolicy reports BiometryLockout,
-//     BiometryNotAvailable, or BiometryNotEnrolled, the failure is NOT due
-//     to ACL invalidation — the biometric subsystem simply could not evaluate
-//     the policy, so keep the retryable AUTH_FAILED mapping.
-//   - Otherwise (canEvaluatePolicy returns YES, meaning the user's
-//     biometrics are enrolled and usable), errSecAuthFailed on a
-//     biometry-current-set item indicates that the current biometric set has
-//     been invalidated relative to the one recorded at item-creation time —
-//     the item can never be unwrapped again. Surface as KEY_INVALIDATED so
-//     the JS vault can route to RecoveryRestore.
+// Historically this helper tried to disambiguate `errSecAuthFailed` into
+// `KEY_INVALIDATED` when `canEvaluatePolicy` still reported YES — the
+// assumption was "if biometrics can still be evaluated yet Keychain
+// refused auth, the stored biometry-current-set ACL must have been
+// invalidated by an enrollment change". In practice that signal is
+// ambiguous (VAL-VAULT-023): a user who fails Face ID once (wrong
+// angle, wrong face presented, etc.) will leave `canEvaluatePolicy`
+// perfectly YES yet produce `errSecAuthFailed`. Mapping that to
+// `KEY_INVALIDATED` routed the user into the recovery-restore flow
+// even though their key was still fine — a privacy/UX footgun that
+// forced re-typing the 24-word mnemonic after a single finger slip.
+//
+// On iOS the actual key-invalidation signal is different:
+//   - A biometry-current-set item whose enrollment has changed is
+//     AUTO-DELETED by the system at the enrollment-change boundary.
+//     A subsequent `SecItemCopyMatching` returns `errSecItemNotFound`,
+//     which is already mapped to `NOT_FOUND` by `codeForOSStatus:`.
+//   - `errSecInvalidData` / `errSecDecode` / `errSecInteractionNotAllowed`
+//     are the remaining "the item exists but cannot be unwrapped"
+//     signals — those stay on the `KEY_INVALIDATED` path inside
+//     `codeForOSStatus:`.
+//
+// Therefore: `errSecAuthFailed` ALWAYS maps to `AUTH_FAILED`
+// (retryable). The `laContext` parameter is kept for API-compat with
+// the call sites (they already thread a per-call `LAContext` through),
+// but we no longer consult it — every interpretation we could drive
+// from it has proven to be unreliable on-device.
 - (NSString *)codeForGetSecretOSStatus:(OSStatus)status
-                              laContext:(LAContext *)laContext {
-  if (status != errSecAuthFailed) {
-    return [self codeForOSStatus:status];
-  }
-
-  LAContext *probe = laContext ?: [[LAContext alloc] init];
-  NSError *laError = nil;
-  BOOL canEvaluate = [probe canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
-                                        error:&laError];
-  if (!canEvaluate && laError != nil) {
-    switch (laError.code) {
-      case LAErrorBiometryLockout:
-      case LAErrorBiometryNotAvailable:
-      case LAErrorBiometryNotEnrolled:
-        // The biometry subsystem itself could not evaluate — treat as a
-        // retryable auth failure rather than an invalidated key.
-        return kErrAuthFailed;
-      default:
-        break;
-    }
-  }
-  // Biometrics usable, yet Keychain still rejected auth: the stored
-  // biometry-current-set ACL no longer matches the current enrolled set.
-  return kErrKeyInvalidated;
+                              laContext:(__unused LAContext *)laContext {
+  return [self codeForOSStatus:status];
 }
 
 - (void)rejectFromOSStatus:(OSStatus)status
@@ -247,11 +242,33 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
       ? options[@"secretHex"] : nil;
 
   dispatch_async(_keychainQueue, ^{
-    // Resolve the 32-byte wallet secret: caller-provided bytes when valid
-    // hex was supplied, otherwise freshly generated CSPRNG entropy.
+    // Resolve the 32-byte wallet secret.
+    //
+    // Contract parity with Android (VAL-VAULT-025): the TurboModule spec
+    // says that if the caller supplies `secretHex`, those EXACT bytes MUST
+    // be stored. Any deviation — wrong length, non-hex character — must
+    // REJECT, never silently fall through to CSPRNG-generated entropy.
+    // Falling through would create a JS/native secret mismatch: the JS
+    // layer derives DID/CEK/mnemonic from the hex it passed in, but the
+    // native store would hold different random bytes, so a subsequent
+    // `getSecret()` + re-derive would yield a different DID and the
+    // wallet would deterministically fail to recover.
+    //
+    // We therefore distinguish TWO cases:
+    //   - `secretHex == nil` (caller did not opt in to pre-seeding) →
+    //     generate fresh CSPRNG entropy. This is the only valid fallback.
+    //   - `secretHex` is a non-nil NSString → it MUST be exactly
+    //     64 lower-case hex characters; anything else rejects with a
+    //     deterministic error so the JS layer can surface the mismatch.
     NSMutableData *secretData = [NSMutableData dataWithLength:kBiometricVaultSecretByteLength];
-    BOOL usingCallerBytes = NO;
-    if (secretHex.length == kBiometricVaultSecretByteLength * 2) {
+    if (secretHex != nil) {
+      if (secretHex.length != kBiometricVaultSecretByteLength * 2) {
+        [secretData resetBytesInRange:NSMakeRange(0, secretData.length)];
+        reject(kErrVault,
+               @"secretHex must be exactly 64 hex characters (32 bytes)",
+               nil);
+        return;
+      }
       uint8_t *bytes = (uint8_t *)secretData.mutableBytes;
       BOOL parseOk = YES;
       for (NSUInteger i = 0; i < kBiometricVaultSecretByteLength; i++) {
@@ -271,15 +288,12 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
         }
         bytes[i] = (uint8_t)((hiVal << 4) | loVal);
       }
-      if (parseOk) {
-        usingCallerBytes = YES;
-      } else {
+      if (!parseOk) {
         [secretData resetBytesInRange:NSMakeRange(0, secretData.length)];
         reject(kErrVault, @"secretHex is not valid 64-character lower-case hex", nil);
         return;
       }
-    }
-    if (!usingCallerBytes) {
+    } else {
       OSStatus randStatus = SecRandomCopyBytes(kSecRandomDefault,
                                                kBiometricVaultSecretByteLength,
                                                secretData.mutableBytes);
@@ -391,10 +405,16 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
       resolve([hex copy]);
     } else {
       if (dataRef != NULL) CFRelease(dataRef);
-      // Use the getSecret-specific OSStatus mapping which disambiguates
-      // errSecAuthFailed against the current LAContext so that an invalidated
-      // biometry-current-set ACL surfaces as KEY_INVALIDATED (driving
-      // RecoveryRestore routing) rather than a retryable AUTH_FAILED.
+      // Thin passthrough to the shared OSStatus mapping. Historically
+      // this branch used `codeForGetSecretOSStatus:laContext:` to try
+      // to disambiguate `errSecAuthFailed` into `KEY_INVALIDATED` via
+      // a `canEvaluatePolicy` probe, but the signal turned out to be
+      // unreliable in practice (retryable Face ID / Touch ID mismatches
+      // were routed into the recovery-restore flow). `errSecAuthFailed`
+      // now cleanly maps to `AUTH_FAILED` in `codeForOSStatus:`; the
+      // real key-invalidation signals on iOS are `errSecItemNotFound`
+      // (auto-deleted after enrollment change) and the
+      // `errSecInvalidData` / `errSecDecode` family. See VAL-VAULT-023.
       NSString *code = [self codeForGetSecretOSStatus:status laContext:context];
       NSString *message = [NSString stringWithFormat:@"getSecret failed (OSStatus %d)", (int)status];
       reject(code, message, nil);

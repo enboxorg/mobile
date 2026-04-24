@@ -14,6 +14,8 @@
 import { create } from 'zustand';
 import type { EnboxUserAgent, BearerIdentity } from '@enbox/agent';
 import type { AuthManager } from '@enbox/auth';
+import { validateMnemonic } from '@scure/bip39';
+import { wordlist } from '@scure/bip39/wordlists/english';
 
 import NativeBiometricVault from '@specs/NativeBiometricVault';
 
@@ -73,6 +75,43 @@ export interface AgentStore {
    * vault prompts biometrics through the native module.
    */
   unlockAgent: () => Promise<void>;
+
+  /**
+   * Resume a `pending-first-backup` flow after a cold relaunch / auto-
+   * lock drop.
+   *
+   * Context (VAL-VAULT-028): on a fresh-install setup, the vault
+   * provisions a native secret and the generated mnemonic lives ONLY
+   * in JS memory (`recoveryPhrase`). If the app backgrounds / is
+   * killed before the user confirms the backup, `teardown()` (or the
+   * OS process kill) drops `recoveryPhrase` and the user is routed
+   * back to RecoveryPhrase with nothing to show. The navigator
+   * invokes this action to re-seat the agent + vault under the
+   * already-provisioned secret and re-derive the SAME mnemonic from
+   * the stored entropy, so the backup screen can surface the phrase
+   * the user still needs to write down. Internally:
+   *
+   *   1. `initializeAgent()` — creates a fresh agent / authManager /
+   *      vault triple. We do NOT reuse a prior instance: the prior
+   *      vault was torn down and its in-memory derived material zeroed.
+   *   2. `agent.start({})` — prompts biometrics exactly once through
+   *      the native module and unlocks the vault, populating its
+   *      internal `_secretBytes` buffer.
+   *   3. `vault.getMnemonic()` — re-derives the 24-word BIP-39 phrase
+   *      from the in-memory entropy. No second biometric prompt and
+   *      no network call.
+   *   4. Commit the phrase to `recoveryPhrase` so the navigator routes
+   *      back to RecoveryPhrase with the mnemonic visible. The store's
+   *      `recoveryPhrase` field is treated exactly like it is after a
+   *      first-launch `initializeFirstLaunch()`: a one-shot JS-only
+   *      string that MUST be cleared via `clearRecoveryPhrase()` once
+   *      the user confirms the backup.
+   *
+   * All error codes surface via the same `biometricState` /
+   * `VAULT_ERROR_*` machinery as `unlockAgent()` so the screen can
+   * route invalidated / unavailable states to the right recovery path.
+   */
+  resumePendingBackup: () => Promise<void>;
 
   /**
    * Recovery path — invoked by `RecoveryRestoreScreen` when the user
@@ -418,13 +457,104 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
   },
 
-  restoreFromMnemonic: async (mnemonic: string) => {
+  resumePendingBackup: async () => {
     set({ isInitializing: true, error: null });
     try {
-      // 1. Wipe any prior biometric-gated secret so the vault's
-      //    `initialize({ recoveryPhrase })` path won't fast-fail with
-      //    `VAULT_ERROR_ALREADY_INITIALIZED`. Best-effort — a missing
-      //    alias resolves as success on both iOS and Android.
+      console.log('[agent-store] resumePendingBackup: creating agent...');
+      const { agent, authManager, vault } = await initializeAgent();
+      console.log(
+        '[agent-store] resumePendingBackup: starting vault (biometric prompt)...',
+      );
+      // `agent.start({})` forwards to `BiometricVault.unlock()` which
+      // prompts biometrics once and populates the vault's in-memory
+      // `_secretBytes` buffer. The subsequent `getMnemonic()` call
+      // does NOT re-prompt — it reads the already-in-memory entropy.
+      await agent.start({});
+      const recoveryPhrase = await vault.getMnemonic();
+      console.log('[agent-store] resumePendingBackup: mnemonic re-derived.');
+
+      set({
+        agent,
+        authManager,
+        vault,
+        isInitializing: false,
+        biometricState: 'ready',
+        recoveryPhrase,
+      });
+
+      get()
+        .refreshIdentities()
+        .catch(() => {});
+    } catch (err) {
+      const code = (err as { code?: unknown })?.code;
+      const message = messageFromError(err, 'Backup resume failed');
+      if (code === BIOMETRICS_UNAVAILABLE_CODE) {
+        console.warn(
+          '[agent-store] resumePendingBackup blocked: biometrics unavailable',
+        );
+      } else if (code === KEY_INVALIDATED_CODE) {
+        console.warn(
+          '[agent-store] resumePendingBackup blocked: biometric key invalidated',
+        );
+      } else {
+        console.error('[agent-store] resumePendingBackup failed:', message);
+      }
+      let nextBiometricState = get().biometricState;
+      if (code === BIOMETRICS_UNAVAILABLE_CODE) {
+        nextBiometricState = 'unavailable';
+      } else if (code === KEY_INVALIDATED_CODE) {
+        nextBiometricState = 'invalidated';
+      }
+      set({
+        error: message,
+        isInitializing: false,
+        agent: null,
+        authManager: null,
+        vault: null,
+        biometricState: nextBiometricState,
+      });
+      throw err;
+    }
+  },
+
+  restoreFromMnemonic: async (mnemonic: string) => {
+    // ---- Phase 1: pure validation (no store mutation, no native I/O) ----
+    //
+    // VAL-VAULT-029. `RecoveryRestoreScreen` already validates the
+    // phrase before invoking this action, but the public store action
+    // is also reachable from future call sites (deep links, dev tools,
+    // automated tests) that may not front-load that check. If we
+    // delete the prior biometric-gated secret before validating, a
+    // bogus mnemonic wipes the user's one working wallet and then
+    // fails in `BiometricVault.initialize()` — leaving the device
+    // with NO secret and no way back short of re-running first-launch
+    // setup with a brand-new mnemonic.
+    //
+    // Running BIP-39 validation here first, BEFORE flipping
+    // `isInitializing` or clearing any store references, means an
+    // invalid mnemonic is a pure no-op from the store's perspective:
+    // the pre-existing `agent` / `vault` / `identities` remain
+    // usable. A valid mnemonic falls through to the destructive
+    // phase with high confidence that `BiometricVault.initialize()`
+    // will succeed on it too (the vault re-validates internally as
+    // belt-and-suspenders, not a substitute).
+    const trimmed = mnemonic.trim();
+    if (!trimmed || !validateMnemonic(trimmed, wordlist)) {
+      const err = Object.assign(
+        new Error('Provided recovery phrase is not a valid BIP-39 mnemonic'),
+        { code: 'VAULT_ERROR_INVALID_MNEMONIC' as const },
+      );
+      throw err;
+    }
+
+    // ---- Phase 2: destructive restore ----
+    set({ isInitializing: true, error: null });
+    try {
+      // Wipe any prior biometric-gated secret so the vault's
+      // `initialize({ recoveryPhrase })` path won't fast-fail with
+      // `VAULT_ERROR_ALREADY_INITIALIZED`. Best-effort — a missing
+      // alias resolves as success on both iOS and Android. Only
+      // reached after Phase 1 has validated the mnemonic.
       try {
         await NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS);
       } catch (err) {
@@ -434,14 +564,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         );
       }
 
-      // 2. Create a fresh agent + vault. We do NOT reuse any existing
-      //    instance — the old state is tied to the now-invalid secret
-      //    and the agent's internal DWN layer must be wired against a
-      //    vault whose BearerDid matches the restored entropy.
+      // Create a fresh agent + vault. We do NOT reuse any existing
+      // instance — the old state is tied to the now-invalid secret
+      // and the agent's internal DWN layer must be wired against a
+      // vault whose BearerDid matches the restored entropy.
       console.log('[agent-store] restoreFromMnemonic: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
 
-      // 3. Re-seal the biometric vault with the caller-provided
+      // Re-seal the biometric vault with the caller-provided
       //    mnemonic. `agent.initialize` forwards `recoveryPhrase`
       //    straight into `BiometricVault.initialize` which derives the
       //    entropy, calls `NativeBiometricVault.generateAndStoreSecret`,
@@ -449,7 +579,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       //    rejection is mapped to a canonical VAULT_ERROR_* and
       //    surfaced via the screen. `AgentInitializeParams.password` is
       //    widened to optional by the postinstall patch, so we omit it.
-      await agent.initialize({ recoveryPhrase: mnemonic });
+      await agent.initialize({ recoveryPhrase: trimmed });
 
       // Upstream `EnboxUserAgent.initialize()` does NOT assign
       // `agentDid` — only `start()` does (`this.agentDid = await
@@ -582,6 +712,45 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // helper is idempotent so calling it when no poller is active is
     // a cheap no-op.
     stopPendingIdentityPoller();
+
+    // Actively zero the vault's in-memory sensitive buffers
+    // (`_secretBytes`, `_rootSeed`, `_contentEncryptionKey`) BEFORE we
+    // drop the store reference. Without this step (VAL-VAULT-022),
+    // releasing the `vault` reference only makes the material GC-eligible
+    // — the underlying `Uint8Array`s can linger in the JS heap until a
+    // collection cycle, and heap snapshots taken while the app is backgrounded
+    // can still expose the root entropy. `vault.lock()` synchronously calls
+    // the vault's internal `_clearInMemoryState()` helper which fills the
+    // buffers with zeroes before nulling the typed-array handles. The call
+    // is best-effort — if the vault object has already been locked the method
+    // is a no-op, and any unexpected throw is logged and swallowed so
+    // teardown still completes (auto-lock on background MUST NOT partially
+    // fail and strand the store in a half-torn-down state).
+    const { vault } = get();
+    if (vault) {
+      try {
+        // `BiometricVault.lock()` returns a Promise but only because the
+        // `IdentityVault` interface requires it — the implementation itself
+        // is synchronous. We deliberately do NOT `await` here to preserve
+        // the synchronous contract of `teardown()` that the auto-lock hook
+        // test relies on; the buffer zeroing has already happened before the
+        // Promise resolves.
+        // `void` marks a deliberately-unawaited fire-and-forget promise.
+        // eslint-disable-next-line no-void
+        void vault.lock().catch((err) => {
+          console.warn(
+            '[agent-store] teardown: vault.lock() rejected (ignored):',
+            err,
+          );
+        });
+      } catch (err) {
+        console.warn(
+          '[agent-store] teardown: vault.lock() threw synchronously (ignored):',
+          err,
+        );
+      }
+    }
+
     set({
       agent: null,
       authManager: null,

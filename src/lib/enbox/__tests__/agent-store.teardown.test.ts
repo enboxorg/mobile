@@ -324,3 +324,84 @@ describe('useAgentStore.teardown() — primitive contract (auto-lock prerequisit
     expect(state.identities).toEqual([]);
   });
 });
+
+// ===================================================================
+// VAL-VAULT-022 — teardown() MUST call vault.lock() so the vault's
+// in-memory `_secretBytes` / `_rootSeed` / `_contentEncryptionKey`
+// buffers are ZEROED synchronously. Simply dropping the store
+// reference leaves those buffers in the JS heap until GC, which is
+// too late for a background-snapshot attacker.
+// ===================================================================
+
+describe('useAgentStore.teardown() — invokes vault.lock() to zero in-memory key material', () => {
+  it('calls vault.lock() on the currently-seated vault', () => {
+    const lock = jest.fn(async () => undefined);
+    const fakeVault = { lock } as unknown as BiometricVault;
+
+    useAgentStore.setState({
+      agent: { fake: 'agent' } as any,
+      authManager: { fake: 'authManager' } as any,
+      vault: fakeVault,
+      isInitializing: false,
+      error: null,
+      recoveryPhrase: null,
+      identities: [],
+    });
+
+    useAgentStore.getState().teardown();
+
+    expect(lock).toHaveBeenCalledTimes(1);
+    // Reference is dropped after the lock invocation so no code path
+    // can re-use the now-zeroed vault instance accidentally.
+    expect(useAgentStore.getState().vault).toBeNull();
+  });
+
+  it('still completes teardown when vault.lock() rejects (failure is swallowed, store is cleared)', async () => {
+    const lockError = new Error('boom');
+    const lock = jest.fn(async () => {
+      throw lockError;
+    });
+    const fakeVault = { lock } as unknown as BiometricVault;
+
+    useAgentStore.setState({
+      agent: { fake: 'agent' } as any,
+      authManager: { fake: 'authManager' } as any,
+      vault: fakeVault,
+      isInitializing: false,
+      error: null,
+      recoveryPhrase: 'stale',
+      identities: [
+        { metadata: { name: 'x' }, did: { uri: 'did:dht:x' } } as any,
+      ],
+    });
+
+    // teardown() is synchronous from the caller's perspective — the
+    // lock() rejection is handled via `.catch()` on the returned
+    // promise, never leaking out as an unhandled rejection.
+    expect(() => useAgentStore.getState().teardown()).not.toThrow();
+
+    // Flush the microtask queue so the rejected lock() promise is
+    // observed by the `.catch()` handler (and not surfaced as an
+    // unhandled rejection).
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(lock).toHaveBeenCalledTimes(1);
+    const state = useAgentStore.getState();
+    expect(state.vault).toBeNull();
+    expect(state.agent).toBeNull();
+    expect(state.authManager).toBeNull();
+    expect(state.recoveryPhrase).toBeNull();
+    expect(state.identities).toEqual([]);
+  });
+
+  it('is a no-op for the vault hook when no vault is seated', () => {
+    // Start already-empty (beforeEach). No vault → no lock() call is
+    // even attempted. Teardown must still clear every other field.
+    useAgentStore.getState().teardown();
+
+    const state = useAgentStore.getState();
+    expect(state.vault).toBeNull();
+    expect(state.agent).toBeNull();
+  });
+});

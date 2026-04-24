@@ -379,6 +379,7 @@ describe('useSessionStore', () => {
       expect(state.hasIdentity).toBe(false);
       expect(state.isLocked).toBe(true);
       expect(state.biometricStatus).toBe('unknown');
+      expect(state.isPendingFirstBackup).toBe(false);
 
       const deletedKeys = mockedDeleteSecureItem.mock.calls.map(([k]) => k);
       expect(deletedKeys).toEqual(
@@ -387,6 +388,164 @@ describe('useSessionStore', () => {
           'enbox:enbox.vault.biometric-state',
         ]),
       );
+    });
+  });
+
+  // ===================================================================
+  // VAL-VAULT-028 — durable `isPendingFirstBackup` flag
+  //
+  // Guards the critical regression where a relaunch between
+  // "native secret provisioned" and "user confirmed recovery phrase"
+  // routed past the RecoveryPhrase gate and stranded users with an
+  // un-backed-up wallet.
+  // ===================================================================
+
+  describe('isPendingFirstBackup — persisted backup-gate flag', () => {
+    it('defaults to false on a fresh install', () => {
+      expect(useSessionStore.getState().isPendingFirstBackup).toBe(false);
+    });
+
+    it('hydrates as false when the persisted payload predates the field', async () => {
+      // Older installs wrote only hasCompletedOnboarding + hasIdentity —
+      // the missing `isPendingFirstBackup` key must hydrate as `false`,
+      // which matches the semantic "this wallet has already passed the
+      // backup gate" for all pre-VAL-VAULT-028 installs.
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'session:state')
+          return JSON.stringify({
+            hasCompletedOnboarding: true,
+            hasIdentity: true,
+          });
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      expect(useSessionStore.getState().isPendingFirstBackup).toBe(false);
+    });
+
+    it('round-trips a persisted `true` through hydrate', async () => {
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'session:state')
+          return JSON.stringify({
+            hasCompletedOnboarding: true,
+            hasIdentity: true,
+            isPendingFirstBackup: true,
+          });
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      expect(useSessionStore.getState().isPendingFirstBackup).toBe(true);
+    });
+
+    it('setPendingFirstBackup(true) persists a session payload that includes the flag', async () => {
+      await useSessionStore.getState().setPendingFirstBackup(true);
+
+      expect(useSessionStore.getState().isPendingFirstBackup).toBe(true);
+      const lastCall =
+        mockedSetSecureItem.mock.calls[
+          mockedSetSecureItem.mock.calls.length - 1
+        ];
+      expect(lastCall[0]).toBe('session:state');
+      expect(JSON.parse(lastCall[1] as string)).toMatchObject({
+        isPendingFirstBackup: true,
+      });
+    });
+
+    it('setPendingFirstBackup(false) clears the flag on disk', async () => {
+      await useSessionStore.getState().setPendingFirstBackup(true);
+      await useSessionStore.getState().setPendingFirstBackup(false);
+
+      expect(useSessionStore.getState().isPendingFirstBackup).toBe(false);
+      const lastCall =
+        mockedSetSecureItem.mock.calls[
+          mockedSetSecureItem.mock.calls.length - 1
+        ];
+      expect(JSON.parse(lastCall[1] as string)).toMatchObject({
+        isPendingFirstBackup: false,
+      });
+    });
+
+    it('commitSetupInitialized flips both hasIdentity and isPendingFirstBackup in a SINGLE setSecureItem write', async () => {
+      // VAL-VAULT-028 atomicity: two separate persists to the same
+      // SESSION_KEY could race (the `{hasIdentity: false,
+      // isPendingFirstBackup: true}` write could land AFTER the
+      // `{hasIdentity: true, isPendingFirstBackup: true}` write,
+      // leaving on-disk state half-committed). The atomic helper
+      // collapses both flips into one write.
+      mockedSetSecureItem.mockClear();
+
+      await useSessionStore.getState().commitSetupInitialized();
+
+      const sessionWrites = mockedSetSecureItem.mock.calls.filter(
+        ([key]) => key === 'session:state',
+      );
+      expect(sessionWrites.length).toBe(1);
+      const payload = JSON.parse(sessionWrites[0][1] as string);
+      expect(payload).toMatchObject({
+        hasIdentity: true,
+        isPendingFirstBackup: true,
+      });
+      expect(useSessionStore.getState().hasIdentity).toBe(true);
+      expect(useSessionStore.getState().isPendingFirstBackup).toBe(true);
+    });
+
+    it('hydrate promotes an orphaned native secret to {hasIdentity:true, isPendingFirstBackup:true}', async () => {
+      // Orphan scenario: native secret is on disk, but the app crashed
+      // between `initializeFirstLaunch()` provisioning it and
+      // `commitSetupInitialized()` landing its SecureStorage write. On
+      // relaunch, hydrate() must detect and recover from this state by
+      // promoting the in-memory flags so the navigator routes to
+      // RecoveryPhrase (where resumePendingBackup() re-derives the
+      // mnemonic from the already-provisioned entropy).
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'session:state')
+          return JSON.stringify({
+            hasCompletedOnboarding: true,
+            // hasIdentity is `false` on disk — the post-setup persist
+            // never landed before the crash.
+            hasIdentity: false,
+          });
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.hasIdentity).toBe(true);
+      expect(state.isPendingFirstBackup).toBe(true);
+      // The promotion is re-persisted so subsequent launches see a
+      // consistent snapshot even if the resume flow is interrupted.
+      const sessionWrites = mockedSetSecureItem.mock.calls.filter(
+        ([key]) => key === 'session:state',
+      );
+      expect(sessionWrites.length).toBeGreaterThan(0);
+      const lastWrite = JSON.parse(
+        sessionWrites[sessionWrites.length - 1][1] as string,
+      );
+      expect(lastWrite).toMatchObject({
+        hasIdentity: true,
+        isPendingFirstBackup: true,
+      });
+    });
+
+    it('hydrate does NOT promote when hasCompletedOnboarding is false (user never got past Welcome)', async () => {
+      // Defense in depth: if `hasCompletedOnboarding === false` then
+      // the user never reached BiometricSetup, so any native secret on
+      // disk is stale (e.g. from a previous install on the same device)
+      // and should NOT be promoted — the user still needs to see the
+      // Welcome / BiometricSetup flow.
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockResolvedValue(null);
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.hasIdentity).toBe(false);
+      expect(state.isPendingFirstBackup).toBe(false);
     });
   });
 });

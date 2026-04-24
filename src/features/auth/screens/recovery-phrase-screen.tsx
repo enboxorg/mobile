@@ -32,6 +32,11 @@ export interface RecoveryPhraseScreenProps {
    * it safely in the future. The caller passes the phrase as a single
    * string; the screen splits on whitespace.
    *
+   * May be an empty string (the initial state of a resume-backup flow
+   * — see `onResumeBackup` below — before the user has re-authenticated
+   * with biometrics). When empty AND `onResumeBackup` is provided, the
+   * screen renders the resume affordance instead of an empty grid.
+   *
    * The mnemonic MUST NEVER be persisted to storage. The screen does not
    * mirror the prop into any store, file, or clipboard — see VAL-UX-021.
    */
@@ -41,6 +46,24 @@ export interface RecoveryPhraseScreenProps {
    * phrase ("I've saved it"). The caller typically routes to `Main`.
    */
   onConfirm: () => void;
+  /**
+   * Resume-pending-backup hook (VAL-VAULT-028). When supplied, the
+   * screen renders a "Show recovery phrase" CTA whenever `mnemonic`
+   * is empty — the case where a cold relaunch or auto-lock cleared
+   * the in-memory mnemonic BEFORE the user confirmed the backup.
+   * Tapping the CTA invokes this callback, which is expected to:
+   *
+   *   1. Prompt biometrics via `BiometricVault.unlock()`.
+   *   2. Re-derive the same mnemonic from the stored entropy via
+   *      `BiometricVault.getMnemonic()`.
+   *   3. Commit the mnemonic back into `agentStore.recoveryPhrase` so
+   *      this screen re-renders with `mnemonic` populated.
+   *
+   * If omitted, an empty `mnemonic` renders an empty grid (preserves
+   * the pre-resume happy-path behaviour for unit tests / legacy call
+   * sites).
+   */
+  onResumeBackup?: () => Promise<void>;
   /**
    * Optional React Navigation prop. When provided, the screen installs
    * `gestureEnabled: false` and `headerBackVisible: false` so the user
@@ -53,6 +76,8 @@ export interface RecoveryPhraseScreenProps {
     setOptions?: (options: Record<string, unknown>) => void;
   };
 }
+
+const RESUME_LABEL = 'Show recovery phrase';
 
 /**
  * RecoveryPhraseScreen — shown once after first-launch biometric setup
@@ -77,6 +102,7 @@ export interface RecoveryPhraseScreenProps {
 export function RecoveryPhraseScreen({
   mnemonic,
   onConfirm,
+  onResumeBackup,
   navigation,
 }: RecoveryPhraseScreenProps) {
   const theme = useAppTheme();
@@ -94,6 +120,12 @@ export function RecoveryPhraseScreen({
   // only mounts while the app is active.
   const [isCovered, setIsCovered] = useState(false);
 
+  // Resume-flow state (VAL-VAULT-028). Only used when `mnemonic` is
+  // empty AND the caller supplied `onResumeBackup`. `resumeError`
+  // surfaces biometric prompt failures so the user can retry.
+  const [isResuming, setIsResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
+
   // Words rendered positionally. Memoized so re-renders don't re-split
   // the string. We do NOT store the split array in any persistent
   // location — it lives only in the React render tree until unmount.
@@ -101,6 +133,12 @@ export function RecoveryPhraseScreen({
     () => mnemonic.trim().split(/\s+/).filter(Boolean),
     [mnemonic],
   );
+
+  // `isAwaitingResume` is the "show the resume CTA instead of the
+  // grid" signal. Strictly opt-in via `onResumeBackup`; legacy
+  // call sites (unit tests / first-launch) that don't pass the prop
+  // keep the original happy-path rendering.
+  const isAwaitingResume = words.length === 0 && !!onResumeBackup;
 
   // ---------------------------------------------------------------
   // Android FLAG_SECURE lifecycle (VAL-UX-043)
@@ -156,6 +194,26 @@ export function RecoveryPhraseScreen({
     onConfirm();
   }, [onConfirm]);
 
+  const handleResume = useCallback(async () => {
+    if (!onResumeBackup || isResuming) return;
+    setIsResuming(true);
+    setResumeError(null);
+    try {
+      await onResumeBackup();
+      // On success, the caller has re-seated `agentStore.recoveryPhrase`
+      // so the navigator re-renders this screen with a populated
+      // `mnemonic` prop. No further local action needed.
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Could not show recovery phrase. Please try again.';
+      setResumeError(message);
+    } finally {
+      setIsResuming(false);
+    }
+  }, [isResuming, onResumeBackup]);
+
   return (
     <Screen contentContainerStyle={styles.content}>
       <View style={styles.hero}>
@@ -165,55 +223,98 @@ export function RecoveryPhraseScreen({
         >
           Back up your recovery phrase
         </Text>
-        <Text style={[styles.body, { color: theme.colors.textMuted }]}>
-          Write these {words.length} words down in order and keep them
-          somewhere only you can reach. This phrase is the only way to
-          restore your wallet if you lose access to biometrics on this
-          device.
-        </Text>
-        <Text style={[styles.body, { color: theme.colors.textMuted }]}>
-          Never share it. Never store it in a password manager, cloud
-          backup, photo, or screenshot.
-        </Text>
+        {isAwaitingResume ? (
+          <>
+            <Text style={[styles.body, { color: theme.colors.textMuted }]}>
+              You set up your wallet, but you still need to back up your
+              recovery phrase. Tap below and authenticate with biometrics
+              to view it now.
+            </Text>
+            <Text style={[styles.body, { color: theme.colors.textMuted }]}>
+              The phrase is the only way to restore your wallet if you
+              lose access to biometrics on this device. Never share it.
+            </Text>
+          </>
+        ) : (
+          <>
+            <Text style={[styles.body, { color: theme.colors.textMuted }]}>
+              Write these {words.length} words down in order and keep them
+              somewhere only you can reach. This phrase is the only way to
+              restore your wallet if you lose access to biometrics on this
+              device.
+            </Text>
+            <Text style={[styles.body, { color: theme.colors.textMuted }]}>
+              Never share it. Never store it in a password manager, cloud
+              backup, photo, or screenshot.
+            </Text>
+          </>
+        )}
       </View>
 
-      <View
-        accessibilityLabel="Recovery phrase"
-        style={[
-          styles.wordGrid,
-          {
-            backgroundColor: theme.colors.surface,
-            borderColor: theme.colors.border,
-          },
-        ]}
-        testID="recovery-phrase-word-grid"
-      >
-        {words.map((word, index) => (
-          <View
-            key={`${index}-${word}`}
-            style={[styles.wordCell, { borderColor: theme.colors.border }]}
-            testID={`recovery-phrase-word-${index + 1}`}
-          >
+      {isAwaitingResume ? (
+        <View style={styles.resumeContainer}>
+          {resumeError !== null && (
             <Text
-              style={[
-                styles.wordIndex,
-                { color: theme.colors.textMuted },
-              ]}
+              accessibilityLiveRegion="polite"
+              style={[styles.errorText, { color: theme.colors.warning }]}
+              testID="recovery-phrase-resume-error"
             >
-              {index + 1}.
+              {resumeError}
             </Text>
-            <Text style={[styles.wordText, { color: theme.colors.text }]}>
-              {word}
-            </Text>
+          )}
+          <AppButton
+            accessibilityLabel={RESUME_LABEL}
+            disabled={isResuming}
+            label={isResuming ? 'Authenticating…' : RESUME_LABEL}
+            onPress={handleResume}
+          />
+        </View>
+      ) : (
+        <>
+          <View
+            accessibilityLabel="Recovery phrase"
+            style={[
+              styles.wordGrid,
+              {
+                backgroundColor: theme.colors.surface,
+                borderColor: theme.colors.border,
+              },
+            ]}
+            testID="recovery-phrase-word-grid"
+          >
+            {words.map((word, index) => (
+              <View
+                key={`${index}-${word}`}
+                style={[
+                  styles.wordCell,
+                  { borderColor: theme.colors.border },
+                ]}
+                testID={`recovery-phrase-word-${index + 1}`}
+              >
+                <Text
+                  style={[
+                    styles.wordIndex,
+                    { color: theme.colors.textMuted },
+                  ]}
+                >
+                  {index + 1}.
+                </Text>
+                <Text
+                  style={[styles.wordText, { color: theme.colors.text }]}
+                >
+                  {word}
+                </Text>
+              </View>
+            ))}
           </View>
-        ))}
-      </View>
 
-      <AppButton
-        accessibilityLabel={CONFIRM_LABEL}
-        label={CONFIRM_LABEL}
-        onPress={handleConfirm}
-      />
+          <AppButton
+            accessibilityLabel={CONFIRM_LABEL}
+            label={CONFIRM_LABEL}
+            onPress={handleConfirm}
+          />
+        </>
+      )}
 
       {isCovered && (
         <View
@@ -256,6 +357,8 @@ const styles = StyleSheet.create({
   },
   wordIndex: { fontSize: 13, fontWeight: '600', minWidth: 22 },
   wordText: { fontSize: 15, fontWeight: '600' },
+  resumeContainer: { gap: 16, marginBottom: 16 },
+  errorText: { fontSize: 15, fontWeight: '600' },
   privacyCover: {
     position: 'absolute',
     top: 0,

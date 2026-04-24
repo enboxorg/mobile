@@ -879,6 +879,30 @@ export class BiometricVault
     return this._bearerDid;
   }
 
+  /**
+   * Re-derive the 24-word BIP-39 mnemonic from the vault's root entropy.
+   *
+   * Only callable while the vault is unlocked — callers MUST have gone
+   * through `initialize()` / `unlock()` first so `_secretBytes` is
+   * populated. The returned string is the same mnemonic that
+   * `initialize()` produced for the caller-provided / CSPRNG entropy, so
+   * this method can be used to re-show the phrase during the pending-
+   * first-backup resume flow after an auto-lock + foreground cycle (see
+   * VAL-VAULT-028 — pending-backup durability).
+   *
+   * The mnemonic is derived synchronously from the in-memory
+   * `_secretBytes` buffer; no native biometric prompt is triggered here.
+   * The caller is responsible for zeroing / discarding the returned
+   * string once the user confirms the backup (see
+   * `useAgentStore.clearRecoveryPhrase()`).
+   */
+  async getMnemonic(): Promise<string> {
+    if (this.isLocked() || !this._secretBytes) {
+      throw new VaultError('VAULT_ERROR_LOCKED', 'Vault is locked');
+    }
+    return entropyToMnemonic(this._secretBytes, wordlist);
+  }
+
   async getStatus(): Promise<BiometricVaultStatus> {
     const initialized = await this.isInitialized();
     let biometricState: BiometricState = this._biometricState;

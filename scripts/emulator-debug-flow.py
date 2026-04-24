@@ -529,6 +529,27 @@ def _write_placeholder_png(local_path: Path) -> None:
     local_path.write_bytes(_PLACEHOLDER_PNG_BYTES)
 
 
+"""
+Names of screens whose captured framebuffer could contain a user-visible
+BIP-39 mnemonic or other high-sensitivity text. ``screencap()`` short-
+circuits for these screens and ALWAYS writes the placeholder PNG instead
+of reading the emulator framebuffer, so a FLAG_SECURE regression at the
+native layer cannot leak the mnemonic into an uploaded CI artifact.
+
+Keep the set conservative — we only need the names we actually call
+``screencap("<name>")`` with on sensitive screens. At time of writing
+this is limited to the freshly-generated mnemonic on the
+``RecoveryPhraseScreen`` step; the recovery-restore input screen is
+user-typed and never flows through ``screencap()`` with a payload worth
+redacting.
+"""
+SENSITIVE_SCREEN_NAMES: frozenset[str] = frozenset(
+    {
+        "recovery-phrase",
+    }
+)
+
+
 def screencap(name: str) -> None:
     """Capture a screenshot and pull it to ``/tmp/emulator-ui/<name>.png``.
 
@@ -539,10 +560,29 @@ def screencap(name: str) -> None:
     and passes ``file *.png`` integrity checks. The structural content
     we actually verify against is captured separately by ``dump_ui`` and
     lives in the matching ``<name>.xml``.
+
+    For names in ``SENSITIVE_SCREEN_NAMES`` we skip the ``adb screencap``
+    call entirely and write the placeholder directly. This is a
+    defense-in-depth belt-and-suspenders for FLAG_SECURE: if the native
+    flag regresses (or is cleared early by a race), the framebuffer
+    read would return a legible mnemonic. The workflow uploads
+    ``/tmp/emulator-ui-artifacts/**`` unconditionally, so a real
+    screenshot of the recovery phrase would end up as a retained GitHub
+    Actions artifact. Skipping the capture makes that leak path
+    impossible, regardless of FLAG_SECURE status.
     """
 
     device_path = f"/sdcard/{name}.png"
     local_path = ROOT / f"{name}.png"
+    if name in SENSITIVE_SCREEN_NAMES:
+        print(
+            f"[screencap] {name!r}: sensitive-screen name, writing "
+            f"placeholder PNG without invoking adb screencap to guarantee "
+            f"no mnemonic capture regardless of FLAG_SECURE state.",
+            flush=True,
+        )
+        _write_placeholder_png(local_path)
+        return
     result = adb("shell", "screencap", "-p", device_path, check=False)
     if result.returncode != 0:
         combined = f"{result.stdout}\n{result.stderr}".strip()

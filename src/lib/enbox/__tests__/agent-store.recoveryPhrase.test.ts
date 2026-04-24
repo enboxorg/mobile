@@ -344,3 +344,272 @@ describe('useAgentStore.reset() — wipes native secret + session state (VAL-VAU
     await expect(useAgentStore.getState().reset()).resolves.toBeUndefined();
   });
 });
+
+// ===========================================================================
+// VAL-VAULT-028 — resumePendingBackup() re-derives the one-shot mnemonic
+//
+// Scenario: a user completed biometric setup (so the native vault holds a
+// freshly-provisioned secret) but closed the app before the backup
+// confirmation screen had shown all 24 words. On relaunch the
+// `isPendingFirstBackup` flag is `true`, the navigator routes to
+// `RecoveryPhrase` with `mnemonic === null`, and the screen presents a
+// "Show recovery phrase" CTA. Pressing that CTA invokes
+// `useAgentStore.resumePendingBackup()`.
+//
+// Contract pinned here:
+//   1. `resumePendingBackup` is exposed as a callable store action.
+//   2. On success it populates `recoveryPhrase` with the mnemonic
+//      re-derived from the vault's in-memory entropy (via
+//      `vault.getMnemonic()`).
+//   3. It prompts biometrics exactly once via `agent.start({})` — it
+//      does NOT re-run `initialize({})` or touch the native secret.
+//   4. It sets `biometricState` to `'ready'` on success and leaves
+//      `isInitializing: false`.
+//   5. The phrase is never written to SecureStorage.
+// ===========================================================================
+
+describe('useAgentStore.resumePendingBackup() — re-derives mnemonic from native secret (VAL-VAULT-028)', () => {
+  // These tests have to reach the real `vault.getMnemonic()` path, which
+  // depends on `BiometricVault.unlock()` populating `_secretBytes`. The
+  // virtual `@enbox/*` mocks at the top of this file stub
+  // `EnboxUserAgent.start` as a no-op (`async () => undefined`), so
+  // without additional wiring the resume flow would call a stubbed
+  // `start()` that never populates the vault, and `getMnemonic()` would
+  // throw `VAULT_ERROR_LOCKED`. To keep this suite self-contained and
+  // cover just the store-level orchestration contract, we replace
+  // `initializeAgent` via `jest.doMock` with a hand-rolled agent+vault
+  // pair where `start()` pre-unlocks a fake vault and `getMnemonic()`
+  // returns a deterministic fixture.
+
+  const FIXED_RESUMED_PHRASE =
+    'abandon abandon abandon abandon abandon abandon ' +
+    'abandon abandon abandon abandon abandon abandon ' +
+    'abandon abandon abandon abandon abandon abandon ' +
+    'abandon abandon abandon abandon abandon art';
+
+  function makeResumeAgentAndVault(opts: {
+    startError?: Error;
+    getMnemonicError?: Error;
+    getDidUri?: string;
+  }) {
+    const didUri = opts.getDidUri ?? 'did:dht:resume-test';
+    const getMnemonic = jest.fn(
+      opts.getMnemonicError
+        ? async () => {
+            throw opts.getMnemonicError as Error;
+          }
+        : async () => FIXED_RESUMED_PHRASE,
+    );
+    const getDid = jest.fn(async () => ({ uri: didUri }));
+    const vault = { getMnemonic, getDid };
+    // Matches upstream `EnboxUserAgent.start()` semantics: it assigns
+    // `this.agentDid = await this.vault.getDid()` after unlocking the
+    // vault. Mirroring that here keeps the downstream
+    // `refreshIdentities()` race-gate from scheduling a 2s retry
+    // poller, which would otherwise leak an open timer past test
+    // completion and trigger Jest's "did not exit" warning.
+    const agent: {
+      agentDid: { uri: string } | undefined;
+      initialize: jest.Mock;
+      start: jest.Mock;
+      firstLaunch: jest.Mock;
+      identity: { list: jest.Mock; create: jest.Mock };
+    } = {
+      agentDid: undefined,
+      initialize: jest.fn(),
+      start: jest.fn(
+        opts.startError
+          ? async () => {
+              throw opts.startError as Error;
+            }
+          : async () => {
+              agent.agentDid = { uri: didUri };
+            },
+      ),
+      firstLaunch: jest.fn(async () => false),
+      identity: { list: jest.fn(async () => []), create: jest.fn() },
+    };
+    return { agent, vault };
+  }
+
+  beforeEach(() => {
+    jest.resetModules();
+    // Re-register the virtual mocks after `jest.resetModules()` cleared
+    // the module cache — otherwise the next `require('@/lib/enbox/agent-store')`
+    // would try to resolve the real ESM packages and crash on
+    // `Cannot find module '@enbox/agent'`.
+    jest.doMock(
+      '@enbox/agent',
+      () => {
+        class AgentDwnApi {
+          static _tryCreateDiscoveryFile() {
+            return {};
+          }
+        }
+        class EnboxUserAgent {
+          static create = jest.fn();
+        }
+        class AgentCryptoApi {}
+        class LocalDwnDiscovery {}
+        return {
+          __esModule: true,
+          AgentDwnApi,
+          EnboxUserAgent,
+          AgentCryptoApi,
+          LocalDwnDiscovery,
+        };
+      },
+      { virtual: true },
+    );
+    jest.doMock(
+      '@enbox/auth',
+      () => ({ __esModule: true, AuthManager: { create: jest.fn() } }),
+      { virtual: true },
+    );
+    jest.doMock(
+      '@enbox/dids',
+      () => ({
+        __esModule: true,
+        BearerDid: class {},
+        DidDht: { create: jest.fn() },
+      }),
+      { virtual: true },
+    );
+    jest.doMock(
+      '@enbox/crypto',
+      () => ({
+        __esModule: true,
+        LocalKeyManager: class {},
+        computeJwkThumbprint: jest.fn(),
+      }),
+      { virtual: true },
+    );
+  });
+
+  it('populates `recoveryPhrase` with the mnemonic returned by vault.getMnemonic()', async () => {
+    const { agent, vault } = makeResumeAgentAndVault({});
+    jest.doMock('@/lib/enbox/agent-init', () => ({
+      __esModule: true,
+      initializeAgent: jest.fn(async () => ({
+        agent,
+        authManager: { id: 'resume-auth-manager' },
+        vault,
+      })),
+      createBiometricVault: jest.fn(),
+    }));
+
+    const { useAgentStore: freshStore } = require('@/lib/enbox/agent-store');
+    await freshStore.getState().resumePendingBackup();
+
+    const state = freshStore.getState();
+    expect(state.recoveryPhrase).toBe(FIXED_RESUMED_PHRASE);
+    expect(state.agent).toBe(agent as any);
+    expect(state.vault).toBe(vault as any);
+    expect(state.biometricState).toBe('ready');
+    expect(state.isInitializing).toBe(false);
+    expect(state.error).toBeNull();
+
+    // Biometric prompt was issued exactly once (via `agent.start({})`)
+    // and the pre-existing secret was NEVER touched.
+    expect(agent.start).toHaveBeenCalledTimes(1);
+    expect(agent.initialize).not.toHaveBeenCalled();
+    expect(vault.getMnemonic).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT touch NativeBiometricVault.deleteSecret (the pending secret must survive the resume)', async () => {
+    const { agent, vault } = makeResumeAgentAndVault({});
+    jest.doMock('@/lib/enbox/agent-init', () => ({
+      __esModule: true,
+      initializeAgent: jest.fn(async () => ({
+        agent,
+        authManager: { id: 'resume-auth-manager' },
+        vault,
+      })),
+      createBiometricVault: jest.fn(),
+    }));
+    nativeBiometric.deleteSecret.mockClear();
+
+    const { useAgentStore: freshStore } = require('@/lib/enbox/agent-store');
+    await freshStore.getState().resumePendingBackup();
+
+    expect(nativeBiometric.deleteSecret).not.toHaveBeenCalled();
+  });
+
+  it('never writes the mnemonic to SecureStorage (VAL-VAULT-018 continues to hold on resume)', async () => {
+    const { agent, vault } = makeResumeAgentAndVault({});
+    jest.doMock('@/lib/enbox/agent-init', () => ({
+      __esModule: true,
+      initializeAgent: jest.fn(async () => ({
+        agent,
+        authManager: { id: 'resume-auth-manager' },
+        vault,
+      })),
+      createBiometricVault: jest.fn(),
+    }));
+    nativeSecureStorage.setItem.mockClear();
+
+    const { useAgentStore: freshStore } = require('@/lib/enbox/agent-store');
+    await freshStore.getState().resumePendingBackup();
+
+    const allArgs = JSON.stringify(
+      nativeSecureStorage.setItem.mock.calls,
+    );
+    expect(allArgs).not.toContain(FIXED_RESUMED_PHRASE);
+  });
+
+  it('propagates a biometric cancellation and clears in-memory state so the UI can re-prompt', async () => {
+    const cancelled = Object.assign(new Error('user cancelled biometrics'), {
+      code: 'VAULT_ERROR_USER_CANCEL',
+    });
+    const { agent, vault } = makeResumeAgentAndVault({ startError: cancelled });
+    jest.doMock('@/lib/enbox/agent-init', () => ({
+      __esModule: true,
+      initializeAgent: jest.fn(async () => ({
+        agent,
+        authManager: { id: 'resume-auth-manager' },
+        vault,
+      })),
+      createBiometricVault: jest.fn(),
+    }));
+
+    const { useAgentStore: freshStore } = require('@/lib/enbox/agent-store');
+    await expect(
+      freshStore.getState().resumePendingBackup(),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_USER_CANCEL' });
+
+    // In-memory agent/vault/auth are cleared so a subsequent retry
+    // starts from a clean slate. recoveryPhrase stays null.
+    const state = freshStore.getState();
+    expect(state.recoveryPhrase).toBeNull();
+    expect(state.agent).toBeNull();
+    expect(state.vault).toBeNull();
+    expect(state.authManager).toBeNull();
+    expect(state.isInitializing).toBe(false);
+  });
+
+  it('flips biometricState to `invalidated` when the keystore reports KEY_INVALIDATED', async () => {
+    const invalidated = Object.assign(
+      new Error('biometric enrollment changed'),
+      { code: 'VAULT_ERROR_KEY_INVALIDATED' },
+    );
+    const { agent, vault } = makeResumeAgentAndVault({
+      startError: invalidated,
+    });
+    jest.doMock('@/lib/enbox/agent-init', () => ({
+      __esModule: true,
+      initializeAgent: jest.fn(async () => ({
+        agent,
+        authManager: { id: 'resume-auth-manager' },
+        vault,
+      })),
+      createBiometricVault: jest.fn(),
+    }));
+
+    const { useAgentStore: freshStore } = require('@/lib/enbox/agent-store');
+    await expect(
+      freshStore.getState().resumePendingBackup(),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_KEY_INVALIDATED' });
+
+    expect(freshStore.getState().biometricState).toBe('invalidated');
+  });
+});
