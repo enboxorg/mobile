@@ -226,6 +226,85 @@ def tap_text(text: str, timeout: float = 25.0) -> None:
     adb("shell", "input", "tap", str(x), str(y))
 
 
+def _node_visible(node: ET.Element) -> bool:
+    """Return True when ``node`` has non-zero, on-screen bounds.
+
+    React Native's ScrollView mounts the entire child tree, but nodes that
+    are clipped below the fold render with ``bounds="[0,0][0,0]"`` in the
+    uiautomator dump. A visible tap target must have a positive-extent
+    rectangle that uiautomator can target.
+    """
+
+    bounds = node.attrib.get("bounds", "")
+    match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+    if not match:
+        return False
+    left, top, right, bottom = map(int, match.groups())
+    return right > left and bottom > top
+
+
+def scroll_into_view(
+    text: str, timeout: float = 45.0, max_scrolls: int = 8
+) -> ET.Element:
+    """Swipe the foreground ScrollView up until ``text`` is tappable.
+
+    The RecoveryPhrase screen wraps the hero + 24-word grid + confirm button
+    inside the shared :class:`Screen` ``<ScrollView>``. On a Pixel 5
+    emulator (1080x2340), the word grid and the final "I've saved it"
+    button both land below the initial visible window; uiautomator's
+    dump reports the confirm button at ``[0,0][0,0]`` (or omits it) until
+    the list has been scrolled.
+
+    Strategy: check the current dump first (handles the case where the
+    button is already visible), then issue bounded-length upward swipes
+    on the content region and re-poll. Raises ``TimeoutError`` if the
+    text never becomes visible.
+    """
+
+    deadline = time.time() + timeout
+
+    def _locate_visible() -> Optional[ET.Element]:
+        root = dump_ui()
+        node = find_node_by_text(root, text)
+        if node is not None and _node_visible(node):
+            return node
+        return None
+
+    node = _locate_visible()
+    if node is not None:
+        return node
+
+    for attempt in range(1, max_scrolls + 1):
+        if time.time() >= deadline:
+            break
+        # Swipe from the lower-middle of the screen to the upper-middle,
+        # emulating a drag to reveal content below the current fold. The
+        # 500ms duration avoids being interpreted as a fling (which would
+        # overshoot).
+        adb(
+            "shell",
+            "input",
+            "swipe",
+            "540",
+            "1800",
+            "540",
+            "700",
+            "500",
+        )
+        time.sleep(0.8)
+        node = _locate_visible()
+        if node is not None:
+            print(
+                f"[scroll_into_view] {text!r} visible after {attempt} swipe(s)"
+            )
+            return node
+
+    raise TimeoutError(
+        f"Text not visible after {max_scrolls} swipe(s) within "
+        f"{timeout:.0f}s: {text!r}"
+    )
+
+
 def tap_node(node: ET.Element) -> None:
     x, y = parse_bounds(node.attrib["bounds"])
     adb("shell", "input", "tap", str(x), str(y))
@@ -1368,10 +1447,17 @@ def main() -> int:
     satisfy_biometric_prompt(timeout=30.0)
 
     print("== recovery-phrase ==")
-    wait_for_text(RECOVERY_PHRASE_CONFIRM, timeout=45.0)
+    # First wait for the RecoveryPhrase screen to mount — any anchor that is
+    # always at the top of the screen works. The hero title is guaranteed to
+    # be in-view before any scrolling is required.
+    wait_for_text("Back up your recovery phrase", timeout=45.0)
     screencap("recovery-phrase")
     dump_ui("recovery-phrase")
-    tap_text(RECOVERY_PHRASE_CONFIRM, timeout=15.0)
+    # The 24-word grid pushes the "I've saved it" confirm button below the
+    # initial viewport on a standard Pixel 5 emulator; scroll it into view
+    # so the uiautomator dump reports non-zero bounds we can tap.
+    confirm_node = scroll_into_view(RECOVERY_PHRASE_CONFIRM, timeout=45.0)
+    tap_node(confirm_node)
 
     print("== main-wallet ==")
     wait_for_text(MAIN_WALLET_ANCHOR, timeout=45.0)
