@@ -32,6 +32,12 @@ This mission has two testing surfaces:
 - **Isolation:** `force-avd-creation: true` recreates the AVD on each run; `adb logcat -c` clears logs pre-run; `adb uninstall org.enbox.mobile` not required because APK install reinstalls.
 - **Biometric automation:** `adb shell locksettings set-pin 0000` sets a device PIN (required before enrolling fingerprints on Android). Enrollment via the Settings fingerprint intent + `adb -e emu finger touch 1` loop. Prompt satisfaction at runtime via the same `emu finger touch 1` command once the `com.android.systemui` BiometricPrompt overlay is visible.
 - **Credentials:** none beyond `GITHUB_TOKEN` (provided by the runner).
+- **Sensitive UI dump caveat:** `uiautomator dump` captures text even for
+  screens whose PNG screenshots are blocked by `FLAG_SECURE`. Do not
+  treat `*.xml` dumps as automatically safe. In particular, the
+  `RecoveryPhrase` screen's dump must be redacted or skipped before
+  upload, and validators should scan uploaded XML dumps for mnemonic or
+  other secret-bearing text, not just `logcat-*.txt`.
 
 ## Why `agent-browser` and `tuistory` do not apply
 

@@ -1,0 +1,28 @@
+{
+  "featureId": "debug-emulator-workflow-update",
+  "reviewedAt": "2026-04-24T01:14:16Z",
+  "commitId": "335943a4f44b209a696044c800489b42c3196abb",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Fail. The commit satisfies the static workflow requirements it targeted (YAML still parses, timeout is raised, `target: google_apis` is explicit, `force-avd-creation` stays true, logcat captures are size-bounded, and the artifact name/retention are deterministic). But removing `|| true` from the Python flow step without moving artifact collection into an always-run cleanup path introduced a failure-path regression: when the flow script exits non-zero, the `set -e` script aborts before screenshots are copied or the final logcat files are written, leaving failed CI runs without the artifacts needed for diagnosis and for the negative-path CI assertions.",
+    "issues": [
+      {
+        "file": ".github/workflows/debug-emulator.yml",
+        "line": 105,
+        "severity": "blocking",
+        "description": "The feature makes `python3 scripts/emulator-debug-flow.py` fail the job loudly (`debug-emulator.yml:105`), but it leaves that command in the middle of a `set -e` script block whose artifact-copy and final-logcat commands only run afterward (`debug-emulator.yml:107-127`). On any flow regression, the step now exits at line 105 before `/tmp/emulator-ui` is copied into `/tmp/emulator-ui-artifacts` and before `/tmp/logcat-full.txt` / `/tmp/logcat-rn.txt` are regenerated, so the later `upload-artifact` step runs with missing or incomplete inputs. That breaks the milestone's debugging contract and the failure-path assertions that depend on those files. This is not hypothetical: the later follow-up commit `e83ff38715ecd44c12778fa7c7067cd165bfe950` explicitly added an EXIT-trap cleanup because, in its words, '`set -e` caused those steps to be skipped on flow failure, and the upload step ran with empty inputs.' The fix here is to move the copy/logcat work into an always-run cleanup path (for example an EXIT trap or a wrapper script) while still propagating the Python script's non-zero exit status."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker marked `skillFeedback.followedProcedure: true`, but the transcript skeleton shows the workflow file was edited before any red-first artifact check or pre-edit parsing/grep verification, which conflicts with the mobile-feature-worker procedure for config changes.",
+      "evidence": "`.factory/skills/mobile-feature-worker/SKILL.md:20-29` requires loading the relevant mission/library context and `SKILL.md:66-73` requires a red-first verification approach for non-trivial behavior, including config/file-parsing checks for configuration changes. In the transcript skeleton for worker session `7cbd1c51-efce-4164-8dd4-29e153fa4e79`, the first substantive actions after reading files are two `Edit` calls against `.github/workflows/debug-emulator.yml`; the YAML parse and grep-based checks only appear afterward."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed commit `335943a4f44b209a696044c800489b42c3196abb` for `debug-emulator-workflow-update`. The static workflow hardening is present, but the feature still fails review because a non-zero `emulator-debug-flow.py` exit now aborts the `set -e` script before screenshots and final logcats are collected, so failed runs lose the artifacts needed for CI debugging."
+}

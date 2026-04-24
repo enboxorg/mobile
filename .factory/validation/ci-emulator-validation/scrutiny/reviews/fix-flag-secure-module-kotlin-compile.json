@@ -1,0 +1,43 @@
+{
+  "featureId": "fix-flag-secure-module-kotlin-compile",
+  "reviewedAt": "2026-04-24T01:15:14Z",
+  "commitId": "4eca1ce946ecd648ba0d3b87d9f59d3196380b67",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The Kotlin edit in `android/app/src/main/java/org/enbox/mobile/nativemodules/FlagSecureModule.kt` is correct: it switches to `reactApplicationContext.currentActivity`, preserves the null-activity no-op behavior, and keeps `FLAG_SECURE` mutations on the UI thread. However, the feature's own acceptance criteria required `ci.yml`, `build-apk.yml`, and `debug-emulator.yml` to all be green before completion, and the final handoff explicitly records that `debug-emulator.yml` was still failing at `enroll_fingerprint` with no successful run on the `4eca1ce` branch tip. Because the feature was still marked completed, it did not fully satisfy the requested behavior.",
+    "issues": [
+      {
+        "file": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-23T16-23-58-410Z__fix-flag-secure-module-kotlin-compile__9f3832eb-f9d6-4f00-ac54-bdd7069be526.json",
+        "line": 12,
+        "severity": "blocking",
+        "description": "The final handoff says `debug-emulator.yml` was still not green and returns control to the orchestrator with work left undone, but this feature's own contract required a green debug-emulator run before it could be marked complete. That leaves the requested verification scope incomplete."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The mission bookkeeping marked this feature completed even though its last handoff was only `partial` and explicitly left `debug-emulator.yml` failing. That can cause later automation to treat an incomplete feature as done.",
+      "evidence": "`/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/features.json:125-147` requires `debug-emulator.yml latest run green` yet also records `\"status\": \"completed\"`; `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-23T16-23-58-410Z__fix-flag-secure-module-kotlin-compile__9f3832eb-f9d6-4f00-ac54-bdd7069be526.json:7-12` records `\"successState\": \"partial\"`, `\"returnToOrchestrator\": true`, and says `debug-emulator.yml is NOT green`."
+    },
+    {
+      "area": "skills",
+      "observation": "The `mobile-feature-worker` skill's honesty gate requires reading the mission, validation contract, and relevant library docs before claiming `skillFeedback.followedProcedure: true`, but this transcript does not show those required reads for this session.",
+      "evidence": "`/home/liran/src/enboxorg/mobile/.factory/skills/mobile-feature-worker/SKILL.md:20-32` requires reads of `mission.md`, `validation-contract.md`, `architecture.md`, `environment.md`, and `user-testing.md` when relevant; `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/worker-transcripts.jsonl:79` shows reads for `FlagSecureModule.kt`, `AGENTS.md`, `.factory/services.yaml`, the new CI note, and `features.json`, but not those required docs; `/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-23T16-23-58-410Z__fix-flag-secure-module-kotlin-compile__9f3832eb-f9d6-4f00-ac54-bdd7069be526.json:59-63` still records `\"followedProcedure\": true`."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The shared library doc for the Android FLAG_SECURE bridge is now stale: it still tells future workers to call `currentActivity.runOnUiThread`, which is the exact access pattern that failed Kotlin compilation and was fixed here.",
+      "evidence": "`/home/liran/src/enboxorg/mobile/.factory/library/android-flag-secure-native-module.md:17-19` documents `currentActivity.runOnUiThread { … }`; the actual fixed implementation uses `reactApplicationContext.currentActivity` at `/home/liran/src/enboxorg/mobile/android/app/src/main/java/org/enbox/mobile/nativemodules/FlagSecureModule.kt:55-72`."
+    },
+    {
+      "area": "conventions",
+      "observation": "The handoff's `commitId` points at a documentation-only commit instead of the commit that actually changed `FlagSecureModule.kt`, which makes the review trail ambiguous for multi-session features.",
+      "evidence": "`/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/handoffs/2026-04-23T16-23-58-410Z__fix-flag-secure-module-kotlin-compile__9f3832eb-f9d6-4f00-ac54-bdd7069be526.json:6,11` records `commitId=4eca1ce...` while also saying the Kotlin fix was already in `ccaf506`; `git show --stat 4eca1ce946ecd648ba0d3b87d9f59d3196380b67` shows only `.factory/library/ci-debug-emulator-fingerprint-enrollment-timeout.md`, while `git show --stat ccaf506ac65d50b33c4cee8d150040a31230b097` contains the `FlagSecureModule.kt` code change."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The `FlagSecureModule.kt` code change itself is correct, but the feature did not meet its own completion criteria because `debug-emulator.yml` was still failing when the feature was marked completed. I also recorded shared-state gaps around stale FLAG_SECURE documentation, procedure-compliance tracking, and the handoff pointing at a doc-only commit instead of the actual code fix."
+}

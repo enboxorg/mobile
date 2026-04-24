@@ -57,6 +57,16 @@ No mission-specific environment variables. The app itself has no `.env` file; al
 
 This orchestrator host has 257 GB RAM / 32 cores. Workers may run multiple `rg`/`jest` invocations in parallel when helpful; however, Jest itself is pinned to `--runInBand` to avoid flakes with React Native's jest-preset.
 
+## Jest + polyfills quirk (local-only)
+
+`src/lib/polyfills.ts` installs diagnostic wrappers around
+`globalThis.crypto.subtle` methods. Under Node/Jest, those wrappers can
+mutate the built-in `SubtleCrypto` object and leave Jest hanging on exit
+even when all tests pass. If a test needs to `require()` the polyfills
+module directly, temporarily hide `globalThis.crypto.subtle` before the
+module load (the current `polyfills.test.ts` does this) so the wrappers
+do not patch Node's native implementation.
+
 ## Bun cache gotcha (local-only)
 
 Bun 1.3.11 caches the **post-install** contents of packages at `~/.bun/install/cache/<pkg>@<ver>@@@<n>`. Consequently, after the first `bun install` on a given host, `scripts/apply-patches.mjs` persists its widened `@enbox/agent` and `react-native-leveldb` output INTO the cache. A subsequent `rm -rf node_modules && bun install --frozen-lockfile` then reuses that already-patched cached extraction and `scripts/apply-patches.mjs` prints nothing because all targets are already patched.

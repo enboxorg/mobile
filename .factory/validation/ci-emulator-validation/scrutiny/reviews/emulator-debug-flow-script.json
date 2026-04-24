@@ -1,0 +1,45 @@
+{
+  "featureId": "emulator-debug-flow-script",
+  "reviewedAt": "2026-04-24T01:15:35Z",
+  "commitId": "65ec14816058371a98c73879501ff170620d8097",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Fail. The rewrite hits the requested static surface area, but the feature was not actually robust enough for the API 31 CI emulator it targets. The committed script mis-detects whether a fresh AVD already has a device credential, crashes when trying to screencap the secure system biometric prompt, and assumes the recovery-phrase confirm CTA is immediately visible even though the real screen renders it below the fold in a ScrollView. Those are all blocking flow regressions, and the later `ci-end-to-end-run` follow-up commits on this branch were forced to fix each of them.",
+    "issues": [
+      {
+        "file": "scripts/emulator-debug-flow.py",
+        "line": 247,
+        "severity": "blocking",
+        "description": "`_locksettings_pin_is_set()` treats `adb shell locksettings get-disabled == false` as proof that a PIN credential already exists (`scripts/emulator-debug-flow.py:247-256`), and `ensure_device_credential()` immediately returns on that result (`scripts/emulator-debug-flow.py:295-298`). On a fresh API 31 emulator the keyguard is active even with swipe-only unlock, so this branch skips `set-pin 0000` even though no credential was configured. The feature therefore fails its own 'ensure device credential' requirement on fresh AVDs and can reach enrollment still lacking the required lockscreen PIN. This was later fixed by follow-up commit `fa30d4ca3ade16b51c164ac858f047246a9e7248`, whose message explicitly notes that fresh AVDs had keyguard enabled with no credential."
+      },
+      {
+        "file": "scripts/emulator-debug-flow.py",
+        "line": 206,
+        "severity": "blocking",
+        "description": "`screencap()` executes `adb shell screencap -p` with `check=True` and no fallback (`scripts/emulator-debug-flow.py:206-211`), and `main()` calls it while the first system biometric prompt is visible (`scripts/emulator-debug-flow.py:590-593`). On the target API 31 `google_apis` runner that `com.android.systemui` prompt is a `FLAG_SECURE` window, so `screencap` fails with `PERMISSION_DENIED` and raises instead of producing the required `biometric-prompt-1.png` artifact. That means the happy path aborts at the first prompt despite the prompt actually appearing. The later follow-up commit `f5fead59...` had to add a placeholder-PNG fallback specifically to recover from this failure mode."
+      },
+      {
+        "file": "scripts/emulator-debug-flow.py",
+        "line": 597,
+        "severity": "blocking",
+        "description": "The recovery-phrase leg assumes the confirm CTA is immediately present and tappable: `main()` waits for `RECOVERY_PHRASE_CONFIRM` and then taps it directly (`scripts/emulator-debug-flow.py:597-600`). But the real UI renders `RecoveryPhraseScreen` inside the shared `Screen` ScrollView (`src/components/ui/screen.tsx:17-24`), and the `I’ve saved it` `AppButton` sits after the hero copy and 24-word grid (`src/features/auth/screens/recovery-phrase-screen.tsx:160-216`). On the Pixel 5 emulator used by CI, that button starts below the initial viewport, so `uiautomator dump` never exposes a tappable node and the script times out before it can reach `main-wallet`. This exact regression was later fixed by follow-up commit `efd5a500969b75ed78157718a69d91d856485d00`, which introduced `scroll_into_view()` for this screen."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The handoff says `skillFeedback.followedProcedure: true`, but the worker did not satisfy the mobile-feature-worker honesty gate for red-first verification on a non-trivial script/config feature.",
+      "evidence": "`.factory/skills/mobile-feature-worker/SKILL.md:20-29` and `:66-73` require either failing tests first or a committed file-parsing/grep-based test artifact for config/script-only work. In the handoff, `tests.coverage` explicitly says `\"No Jest test changes\"` and only describes post-hoc greps (`.../handoffs/2026-04-23T04-14-43-732Z__emulator-debug-flow-script__1068350e-840f-41af-84a7-a81939f1d7ea.json:60`), yet the same handoff reports `\"followedProcedure\": true` (`...json:70`). The transcript skeleton also shows the script file was created before the verification commands were run."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The shared architecture reference was stale for this flow: it still documented the recovery-phrase step as 'tap Continue', which does not match the actual screen anchor and likely made the CI driver easier to get wrong.",
+      "evidence": "`.factory/library/architecture.md:404-408` says the emulator flow 'Screenshots `RecoveryPhrase`, taps Continue.' The real screen's anchor is `I’ve saved it` (`src/features/auth/screens/recovery-phrase-screen.tsx:21-25,212-216`), and it is rendered inside the shared `Screen` ScrollView (`src/components/ui/screen.tsx:17-24`)."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed commit `65ec14816058371a98c73879501ff170620d8097` for `emulator-debug-flow-script`. The feature fails scrutiny because the committed driver was still broken on the target emulator: fresh AVD PIN detection was wrong, secure biometric-prompt screenshots crashed, and the recovery-phrase confirm CTA was not scroll-aware."
+}

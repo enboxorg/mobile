@@ -1,0 +1,21 @@
+{
+  "featureId": "run-ci-emulator-wrapper",
+  "reviewedAt": "2026-04-24T01:14:31Z",
+  "commitId": "4d673b9",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "scripts/run-ci-emulator.sh matches the feature contract: it defaults the branch from git, pushes to origin, dispatches debug-emulator.yml, resolves the new run, prints its URL, waits on gh run watch --exit-status, and propagates the CI conclusion. I found no actionable correctness issues in the committed diff.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker marked skillFeedback.followedProcedure=true even though the session transcript does not show the required mission-context reads or any test-first artifact for this feature. This looks like a mismatch between the mobile-feature-worker skill's honesty gate and how small shell-wrapper features are currently executed.",
+      "evidence": "worker-transcripts.jsonl:74 — the reviewed session shows Read calls for AGENTS.md, services.yaml, validation-contract excerpts, debug-emulator.yml, scripts/apply-patches.mjs, and architecture.md, but no mission.md, .factory/library/environment.md, or .factory/library/user-testing.md. The handoff still reports skillFeedback.followedProcedure=true at handoffs/2026-04-23T04-24-01-471Z__run-ci-emulator-wrapper__9cb45511-a721-4d7f-ac03-9d69f9b47e22.json:43, while the same handoff reports tests.added=[] at :37-38."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The wrapper implementation satisfies the requested push/dispatch/watch/URL-reporting behavior and I found no code-level blockers; the only notable gap is a skill-procedure/handoff-honesty mismatch in the worker session metadata."
+}

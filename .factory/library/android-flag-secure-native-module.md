@@ -16,11 +16,13 @@ screenshots, screen recording, and the Recents thumbnail snapshot
    - `companion object { const val NAME = "EnboxFlagSecure" }`.
    - `@ReactMethod fun activate(promise: Promise)` schedules
      `window.setFlags(FLAG_SECURE, FLAG_SECURE)` on the UI thread via
-     `currentActivity.runOnUiThread { … }` and resolves `null`.
+     `reactApplicationContext.currentActivity?.runOnUiThread { … }` and
+     resolves `null`.
    - `@ReactMethod fun deactivate(promise: Promise)` schedules
      `window.clearFlags(FLAG_SECURE)` the same way.
-   - Both methods tolerate a null `currentActivity` (headless bring-up)
-     by resolving immediately — keeps the JS shim's silently-no-op
+   - Both methods tolerate a null
+     `reactApplicationContext.currentActivity` (headless bring-up) by
+     resolving immediately — keeps the JS shim's silently-no-op
      contract intact.
 
 2. **Package registration.** `NativeModulesPackage.kt`
@@ -79,8 +81,12 @@ compiles, registers, and does not regress the existing module surface.
 ## Platform gotchas
 
 - `Window.setFlags` / `Window.clearFlags` MUST run on the UI thread.
-  We wrap the call in `currentActivity.runOnUiThread { … }` for that
-  reason; calling it directly from a background thread is a silent
+  We wrap the call in
+  `reactApplicationContext.currentActivity?.runOnUiThread { … }` for
+  that reason; bare `currentActivity` is not available on
+  `ReactContextBaseJavaModule` and was the source of the CI Kotlin
+  compile failure fixed during the `ci-emulator-validation` milestone.
+  Calling `Window` APIs directly from a background thread is a silent
   no-op on some OEM builds and an `IllegalStateException` on others.
 - FLAG_SECURE is per-Activity and per-window. It is NOT sticky across
   Activity restarts, so the JS shim must re-activate on every screen

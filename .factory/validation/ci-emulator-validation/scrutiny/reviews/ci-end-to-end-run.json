@@ -1,0 +1,33 @@
+{
+  "featureId": "ci-end-to-end-run",
+  "reviewedAt": "2026-04-24T01:15:56Z",
+  "commitId": "efd5a500969b75ed78157718a69d91d856485d00",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Fail. The reviewed session did gather solid evidence that the scroll fix unblocked the CI flow and that the three workflows went green on commit efd5a50. But the finished implementation still uploads a RecoveryPhrase UI dump containing mnemonic-bearing cells, so the feature leaves sensitive wallet material in the GitHub Actions artifact and should not pass scrutiny as-is.",
+    "issues": [
+      {
+        "file": "scripts/emulator-debug-flow.py",
+        "line": 1455,
+        "severity": "blocking",
+        "description": "The flow still calls `dump_ui(\"recovery-phrase\")` on the sensitive RecoveryPhrase screen, which means the uploaded `recovery-phrase.xml` artifact contains the wallet backup phrase grid even though the matching PNG is intentionally reduced to a FLAG_SECURE placeholder. The reviewed artifact and handoff both show that this XML includes visible recovery-word cells from the mnemonic screen, so the feature persists secret material to CI artifacts. Skip the dump for RecoveryPhrase or redact the word cells before upload."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `ci-runner` skill is stale for this feature's actual scope: it tells workers not to edit or push app code, but the mission feature contract explicitly instructs this worker to patch `scripts/emulator-debug-flow.py` and re-dispatch CI until the run is green.",
+      "evidence": "`.factory/skills/ci-runner/SKILL.md:8,29` says the worker 'do[es] not write app code' and 'Do not commit or push app code', while `features.json:2096` for `ci-end-to-end-run` explicitly says 'You may edit scripts/emulator-debug-flow.py directly' and to 'push and re-dispatch until debug-emulator.yml also goes green'. The reviewed commit `efd5a500969b75ed78157718a69d91d856485d00` does in fact modify `scripts/emulator-debug-flow.py`."
+    },
+    {
+      "area": "skills",
+      "observation": "The `ci-runner` secret-leak procedure only scans `logcat-*.txt` for mnemonic/hex leakage, even though the same skill also requires uploading matching `*.xml` UI dumps. That gap let the worker accept success while a sensitive RecoveryPhrase XML artifact still contained mnemonic-bearing cells.",
+      "evidence": "`.factory/skills/ci-runner/SKILL.md:81-89` expects matching XML dumps in the artifact, but `SKILL.md:119-126` scopes mnemonic/hex scans to `/tmp/ci-artifacts/logcat-*.txt` only. The reviewed handoff already records the resulting gap at `handoffs/2026-04-24T01-06-47-401Z__ci-end-to-end-run__c0cd8706-a3da-477e-b0f0-44b8aa92386a.json:101-105`, where `recovery-phrase.xml` is acknowledged as containing visible mnemonic words."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed worker session `c0cd8706-a3da-477e-b0f0-44b8aa92386a` and commit `efd5a500969b75ed78157718a69d91d856485d00`. The scroll fix itself is reasonable and the handoff evidence for green CI runs is coherent, but the feature still leaks the recovery phrase into `recovery-phrase.xml`, so I marked the review fail and noted two `ci-runner` skill gaps that contributed to it."
+}

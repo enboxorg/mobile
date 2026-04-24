@@ -404,7 +404,8 @@ Driver: `scripts/emulator-debug-flow.py`. Highlights:
 - Taps **Enable biometric unlock** on `BiometricSetup`.
 - Detects the system `BiometricPrompt` (`com.android.systemui`) and fires
   `adb -e emu finger touch 1`.
-- Screenshots `RecoveryPhrase`, taps Continue.
+- Screenshots `RecoveryPhrase`, scrolls until the `I’ve saved it` button
+  is visible, then taps that anchor.
 - Asserts the main wallet UI ("Identities" tab, etc.).
 - Force-stops + relaunches, satisfies the prompt again, confirms Main.
 
