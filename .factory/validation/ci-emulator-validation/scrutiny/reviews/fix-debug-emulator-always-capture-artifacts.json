@@ -1,0 +1,26 @@
+{
+  "featureId": "fix-debug-emulator-always-capture-artifacts",
+  "reviewedAt": "2026-04-24T02:38:41Z",
+  "commitId": "8e0526421bdc0aeb86cee4b5a65daefa357946da",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. I reviewed the original failing workflow diff (`335943a4f44b209a696044c800489b42c3196abb`) and the fix commit (`8e0526421bdc0aeb86cee4b5a65daefa357946da`). The original blocker is resolved: the Python driver now runs in `scripts/ci-debug-emulator-runner.sh`, which unconditionally copies the screenshot/XML tree and writes the final logcat artifacts after `python3 scripts/emulator-debug-flow.py` returns (`scripts/ci-debug-emulator-runner.sh:81-145`). The workflow then keeps artifact verification/upload on `if: always()` (`.github/workflows/debug-emulator.yml:107-142`) and re-fails the job with the saved driver exit code (`.github/workflows/debug-emulator.yml:150-162`), so failing runs still upload debugging artifacts and still fail loudly.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "This fix feature is assigned to the `ci-runner` skill, but `ci-runner` is documented as a verification-only skill that should not write app/code or commit/push changes. The worker nevertheless had to edit the workflow and runner script and then commit/push them. Either this class of CI-infrastructure remediation should use a code-edit skill, or `ci-runner` should explicitly document that it can be repurposed for fix features.",
+      "evidence": "`features.json:2146-2148` assigns `fix-debug-emulator-always-capture-artifacts` to `skillName: ci-runner`; `.factory/skills/ci-runner/SKILL.md:8` says 'You do not write app code' and `.factory/skills/ci-runner/SKILL.md:29` says 'Do not commit or push app code'; the worker handoff confirms workflow/script edits plus commit/push at `handoffs/2026-04-24T01-38-07-568Z__fix-debug-emulator-always-capture-artifacts__a380eda6-878a-44fe-8193-8f27719b4bab.json:10-11,46-51`."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The mission's shared CI docs note that `debug-emulator.yml` uses `reactivecircus/android-emulator-runner@v2`, but they do not capture the two workflow-design constraints this fix had to work around: the action's `script:` field effectively executes line-by-line, and `adb` access ends with the emulator-runner step. That omission makes the literal 'split capture into a later workflow step' guidance misleading for future fixes.",
+      "evidence": "`.factory/library/environment.md:53` only records that `debug-emulator.yml` uses `reactivecircus/android-emulator-runner@v2`; the worker had to encode the missing constraints inline at `.github/workflows/debug-emulator.yml:89-98`, and the handoff calls them out explicitly at `handoffs/2026-04-24T01-38-07-568Z__fix-debug-emulator-always-capture-artifacts__a380eda6-878a-44fe-8193-8f27719b4bab.json:70-71`."
+    }
+  ],
+  "addressesFailureFrom": "/home/liran/src/enboxorg/mobile/.factory/validation/ci-emulator-validation/scrutiny/reviews/debug-emulator-workflow-update.json",
+  "summary": "Reviewed the re-run fix for `debug-emulator-workflow-update` and marked it pass. The new runner/workflow split preserves failure-path screenshots/XML/logcats and still ends the job with the Python driver's non-zero exit code when the flow regresses; no code issues were found in the fix scope."
+}

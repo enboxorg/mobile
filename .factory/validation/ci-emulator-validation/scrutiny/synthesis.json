@@ -1,6 +1,6 @@
 {
   "milestone": "ci-emulator-validation",
-  "round": 1,
+  "round": 2,
   "status": "fail",
   "validatorsRun": {
     "test": {
@@ -20,110 +20,40 @@
     }
   },
   "reviewsSummary": {
-    "total": 8,
-    "passed": 4,
-    "failed": 4,
+    "total": 2,
+    "passed": 1,
+    "failed": 1,
     "failedFeatures": [
-      "fix-flag-secure-module-kotlin-compile",
-      "emulator-debug-flow-script",
-      "debug-emulator-workflow-update",
-      "ci-end-to-end-run"
+      "fix-sanitize-recovery-phrase-uiautomator-dump"
     ]
   },
   "blockingIssues": [
     {
-      "featureId": "fix-flag-secure-module-kotlin-compile",
+      "featureId": "fix-sanitize-recovery-phrase-uiautomator-dump",
       "severity": "blocking",
-      "description": "The feature was marked completed even though its final handoff still reported `debug-emulator.yml` failing, so its required verification scope was incomplete."
-    },
-    {
-      "featureId": "emulator-debug-flow-script",
-      "severity": "blocking",
-      "description": "The original emulator driver misdetected fresh AVDs as already having a device PIN, so it could skip `locksettings set-pin 0000` before fingerprint enrollment."
-    },
-    {
-      "featureId": "emulator-debug-flow-script",
-      "severity": "blocking",
-      "description": "The original `screencap()` path had no `FLAG_SECURE` fallback, so the first system biometric prompt could abort the flow instead of producing `biometric-prompt-1.png`."
-    },
-    {
-      "featureId": "emulator-debug-flow-script",
-      "severity": "blocking",
-      "description": "The original recovery-phrase step assumed the confirm CTA was immediately visible and tappable, but the real screen required scrolling to the `I’ve saved it` anchor."
-    },
-    {
-      "featureId": "debug-emulator-workflow-update",
-      "severity": "blocking",
-      "description": "Removing `|| true` without an always-run cleanup path left the `set -e` shell step able to exit before screenshots and final logcats were copied, so failed runs could lose debugging artifacts."
-    },
-    {
-      "featureId": "ci-end-to-end-run",
-      "severity": "blocking",
-      "description": "The final CI flow still uploads `recovery-phrase.xml` from the sensitive RecoveryPhrase screen, leaving mnemonic-bearing UI content in the GitHub Actions artifact."
+      "description": "RecoveryPhrase XML sanitization only runs for dump names starting with `recovery-phrase`, so failure-path dumps like `window_dump.xml` and `flow-error.xml` can still capture mnemonic-bearing cells if the flow errors while the RecoveryPhrase screen is visible."
     }
   ],
-  "appliedUpdates": [
-    {
-      "target": "library",
-      "description": "Updated `android-flag-secure-native-module.md` to document the correct `reactApplicationContext.currentActivity?.runOnUiThread` access pattern for `FlagSecureModule`.",
-      "sourceFeature": "fix-flag-secure-module-kotlin-compile"
-    },
-    {
-      "target": "library",
-      "description": "Updated `architecture.md` so the CI emulator flow notes the scroll-to-`I’ve saved it` RecoveryPhrase step instead of the stale 'tap Continue' wording.",
-      "sourceFeature": "emulator-debug-flow-script"
-    },
-    {
-      "target": "library",
-      "description": "Updated `ci-runner-push-blocker.md` with the successful `BinaryBuffer` / `KeyMaterialBytes` Droid-Shield workaround instead of the older rename-only guidance.",
-      "sourceFeature": "fix-droid-shield-type-annotation-pattern"
-    },
-    {
-      "target": "library",
-      "description": "Updated `environment.md` with the Jest `crypto.subtle` / `src/lib/polyfills.ts` test-harness quirk discovered during the AbortSignal.timeout shim work.",
-      "sourceFeature": "polyfill-abortsignal-timeout"
-    },
-    {
-      "target": "library",
-      "description": "Updated `user-testing.md` to note that `uiautomator dump` XML can leak sensitive text even when `FLAG_SECURE` blocks PNG screenshots, and that RecoveryPhrase XML must be redacted or skipped.",
-      "sourceFeature": "ci-end-to-end-run"
-    }
-  ],
+  "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
-      "target": "mobile-feature-worker",
-      "suggestion": "Tighten the `followedProcedure` honesty gate so workers either prove the required mission/library reads plus red-first verification in the transcript, or explicitly record deviations. If small wrapper / push-unblock / config tasks are allowed to skip parts of that flow, document those exceptions in the skill.",
-      "evidence": "This same mismatch appeared across `fix-flag-secure-module-kotlin-compile`, `emulator-debug-flow-script`, `debug-emulator-workflow-update`, `run-ci-emulator-wrapper`, `fix-droid-shield-type-annotation-pattern`, `fix-deterministic-key-generator-sign-override`, and `polyfill-abortsignal-timeout`.",
-      "isSystemic": true
-    },
-    {
-      "target": "AGENTS.md",
-      "suggestion": "Add or automate a rule that a feature cannot be marked `completed` when its latest handoff is `partial`, `returnToOrchestrator: true`, or it explicitly leaves required verification undone.",
-      "evidence": "`fix-flag-secure-module-kotlin-compile` was marked completed in `features.json` even though its final handoff still reported `debug-emulator.yml` failing and returned control to the orchestrator.",
+      "target": "ci-runner",
+      "suggestion": "Clarify that mission-specific `ci-runner` fix features may edit and push workflow/script code when the feature contract explicitly requires remediation work, or assign those fixes to a code-edit skill instead.",
+      "evidence": "Both `fix-debug-emulator-always-capture-artifacts` and `fix-sanitize-recovery-phrase-uiautomator-dump` were assigned to `ci-runner` but required code edits plus commit/push, while `.factory/skills/ci-runner/SKILL.md` still frames the skill as verification-only.",
       "isSystemic": true
     },
     {
       "target": "ci-runner",
-      "suggestion": "Clarify that mission-specific `ci-runner` features may edit or push app/scripts code when the feature contract explicitly requires it, so the skill text does not conflict with the assigned work.",
-      "evidence": "`ci-end-to-end-run` explicitly told the worker to patch `scripts/emulator-debug-flow.py` and re-dispatch CI until green, while the current `ci-runner` skill still says not to edit or push app code.",
-      "isSystemic": true
-    },
-    {
-      "target": "ci-runner",
-      "suggestion": "Extend the secret-leak scan to uploaded UI-dump XML files, not just `logcat-*.txt`, because `uiautomator dump` can capture sensitive text even when `FLAG_SECURE` blocks screenshots.",
-      "evidence": "The successful `ci-end-to-end-run` still uploaded a mnemonic-bearing `recovery-phrase.xml` artifact because the current `ci-runner` procedure scans logs but not the XML dumps it also requires workers to download.",
+      "suggestion": "Extend the ci-runner secret-leak review procedure to cover uploaded UI-dump XML files, not just `logcat-*.txt`, because RecoveryPhrase leaks can survive in `window_dump.xml`/`flow-error.xml` even when screenshots are protected by `FLAG_SECURE`.",
+      "evidence": "Round 1 found a mnemonic leak in `recovery-phrase.xml`, and round 2 still found a blocking leak path through unnamed/error XML dumps because the current skill guidance only instructs mnemonic/hex scans on logcat files.",
       "isSystemic": true
     }
   ],
   "rejectedObservations": [
     {
-      "observation": "Per-feature notes that small shell-wrapper/config sessions lacked red-first steps or full mission/library reads.",
-      "reason": "duplicate of the broader mobile-feature-worker honesty-gate recommendation above."
-    },
-    {
-      "observation": "The `fix-flag-secure-module-kotlin-compile` handoff pointed at a doc-only commit instead of the actual Kotlin-fix commit.",
-      "reason": "ambiguous as a systemic rule change from a single feature; preserved in the individual review report but not escalated in synthesis."
+      "observation": "Document the `reactivecircus/android-emulator-runner` step-shape and adb-lifecycle constraints in `.factory/library/environment.md`.",
+      "reason": "documentation-only knowledge update; not applied in this validator run because worker instructions prohibit doc changes unless explicitly requested."
     }
   ],
-  "previousRound": null
+  "previousRound": ".factory/validation/ci-emulator-validation/scrutiny/synthesis.round1.json"
 }
