@@ -1,0 +1,59 @@
+{
+  "milestone": "ci-emulator-validation",
+  "round": 2,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "bun run test",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "bun run typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "bun run lint",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 1,
+    "failed": 1,
+    "failedFeatures": [
+      "fix-sanitize-recovery-phrase-uiautomator-dump"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "fix-sanitize-recovery-phrase-uiautomator-dump",
+      "severity": "blocking",
+      "description": "RecoveryPhrase XML sanitization only runs for dump names starting with `recovery-phrase`, so failure-path dumps like `window_dump.xml` and `flow-error.xml` can still capture mnemonic-bearing cells if the flow errors while the RecoveryPhrase screen is visible."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "ci-runner",
+      "suggestion": "Clarify that mission-specific `ci-runner` fix features may edit and push workflow/script code when the feature contract explicitly requires remediation work, or assign those fixes to a code-edit skill instead.",
+      "evidence": "Both `fix-debug-emulator-always-capture-artifacts` and `fix-sanitize-recovery-phrase-uiautomator-dump` were assigned to `ci-runner` but required code edits plus commit/push, while `.factory/skills/ci-runner/SKILL.md` still frames the skill as verification-only.",
+      "isSystemic": true
+    },
+    {
+      "target": "ci-runner",
+      "suggestion": "Extend the ci-runner secret-leak review procedure to cover uploaded UI-dump XML files, not just `logcat-*.txt`, because RecoveryPhrase leaks can survive in `window_dump.xml`/`flow-error.xml` even when screenshots are protected by `FLAG_SECURE`.",
+      "evidence": "Round 1 found a mnemonic leak in `recovery-phrase.xml`, and round 2 still found a blocking leak path through unnamed/error XML dumps because the current skill guidance only instructs mnemonic/hex scans on logcat files.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Document the `reactivecircus/android-emulator-runner` step-shape and adb-lifecycle constraints in `.factory/library/environment.md`.",
+      "reason": "documentation-only knowledge update; not applied in this validator run because worker instructions prohibit doc changes unless explicitly requested."
+    }
+  ],
+  "previousRound": ".factory/validation/ci-emulator-validation/scrutiny/synthesis.round1.json"
+}
