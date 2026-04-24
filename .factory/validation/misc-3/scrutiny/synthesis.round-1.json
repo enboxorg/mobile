@@ -1,0 +1,57 @@
+{
+  "milestone": "misc-3",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "bun run test",
+      "exitCode": 0,
+      "observation": "Jest ran 44 suites / 392 tests and all passed. Output still included the expected polyfill diagnostic console.log noise, agent-store/agent-init console logging, and the wallet-connect error-path console.error from the existing test harness."
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "bun run typecheck",
+      "exitCode": 0,
+      "observation": "tsc --noEmit completed successfully with no TypeScript diagnostics."
+    },
+    "lint": {
+      "passed": true,
+      "command": "bun run lint",
+      "exitCode": 0,
+      "observation": "ESLint exited 0 with no warnings or errors."
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 1,
+    "failed": 1,
+    "failedFeatures": [
+      "misc-suppress-agent-did-race-warnings"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "misc-suppress-agent-did-race-warnings",
+      "severity": "blocking",
+      "description": "`refreshIdentities()` now returns early when `agentDid` is absent, but the initialize/restore flows still call it immediately after `agent.initialize(...)` and nothing subscribes to `agentDid` becoming available. Because upstream only assigns `agentDid` during `agent.start()`, identity lists can remain stale instead of automatically retrying once the DID is observed."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Documented in `.factory/library/architecture.md` that upstream `@enbox/agent` leaves `agentDid` unset after `initialize()` and only assigns it during `start()`, so DID-backed refresh flows must wait for observation instead of assuming readiness immediately after initialize/restore.",
+      "sourceFeature": "misc-suppress-agent-did-race-warnings"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": ".factory/skills/mobile-feature-worker/SKILL.md",
+      "suggestion": "Tighten the handoff honesty gate so workers do not claim `followedProcedure: true` unless the transcript shows the required mission/context reads and, for non-trivial behavior changes, a red-first test cycle or an explicit documented deviation.",
+      "evidence": "Both `misc-suppress-agent-did-race-warnings` and `misc-polyfills-subtle-wrapper-test-env` reviews flagged workers marking `followedProcedure: true` despite missing required reads and/or no visible red-first test evidence in `worker-transcripts.jsonl`.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}
