@@ -491,6 +491,17 @@ export function mapNativeErrorToVaultError(err: unknown): VaultError | null {
     case 'AUTH_FAILED':
     case 'VAULT_ERROR':
       return new VaultError('VAULT_ERROR', message ?? code);
+    case 'VAULT_ERROR_ALREADY_INITIALIZED':
+      // Native modules surface this when `generateAndStoreSecret` is
+      // called over an alias that already exists. The native API
+      // rejects rather than silently overwriting (VAL-VAULT-030); the
+      // JS layer pre-checks via `hasSecret`, but the native code
+      // surface is the authoritative guard against destructive
+      // overwrites and the canonical error code flows through here.
+      return new VaultError(
+        'VAULT_ERROR_ALREADY_INITIALIZED',
+        message ?? code,
+      );
     default:
       return null;
   }

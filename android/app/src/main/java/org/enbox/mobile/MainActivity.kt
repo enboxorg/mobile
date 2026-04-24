@@ -16,7 +16,8 @@ class MainActivity : ReactActivity() {
   override fun getMainComponentName(): String = "EnboxMobile"
 
   /**
-   * Activity-level FLAG_SECURE baseline (VAL-UX-043).
+   * Activity-level FLAG_SECURE baseline (VAL-UX-043 / Round-2 review
+   * Finding 4).
    *
    * The per-screen FlagSecure module (see `FlagSecureModule.kt`) applies
    * `FLAG_SECURE` asynchronously through `runOnUiThread` when a sensitive
@@ -29,17 +30,15 @@ class MainActivity : ReactActivity() {
    * secure by the WindowManager, so no framebuffer snapshot of the app is
    * ever exposed to the system.
    *
-   * This is an additive baseline — the per-screen `enableFlagSecure()` /
-   * `disableFlagSecure()` calls stay in place as defense-in-depth (e.g.
-   * the restore screen also toggles them) and to keep the cross-platform
-   * surface symmetric with the iOS privacy-cover path. Because the flag
-   * here is never cleared at the Activity level, a downstream module that
-   * calls `disableFlagSecure()` effectively CLEARS our baseline too; that
-   * is intentional — the FlagSecureModule writes its own reference-
-   * counted state (see the `activate()` / `deactivate()` counter there)
-   * so only the non-sensitive screens that explicitly opt out can flip it
-   * off. The navigator today never opts any screen out, so the flag is
-   * always set in practice.
+   * This baseline is paired with the FlagSecureModule's reference-
+   * counted activate/deactivate counter (initialised to 1 to mirror the
+   * baseline). A per-screen `activate→deactivate` cycle therefore
+   * leaves the counter at 1 and the flag SET — the baseline survives
+   * sensitive-screen unmounts, so the first-frame race cannot
+   * reappear when a SECOND sensitive screen mounts later in the
+   * session. Without that refcount, the unmount path's unconditional
+   * `clearFlags` would tear down this baseline, defeating the
+   * first-frame guarantee.
    */
   override fun onCreate(savedInstanceState: Bundle?) {
     window.setFlags(

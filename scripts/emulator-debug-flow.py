@@ -550,6 +550,51 @@ SENSITIVE_SCREEN_NAMES: frozenset[str] = frozenset(
 )
 
 
+def _foreground_is_sensitive() -> bool:
+    """Return True if the current foreground UI is a RecoveryPhrase-bearing
+    screen, based on a fresh uiautomator dump.
+
+    Used by :func:`screencap` to gate the framebuffer capture on the
+    actual current foreground content — not just on the caller-supplied
+    ``name`` argument. This closes the leak path identified in the
+    Round-2 review (Finding 1): ``screencap("flow-error")`` is invoked
+    by the global failure handler, which has no way of knowing what
+    screen was foregrounded at the moment of failure. If the driver
+    crashes while ``RecoveryPhraseScreen`` is up, a content-blind
+    capture would dump the mnemonic into ``flow-error.png`` even
+    though ``"flow-error"`` is not in ``SENSITIVE_SCREEN_NAMES``.
+
+    The detection reuses the same content rules
+    (``_has_recovery_phrase_content``) the dump_ui sanitizer uses, so
+    the screencap and the dump-XML side stay in lock-step: if a dump
+    would be redacted, the screenshot is suppressed.
+
+    All exceptions are swallowed and treated as "unknown ⇒ assume
+    safe ⇒ allow capture". The recovery-phrase named capture path is
+    independently protected by the ``SENSITIVE_SCREEN_NAMES`` short-
+    circuit, so a uiautomator failure here cannot widen the known leak
+    path; the only thing this content-aware probe defends against is
+    the *unexpected* case (failure mid-RecoveryPhrase) which is rare
+    and relies on uiautomator working anyway.
+    """
+
+    try:
+        adb("shell", "uiautomator", "dump", "/sdcard/window_dump.xml")
+        local = ROOT / "window_dump.xml"
+        adb("pull", "/sdcard/window_dump.xml", str(local))
+        raw = local.read_bytes()
+        # Re-use the dump_ui sanitizer's structural detection: the same
+        # XML that would trigger redaction here would also trigger a
+        # framebuffer leak if captured.
+        sanitized = _sanitize_bip39_xml(raw)
+        if sanitized is not raw and sanitized != raw:
+            local.write_bytes(sanitized)
+        root = ET.fromstring(sanitized)
+        return _has_recovery_phrase_content(root)
+    except Exception:  # pragma: no cover - probe is best-effort
+        return False
+
+
 def screencap(name: str) -> None:
     """Capture a screenshot and pull it to ``/tmp/emulator-ui/<name>.png``.
 
@@ -570,6 +615,15 @@ def screencap(name: str) -> None:
     screenshot of the recovery phrase would end up as a retained GitHub
     Actions artifact. Skipping the capture makes that leak path
     impossible, regardless of FLAG_SECURE status.
+
+    Beyond the name-based skip we also probe the actual foreground UI
+    via :func:`_foreground_is_sensitive` and skip the capture when it
+    indicates a RecoveryPhrase-bearing dump. This closes the
+    failure-handler leak path: ``screencap("flow-error")`` is invoked
+    by the top-level exception handler with NO knowledge of which
+    screen was foregrounded at crash time, so a content-blind capture
+    could leak the mnemonic via ``flow-error.png`` even though
+    ``"flow-error"`` is not a sensitive name.
     """
 
     device_path = f"/sdcard/{name}.png"
@@ -579,6 +633,16 @@ def screencap(name: str) -> None:
             f"[screencap] {name!r}: sensitive-screen name, writing "
             f"placeholder PNG without invoking adb screencap to guarantee "
             f"no mnemonic capture regardless of FLAG_SECURE state.",
+            flush=True,
+        )
+        _write_placeholder_png(local_path)
+        return
+    if _foreground_is_sensitive():
+        print(
+            f"[screencap] {name!r}: foreground UI looks like RecoveryPhrase "
+            f"(uiautomator dump triggered the BIP-39 / title indicator); "
+            f"writing placeholder PNG without invoking adb screencap to "
+            f"prevent a mnemonic leak via {name!r}.png.",
             flush=True,
         )
         _write_placeholder_png(local_path)
@@ -1941,6 +2005,41 @@ def _self_test_sanitizer() -> int:
             "cluster threshold should have kept it byte-exact"
         )
 
+    # ---------- (e) leak-gate predicate: _has_recovery_phrase_content ------
+    #
+    # Round-2 review Finding 1: the per-foreground screencap gate uses
+    # `_has_recovery_phrase_content` to decide whether to skip the
+    # framebuffer capture, regardless of the caller-supplied name (e.g.
+    # `screencap("flow-error")` invoked from the failure handler when
+    # the RecoveryPhrase screen is foregrounded). This pin verifies the
+    # predicate matches the same shapes the dump_ui sanitizer redacts.
+    rp_root = ET.fromstring(rp_xml)
+    if not _has_recovery_phrase_content(rp_root):
+        failures.append(
+            "case (e): _has_recovery_phrase_content rejected a real "
+            "RecoveryPhrase dump — gate would let screencap leak the "
+            "mnemonic via flow-error.png"
+        )
+    fe_root = ET.fromstring(flow_error_xml)
+    if not _has_recovery_phrase_content(fe_root):
+        failures.append(
+            "case (e): _has_recovery_phrase_content rejected a "
+            "RecoveryPhrase-bearing flow-error dump — gate would let "
+            "screencap('flow-error') write a real mnemonic screenshot"
+        )
+    welcome_root = ET.fromstring(welcome_xml)
+    if _has_recovery_phrase_content(welcome_root):
+        failures.append(
+            "case (e): _has_recovery_phrase_content false-positive on a "
+            "clean welcome dump — gate would block legitimate screencaps"
+        )
+    stray_root = ET.fromstring(stray_xml)
+    if _has_recovery_phrase_content(stray_root):
+        failures.append(
+            "case (e): _has_recovery_phrase_content false-positive on a "
+            "stray-wordlist dump — cluster threshold should keep it inert"
+        )
+
     if failures:
         print("== sanitizer self-test FAILED ==", file=sys.stderr)
         for line in failures:
@@ -1960,6 +2059,10 @@ def _self_test_sanitizer() -> int:
     print(
         f"  (d) welcome.xml + 1 stray BIP-39 hit: passthrough "
         f"bytes={len(stray_sanitized)}"
+    )
+    print(
+        "  (e) _has_recovery_phrase_content gate matches sanitizer for "
+        "all 4 fixtures"
     )
     return 0
 

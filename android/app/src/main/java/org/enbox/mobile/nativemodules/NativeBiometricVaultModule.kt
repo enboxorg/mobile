@@ -74,6 +74,13 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         private const val ERR_NOT_FOUND = "NOT_FOUND"
         private const val ERR_AUTH_FAILED = "AUTH_FAILED"
         private const val ERR_VAULT = "VAULT_ERROR"
+        // VAL-VAULT-030: explicit non-destructive contract on
+        // `generateAndStoreSecret`. The native API is NOT an upsert —
+        // calling it over an existing alias rejects with this code so a
+        // mid-setup BiometricPrompt cancel / SharedPreferences write
+        // failure cannot wipe a working wallet via the silent
+        // delete-before-write pattern.
+        private const val ERR_ALREADY_INITIALIZED = "VAULT_ERROR_ALREADY_INITIALIZED"
     }
 
     override fun getName(): String = NAME
@@ -245,6 +252,43 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             promise.reject(ERR_VAULT,
                 "requireBiometrics=false is not supported by the biometric vault")
             return
+        }
+
+        // Non-destructive contract (VAL-VAULT-030): refuse to provision
+        // over an existing alias. The pre-fix code path silently
+        // `deleteKeystoreKey()`'d the existing key BEFORE creating the
+        // new one and rolled back only on failure, but the rollback
+        // window did not cover (a) BiometricPrompt cancellation, where
+        // the user dismisses the prompt after the Keystore key was
+        // already destroyed, or (b) SharedPreferences `apply()` losing
+        // the wrapped ciphertext. Either left the device with an
+        // orphan / wiped vault that could not be re-derived without
+        // the recovery phrase.
+        //
+        // The JS layer (`BiometricVault._doInitialize`) already guards
+        // this with a `hasSecret()` pre-check, but the native API
+        // surface should match the JS guarantee so future callers
+        // (deep links, dev tools, third-party native consumers) can't
+        // drift away from the safe pattern. Callers that intend to
+        // overwrite MUST first call `deleteSecret(...)` explicitly,
+        // which makes the destructive intent visible and auditable.
+        try {
+            val hasPrefs = prefs().contains(ivKey(keyAlias)) && prefs().contains(ctKey(keyAlias))
+            val hasKey = loadKeystoreKey(keyAlias) != null
+            if (hasPrefs && hasKey) {
+                promise.reject(
+                    ERR_ALREADY_INITIALIZED,
+                    "A biometric secret already exists for this alias; " +
+                        "delete it explicitly before re-provisioning",
+                )
+                return
+            }
+        } catch (e: Exception) {
+            // Defensive: if we can't determine existence, fall through
+            // to the legacy provisioning path. The original code did
+            // exactly this — an exception in the existence check would
+            // not have prevented provisioning either. The pre-check is
+            // belt-and-suspenders, not the primary guard.
         }
 
         // Resolve the 32-byte wallet secret up-front — caller-provided bytes

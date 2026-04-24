@@ -330,9 +330,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   initializeFirstLaunch: async () => {
     set({ isInitializing: true, error: null });
+    // Hold a local reference to the vault so the catch path can
+    // defensively `lock()` it if `initialize({})` / `start({})`
+    // unlocked the vault before a later step threw. See VAL-VAULT-031
+    // / Round-2 review Finding 5 — the same residency-window argument
+    // applies to first-launch as to unlock.
+    let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
       console.log('[agent-store] initializeFirstLaunch: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
+      vaultRef = vault;
 
       console.log('[agent-store] checking firstLaunch...');
       const isFirst = await agent.firstLaunch();
@@ -390,6 +397,25 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       } else {
         console.error('[agent-store] first launch failed:', message);
       }
+      // Defensive zeroization of unlocked vault material — see the
+      // analogous block in `unlockAgent()` for the rationale. If
+      // `agent.initialize({})` / `agent.start({})` populated the
+      // vault's in-memory `_secretBytes` / `_rootSeed` / CEK and a
+      // LATER step threw (e.g. the `getDid()` assignment fails for
+      // an unforeseen reason, or the success-path `set(...)` is
+      // pre-empted), the unlocked buffers remain on the vault until
+      // GC. Calling `lock()` here scrubs them immediately. Best-
+      // effort: a `lock()` rejection is logged but never re-thrown so
+      // the caller still sees the original failure.
+      if (vaultRef !== null) {
+        // eslint-disable-next-line no-void
+        void vaultRef.lock().catch((lockErr) => {
+          console.warn(
+            '[agent-store] initializeFirstLaunch: defensive vault.lock() failed (ignored):',
+            lockErr,
+          );
+        });
+      }
       let nextBiometricState = get().biometricState;
       if (code === BIOMETRICS_UNAVAILABLE_CODE) {
         nextBiometricState = 'unavailable';
@@ -410,9 +436,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   unlockAgent: async () => {
     set({ isInitializing: true, error: null });
+    // Hold a local reference to the vault so the catch path can lock
+    // it even when the throw happens AFTER `initializeAgent()` has
+    // returned. Without this we'd only have the store reference,
+    // which the failure cleanup overwrites to `null` — leaking any
+    // unlocked secret bytes/root seed/CEK that `agent.start({})`
+    // populated before the later step threw. (VAL-VAULT-031 / Round-2
+    // review Finding 5.)
+    let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
       console.log('[agent-store] unlockAgent: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
+      vaultRef = vault;
       console.log('[agent-store] starting vault (biometric prompt)...');
       // BiometricVault has no password. `AgentStartParams.password` is
       // widened to optional by `scripts/apply-patches.mjs`'s
@@ -439,6 +474,26 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       } else {
         console.error('[agent-store] unlock failed:', message);
       }
+      // Defensive zeroization: if `agent.start({})` already unlocked
+      // the vault and a LATER step inside the try block threw (or
+      // even the success-path `set(...)` somehow did), the unlocked
+      // `_secretBytes`, `_rootSeed`, and CEK still live in the
+      // BiometricVault instance. Without this lock() the store-
+      // reference-drop below is the only cleanup, and the GC has no
+      // way to scrub the buffers — they sit in heap memory until the
+      // Hermes GC reclaims them, which can be many seconds and is a
+      // documented residency window the spec wants closed.
+      // Best-effort: a `lock()` rejection is logged but never
+      // re-throws so the original error is the one the caller sees.
+      if (vaultRef !== null) {
+        // eslint-disable-next-line no-void
+        void vaultRef.lock().catch((lockErr) => {
+          console.warn(
+            '[agent-store] unlockAgent: defensive vault.lock() failed (ignored):',
+            lockErr,
+          );
+        });
+      }
       let nextBiometricState = get().biometricState;
       if (code === BIOMETRICS_UNAVAILABLE_CODE) {
         nextBiometricState = 'unavailable';
@@ -459,9 +514,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   resumePendingBackup: async () => {
     set({ isInitializing: true, error: null });
+    // Local vault reference for the catch path's defensive lock
+    // (VAL-VAULT-031 / Round-2 review Finding 5). resumePendingBackup
+    // unlocks the vault to re-derive the mnemonic; if any step AFTER
+    // `agent.start({})` (e.g. `vault.getMnemonic()` or the mid-flight
+    // `set(...)`) throws, the unlocked entropy stays resident in
+    // memory until GC unless we explicitly call `lock()`.
+    let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
       console.log('[agent-store] resumePendingBackup: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
+      vaultRef = vault;
       console.log(
         '[agent-store] resumePendingBackup: starting vault (biometric prompt)...',
       );
@@ -498,6 +561,21 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         );
       } else {
         console.error('[agent-store] resumePendingBackup failed:', message);
+      }
+      // See unlockAgent / initializeFirstLaunch catch blocks for the
+      // residency-window argument. If `agent.start({})` already
+      // unlocked the vault and `vault.getMnemonic()` then threw (or
+      // the success-path `set(...)` was pre-empted), the unlocked
+      // buffers (and the freshly re-derived mnemonic) live on the
+      // vault instance until GC. Best-effort lock() scrubs them.
+      if (vaultRef !== null) {
+        // eslint-disable-next-line no-void
+        void vaultRef.lock().catch((lockErr) => {
+          console.warn(
+            '[agent-store] resumePendingBackup: defensive vault.lock() failed (ignored):',
+            lockErr,
+          );
+        });
       }
       let nextBiometricState = get().biometricState;
       if (code === BIOMETRICS_UNAVAILABLE_CODE) {

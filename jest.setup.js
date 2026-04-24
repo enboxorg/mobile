@@ -91,6 +91,19 @@ function mockBiometricVaultDeterministicHex(seed, byteLength) {
 /* eslint-enable no-bitwise */
 
 function mockBiometricVaultDefaultGenerate(alias, options) {
+  // Non-destructive contract (VAL-VAULT-030): the native API rejects
+  // when the alias already exists. Mirror that here so JS-only tests
+  // exercise the same surface as the Android / iOS implementations.
+  // Callers that intend to overwrite must call `deleteSecret(alias)`
+  // first.
+  if (mockBiometricVaultStore.has(alias)) {
+    return Promise.reject(
+      mockBiometricVaultMakeError(
+        'VAULT_ERROR_ALREADY_INITIALIZED',
+        'A biometric secret already exists for this alias',
+      ),
+    );
+  }
   // Caller may pre-seed the wallet secret by passing a 64-char lower-case
   // hex string under `options.secretHex`. When supplied, store those exact
   // bytes so the JS layer's local derivation matches the native store.

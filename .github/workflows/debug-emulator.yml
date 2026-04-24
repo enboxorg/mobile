@@ -2,20 +2,53 @@ name: Debug on Emulator
 
 on:
   workflow_dispatch:
+  # Trigger surface (VAL-CI-018 / Round-2 review Finding 2):
+  #
+  # The emulator hardening suite validates the full native-biometric-
+  # first flow, including FLAG_SECURE, native Keychain / Keystore
+  # behaviour, and the emulator driver itself. We trigger on:
+  #
+  #   - `pull_request` against any base branch — this is the critical
+  #     trigger: a PR head must be validated BEFORE merge, not only
+  #     after the merge commit lands on `main`. Without this, native
+  #     vault / FLAG_SECURE / emulator-driver changes can sit on a
+  #     PR for review with no emulator run, and only get exercised
+  #     post-merge — the inverse of what a release-blocking suite
+  #     should do.
+  #   - `push` to long-lived branches (`main`, `master`, `mission/**`)
+  #     — covers direct pushes (e.g. release tagging, mission-line
+  #     fast-forwards) and ensures that the head of any active mission
+  #     branch is always backed by a green emulator run, not just the
+  #     PR snapshots.
+  #
+  # Both triggers share the same `paths:` filter so unrelated doc /
+  # rule / lockfile churn does not consume an emulator slot.
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'specs/**'
+      - 'scripts/**'
+      - 'android/**'
+      - 'ios/**'
+      - '.github/workflows/debug-emulator.yml'
+      - 'metro.config.js'
+      - 'babel.config.js'
+      - 'index.js'
+      - 'package.json'
   push:
-    branches: [main, master]
-    # Expanded trigger coverage (VAL-CI-018):
-    #
-    # The emulator hardening suite validates the full native-biometric-
-    # first flow, including FLAG_SECURE, native Keychain / Keystore
-    # behaviour, and the emulator driver itself. The original trigger
-    # (src/**, specs/**, a handful of JS config files) missed three
-    # categories of changes that the suite is SUPPOSED to guard:
+    branches:
+      - main
+      - master
+      - 'mission/**'
+    # Same path filter as `pull_request:` — keep these in sync. The
+    # original trigger (src/**, specs/**, a handful of JS config files)
+    # missed three categories of changes that the suite is SUPPOSED
+    # to guard:
     #   - The workflow file itself — updating the runner pins or the
     #     artifact-upload glob without re-running the suite hides
     #     breakages until the next unrelated src change.
     #   - `scripts/emulator-debug-flow.py` / `scripts/**` — the driver
-    #     logic is the suite. A regression in the driver (missing a
+    #     logic IS the suite. A regression in the driver (missing a
     #     sensitive-screen placeholder, a bad adb invocation, an
     #     assertion typo) would never run until a src change landed.
     #   - `android/**` / `ios/**` — the native vault implementations
@@ -33,6 +66,16 @@ on:
       - 'babel.config.js'
       - 'index.js'
       - 'package.json'
+
+# Cancel an in-flight run for the same ref (PR head or branch) when a
+# new push lands so we don't burn an emulator slot validating a stale
+# commit. `cancel-in-progress: true` is safe for `pull_request` (each
+# new push supersedes the prior validation result) and for `push` to
+# long-lived branches (only the head matters for the green-build
+# signal).
+concurrency:
+  group: debug-emulator-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   debug-android:

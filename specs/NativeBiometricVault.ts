@@ -8,6 +8,25 @@ export interface Spec extends TurboModule {
     type: 'faceID' | 'touchID' | 'fingerprint' | 'face' | 'none';
     reason?: string;
   }>;
+  /**
+   * Provision a new biometric-gated secret under `keyAlias`.
+   *
+   * **Non-destructive contract (VAL-VAULT-030)**: this method MUST
+   * reject with `VAULT_ERROR_ALREADY_INITIALIZED` if a secret already
+   * exists under `keyAlias`. It is NOT an upsert. Callers that intend
+   * to overwrite an existing secret MUST first call `deleteSecret(...)`
+   * explicitly — the surfaced error makes that intent visible to
+   * reviewers and prevents an in-flight setup cancellation (or an
+   * `add` failure on iOS, or a `BiometricPrompt` cancellation on
+   * Android) from irreversibly destroying a working wallet by way of
+   * the silent delete-before-write pattern.
+   *
+   * Implementations may skip the existence check only when their own
+   * provisioning path is fully reversible (today neither iOS nor
+   * Android can offer that — Keychain and Keystore both lack a
+   * compare-and-swap primitive — so both implementations enforce the
+   * pre-check).
+   */
   generateAndStoreSecret(
     keyAlias: string,
     options: {

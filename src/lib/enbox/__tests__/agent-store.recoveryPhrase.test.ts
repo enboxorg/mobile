@@ -401,7 +401,14 @@ describe('useAgentStore.resumePendingBackup() — re-derives mnemonic from nativ
         : async () => FIXED_RESUMED_PHRASE,
     );
     const getDid = jest.fn(async () => ({ uri: didUri }));
-    const vault = { getMnemonic, getDid };
+    // The store's catch path defensively calls `vault.lock()` to scrub
+    // unlocked key material if anything between `agent.start({})` and
+    // the success-path `set(...)` throws (VAL-VAULT-031). The fake
+    // vault must implement it; the body is a no-op (the real
+    // BiometricVault zeros its `_secretBytes` / `_rootSeed` / CEK
+    // here but the fake has none of those).
+    const lock = jest.fn(async () => undefined);
+    const vault = { getMnemonic, getDid, lock };
     // Matches upstream `EnboxUserAgent.start()` semantics: it assigns
     // `this.agentDid = await this.vault.getDid()` after unlocking the
     // vault. Mirroring that here keeps the downstream

@@ -775,6 +775,11 @@ describe('mapNativeErrorToVaultError', () => {
     ['BIOMETRY_LOCKOUT', 'VAULT_ERROR_BIOMETRY_LOCKOUT'],
     ['BIOMETRY_LOCKOUT_PERMANENT', 'VAULT_ERROR_BIOMETRY_LOCKOUT'],
     ['AUTH_FAILED', 'VAULT_ERROR'],
+    // VAL-VAULT-030 / Round-2 review Finding 3: native rejects with this
+    // canonical code when `generateAndStoreSecret` is called over an
+    // existing alias. The mapper preserves the code through to the
+    // VaultError surface so the JS layer's UI logic can branch on it.
+    ['VAULT_ERROR_ALREADY_INITIALIZED', 'VAULT_ERROR_ALREADY_INITIALIZED'],
   ])('maps %s to %s', (nativeCode, vaultCode) => {
     const err = withErrorCode(nativeCode);
     expect(mapNativeErrorToVaultError(err)?.code).toBe(vaultCode);

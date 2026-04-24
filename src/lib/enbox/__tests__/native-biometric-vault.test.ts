@@ -184,6 +184,93 @@ describe('NativeBiometricVault — lifecycle roundtrip', () => {
   });
 });
 
+// VAL-VAULT-030 / Round-2 review Finding 3: the native API surface
+// MUST refuse to overwrite an existing secret. The Android module's
+// pre-fix code path silently `deleteKeystoreKey()`'d the existing key
+// BEFORE creating the new one (with no rollback covering BiometricPrompt
+// cancellation), and iOS issued an unconditional SecItemDelete BEFORE
+// SecItemAdd. Either could destroy a working wallet on a mid-setup
+// cancel. The fix is enforced at THREE layers:
+//
+//   1. The native modules themselves (Android Keystore, iOS Keychain)
+//      reject with VAULT_ERROR_ALREADY_INITIALIZED if the alias exists.
+//   2. The JS-side BiometricVault._doInitialize pre-checks via
+//      hasSecret() and rejects with the same code (defense in depth).
+//   3. The jest.setup.js mock mirrors (1) so JS-only tests exercise
+//      the same surface.
+//
+// These tests pin (3) — and by extension the JS contract that
+// downstream callers depend on.
+describe('NativeBiometricVault — non-destructive contract (VAL-VAULT-030)', () => {
+  it('rejects with VAULT_ERROR_ALREADY_INITIALIZED when generateAndStoreSecret is called over an existing alias', async () => {
+    const alias = 'enbox.wallet.root';
+    const options = { requireBiometrics: true, invalidateOnEnrollmentChange: true };
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, options),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, options),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_ALREADY_INITIALIZED' });
+  });
+
+  it('preserves the original stored secret bytes after a rejected overwrite attempt', async () => {
+    const alias = 'enbox.wallet.root';
+    const originalHex =
+      '11111111111111111111111111111111' + '11111111111111111111111111111111';
+    const replacementHex =
+      '22222222222222222222222222222222' + '22222222222222222222222222222222';
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: originalHex,
+      }),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: replacementHex,
+      }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_ALREADY_INITIALIZED' });
+
+    const survivingSecret = await NativeBiometricVault.getSecret(alias, {
+      promptTitle: 'Unlock',
+      promptMessage: 'Authenticate',
+      promptCancel: 'Cancel',
+    });
+    expect(survivingSecret).toBe(originalHex);
+  });
+
+  it('allows re-provisioning AFTER an explicit deleteSecret (the only sanctioned overwrite path)', async () => {
+    const alias = 'enbox.wallet.root';
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+
+    await expect(
+      NativeBiometricVault.deleteSecret(alias),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+  });
+});
+
 describe('NativeBiometricVault — getSecret success path', () => {
   const prompt = {
     promptTitle: 'Unlock Enbox',
