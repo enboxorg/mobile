@@ -1,0 +1,496 @@
+{
+  "groupId": "ci-android-emulator",
+  "surface": "ci-android-emulator",
+  "testedAt": "2026-04-24T04:10:00Z",
+  "headSha": "cb92ac859be45db5dd74f422993bfbcc7da3ce8f",
+  "repoRoot": "/home/liran/src/enboxorg/mobile",
+  "missionDir": "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327",
+  "runIds": {
+    "debugEmulator": 24871162809,
+    "ci": 24871164204,
+    "buildApk": 24870269723,
+    "wrapperDebugEmulator": 24871926015
+  },
+  "runUrls": {
+    "debugEmulator": "https://github.com/enboxorg/mobile/actions/runs/24871162809",
+    "ci": "https://github.com/enboxorg/mobile/actions/runs/24871164204",
+    "buildApk": "https://github.com/enboxorg/mobile/actions/runs/24870269723",
+    "wrapperDebugEmulator": "https://github.com/enboxorg/mobile/actions/runs/24871926015"
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "Execute",
+    "gh",
+    "python3",
+    "file"
+  ],
+  "assertionResults": [
+    {
+      "id": "VAL-CI-001",
+      "status": "pass",
+      "reason": "`python3 -m py_compile` succeeded for `scripts/emulator-debug-flow.py`.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py"
+      ]
+    },
+    {
+      "id": "VAL-CI-002",
+      "status": "fail",
+      "reason": "`scripts/emulator-debug-flow.py` still contains the forbidden PIN-era substring `Confirm your PIN` inside `_enter_device_pin_if_prompted`, so the negative string sweep is not clean.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py"
+      ]
+    },
+    {
+      "id": "VAL-CI-003",
+      "status": "pass",
+      "reason": "`ensure_device_credential()` uses `adb shell locksettings set-pin 0000` with an idempotent `--old` fallback and is called before fingerprint enrollment.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py"
+      ]
+    },
+    {
+      "id": "VAL-CI-004",
+      "status": "pass",
+      "reason": "`enroll_fingerprint()` launches `android.settings.FINGERPRINT_ENROLL`, confirms the device PIN, loops `adb -e emu finger touch 1`, and exits only after bounded enrollment confirmation.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py"
+      ]
+    },
+    {
+      "id": "VAL-CI-005",
+      "status": "pass",
+      "reason": "`wait_for_biometric_prompt()` polls `uiautomator dump` for `com.android.systemui` biometric nodes and raises on timeout.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py"
+      ]
+    },
+    {
+      "id": "VAL-CI-006",
+      "status": "pass",
+      "reason": "`satisfy_biometric_prompt()` sends emulator fingerprint touches and verifies the system-ui prompt disappears before returning.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py"
+      ]
+    },
+    {
+      "id": "VAL-CI-007",
+      "status": "pass",
+      "reason": "`main()` drives welcome \u2192 biometric setup \u2192 biometric prompt \u2192 recovery phrase \u2192 main wallet and the exact-head emulator run completed successfully.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/main-wallet.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/main-wallet.xml"
+      ]
+    },
+    {
+      "id": "VAL-CI-008",
+      "status": "pass",
+      "reason": "The script captures all seven required screenshot names and the downloaded artifact contains all seven PNG files.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/welcome.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/biometric-setup.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/biometric-prompt-1.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/recovery-phrase.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/main-wallet.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/relaunch-unlock-prompt.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/after-relaunch.png"
+      ]
+    },
+    {
+      "id": "VAL-CI-009",
+      "status": "pass",
+      "reason": "`relaunch_and_unlock()` force-stops the app, restarts it, satisfies a second biometric prompt, and `after-relaunch` confirms the wallet returns.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/relaunch-unlock-prompt.xml",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/after-relaunch.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/after-relaunch.xml"
+      ]
+    },
+    {
+      "id": "VAL-CI-010",
+      "status": "pass",
+      "reason": "All polling helpers are deadline-based; no `while True` loops remain, and the observed happy-path finished well under the 60-minute job timeout.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py",
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml"
+      ]
+    },
+    {
+      "id": "VAL-CI-011",
+      "status": "pass",
+      "reason": "The top-level exception path captures `flow-error` artifacts and exits non-zero via `sys.exit(1)`.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py"
+      ]
+    },
+    {
+      "id": "VAL-CI-012",
+      "status": "pass",
+      "reason": "`debug-emulator.yml` is valid enough to be viewed by `gh workflow view` and the exact-head workflow run completed successfully.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml"
+      ]
+    },
+    {
+      "id": "VAL-CI-013",
+      "status": "pass",
+      "reason": "The workflow no longer relies on `|| true`; the wrapper exports `SCRIPT_EXIT_CODE` and a later step propagates non-zero failures to the job result.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml",
+        "/home/liran/src/enboxorg/mobile/scripts/ci-debug-emulator-runner.sh"
+      ]
+    },
+    {
+      "id": "VAL-CI-014",
+      "status": "pass",
+      "reason": "The uploaded artifact contains all required screenshot filenames.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/welcome.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/biometric-setup.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/biometric-prompt-1.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/recovery-phrase.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/main-wallet.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/relaunch-unlock-prompt.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/after-relaunch.png"
+      ]
+    },
+    {
+      "id": "VAL-CI-015",
+      "status": "pass",
+      "reason": "The uploaded artifact contains `logcat-full.txt`, `logcat-rn.txt`, and `logcat-startup.txt`.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-full.txt",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-rn.txt",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-startup.txt"
+      ]
+    },
+    {
+      "id": "VAL-CI-016",
+      "status": "pass",
+      "reason": "`debug-android` uses `timeout-minutes: 60`, satisfying the minimum timeout budget.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml"
+      ]
+    },
+    {
+      "id": "VAL-CI-017",
+      "status": "pass",
+      "reason": "The exact-head `debug-emulator.yml` run 24871162809 for `cb92ac859be45db5dd74f422993bfbcc7da3ce8f` completed with `conclusion=success`.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809.log"
+      ]
+    },
+    {
+      "id": "VAL-CI-018",
+      "status": "pass",
+      "reason": "`main-wallet.png` visibly shows the wallet and `main-wallet.xml` contains a node with `text=\"Identities\"`.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/main-wallet.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/main-wallet.xml"
+      ]
+    },
+    {
+      "id": "VAL-CI-019",
+      "status": "pass",
+      "reason": "`logcat-rn.txt` contains only informational ReactNativeJS biometric-vault progress lines; no FATAL, unhandled promise, or vault/biometric exception stack traces were found.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-rn.txt"
+      ]
+    },
+    {
+      "id": "VAL-CI-020",
+      "status": "pass",
+      "reason": "No PIN-era user-facing strings were found in `logcat-full.txt` or `logcat-rn.txt`.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-full.txt",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-rn.txt"
+      ]
+    },
+    {
+      "id": "VAL-CI-021",
+      "status": "pass",
+      "reason": "`after-relaunch.png`/`.xml` show the wallet again, and `relaunch-unlock-prompt.xml` captures the `com.android.systemui` biometric prompt; the prompt PNG is a valid placeholder because the secure surface blocked framebuffer capture.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/relaunch-unlock-prompt.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/relaunch-unlock-prompt.xml",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/after-relaunch.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/after-relaunch.xml"
+      ]
+    },
+    {
+      "id": "VAL-CI-022",
+      "status": "pass",
+      "reason": "Code review shows the failure path writes `flow-error.png`/`.xml`, and the workflow uploads artifacts unconditionally with later exit-code propagation; this path was not exercised on the green run.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py",
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml",
+        "/home/liran/src/enboxorg/mobile/scripts/ci-debug-emulator-runner.sh"
+      ]
+    },
+    {
+      "id": "VAL-CI-023",
+      "status": "pass",
+      "reason": "The combined bounded waits in the Python driver are below the workflow timeout budget, so a missing anchor cannot hang until the job-level kill.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py",
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml"
+      ]
+    },
+    {
+      "id": "VAL-CI-024",
+      "status": "pass",
+      "reason": "The final wallet-anchor check is the last action before `return 0`, and the workflow propagates non-zero script exits to the job conclusion.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py",
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml"
+      ]
+    },
+    {
+      "id": "VAL-CI-025",
+      "status": "pass",
+      "reason": "The exact-head `ci.yml` run 24871164204 succeeded with `verify`, `build-android`, and `build-ios` all green.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/ci-run-24871164204.json"
+      ]
+    },
+    {
+      "id": "VAL-CI-026",
+      "status": "pass",
+      "reason": "`build-apk.yml` run 24870269723 succeeded on the latest code-affecting mission-branch SHA (`bb00b7d...`); the current head differs only in `.factory/validation/ci-emulator-validation/scrutiny/*`, so a new APK run was not required for authoritative validation.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/build-apk-run-24870269723.json"
+      ]
+    },
+    {
+      "id": "VAL-CI-027",
+      "status": "pass",
+      "reason": "`scripts/run-ci-emulator.sh` exists, is executable, has a bash shebang, uses `set -euo pipefail`, and contains `git push`, `gh workflow run`, and `gh run watch`.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/run-ci-emulator.sh"
+      ]
+    },
+    {
+      "id": "VAL-CI-028",
+      "status": "pass",
+      "reason": "Executed `bash scripts/run-ci-emulator.sh mission/biometric-vault`; it printed run URL `https://github.com/enboxorg/mobile/actions/runs/24871926015`, watched the workflow to completion, and exited 0 on success.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/run-ci-emulator.sh",
+        "https://github.com/enboxorg/mobile/actions/runs/24871926015",
+        "/home/liran/.factory/missions/08245e86-9e3a-49bb-ba11-c4ec0804b327/evidence/ci-emulator-validation/ci-android-emulator/wrapper-run-24871926015.json"
+      ]
+    },
+    {
+      "id": "VAL-CI-029",
+      "status": "pass",
+      "reason": "The script contains no app-level PIN/JWE handling; `0000` is only used for the device lockscreen credential helper.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py"
+      ]
+    },
+    {
+      "id": "VAL-CI-030",
+      "status": "pass",
+      "reason": "The artifact name is deterministic (`emulator-debug-${{ github.sha }}`) and retention is set to 7 days.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml"
+      ]
+    },
+    {
+      "id": "VAL-CI-031",
+      "status": "pass",
+      "reason": "The workflow keeps `force-avd-creation: true`, resetting emulator state between reruns.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml"
+      ]
+    },
+    {
+      "id": "VAL-CI-032",
+      "status": "pass",
+      "reason": "`scripts/ci-debug-emulator-runner.sh` bounds logcat artifacts to 10 MiB with `head -c`, and the downloaded log files are within that limit.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/ci-debug-emulator-runner.sh",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-full.txt",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-rn.txt",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-startup.txt"
+      ]
+    },
+    {
+      "id": "VAL-CI-033",
+      "status": "pass",
+      "reason": "All seven uploaded screenshots have valid PNG magic bytes and are <= 4 MiB.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/welcome.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/biometric-setup.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/biometric-prompt-1.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/recovery-phrase.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/main-wallet.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/relaunch-unlock-prompt.png",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/after-relaunch.png"
+      ]
+    },
+    {
+      "id": "VAL-CI-034",
+      "status": "pass",
+      "reason": "No mnemonic, raw secret, or vault-associated 40+ hex blob was found in the logcat artifacts; the only long hex strings are unrelated platform cert/cache identifiers, and `recovery-phrase.xml` is redacted.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-full.txt",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/logcat-rn.txt",
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f/emulator-ui-artifacts/recovery-phrase.xml"
+      ]
+    },
+    {
+      "id": "VAL-CI-035",
+      "status": "pass",
+      "reason": "The rendered GitHub Actions log contains action SHAs, the git SHA, and artifact digests, but no mnemonic or vault-secret leak.",
+      "evidence": [
+        "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809.log"
+      ]
+    },
+    {
+      "id": "VAL-CI-036",
+      "status": "pass",
+      "reason": "The emulator runner explicitly targets the fingerprint-capable `google_apis` system image.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/.github/workflows/debug-emulator.yml"
+      ]
+    },
+    {
+      "id": "VAL-CI-037",
+      "status": "pass",
+      "reason": "`enroll_fingerprint()` starts with a `has_enrollments()` early-return, making the helper idempotent when a fingerprint is already enrolled.",
+      "evidence": [
+        "/home/liran/src/enboxorg/mobile/scripts/emulator-debug-flow.py"
+      ]
+    }
+  ],
+  "artifactInventory": {
+    "artifactRoot": "ci-emulator-validation/ci-android-emulator/debug-emulator-run-24871162809/emulator-debug-cb92ac859be45db5dd74f422993bfbcc7da3ce8f",
+    "screenshots": [
+      {
+        "name": "welcome.png",
+        "sizeBytes": 178121,
+        "pngValid": true,
+        "placeholder": false
+      },
+      {
+        "name": "biometric-setup.png",
+        "sizeBytes": 89701,
+        "pngValid": true,
+        "placeholder": false
+      },
+      {
+        "name": "biometric-prompt-1.png",
+        "sizeBytes": 71,
+        "pngValid": true,
+        "placeholder": true
+      },
+      {
+        "name": "recovery-phrase.png",
+        "sizeBytes": 71,
+        "pngValid": true,
+        "placeholder": true
+      },
+      {
+        "name": "main-wallet.png",
+        "sizeBytes": 93895,
+        "pngValid": true,
+        "placeholder": false
+      },
+      {
+        "name": "relaunch-unlock-prompt.png",
+        "sizeBytes": 71,
+        "pngValid": true,
+        "placeholder": true
+      },
+      {
+        "name": "after-relaunch.png",
+        "sizeBytes": 99178,
+        "pngValid": true,
+        "placeholder": false
+      }
+    ],
+    "xmlDumps": [
+      "welcome.xml",
+      "biometric-setup.xml",
+      "biometric-prompt-1.xml",
+      "recovery-phrase.xml",
+      "main-wallet.xml",
+      "relaunch-unlock-prompt.xml",
+      "after-relaunch.xml",
+      "window_dump.xml"
+    ],
+    "logs": [
+      {
+        "name": "logcat-full.txt",
+        "sizeBytes": 4490775
+      },
+      {
+        "name": "logcat-rn.txt",
+        "sizeBytes": 5143
+      },
+      {
+        "name": "logcat-startup.txt",
+        "sizeBytes": 833718
+      }
+    ]
+  },
+  "logScans": {
+    "logcatRn": {
+      "fatalOrUnhandled": [],
+      "pinEraStringsFound": [],
+      "mnemonicOrSecretLeakFound": false,
+      "notes": [
+        "Only informational ReactNativeJS lines for biometric vault startup/initialization were present."
+      ]
+    },
+    "logcatFull": {
+      "pinEraStringsFound": [],
+      "mnemonicOrSecretLeakFound": false,
+      "notes": [
+        "40+ hex strings were present only in unrelated platform/system contexts (carrier config certs, Play Services cache ids, download ids), not in enbox/vault/biometric-secret contexts.",
+        "System RecoverableKeyStore warnings were present but were outside the app-specific ReactNative log and did not include mnemonic or secret material."
+      ]
+    },
+    "uiDumpPrivacy": {
+      "recoveryPhraseXmlRedacted": true,
+      "windowDumpContainsRecoveryPhrase": false,
+      "notes": [
+        "`recovery-phrase.xml` preserved structural anchors while redacting mnemonic cells as `[redacted]`."
+      ]
+    },
+    "ghaRenderedLog": {
+      "mnemonicOrSecretLeakFound": false,
+      "notes": [
+        "Observed long hex values were action SHAs, the git commit SHA, cache keys, or artifact digests."
+      ]
+    }
+  },
+  "frictions": [
+    {
+      "description": "ADB framebuffer capture was blocked by secure surfaces for `biometric-prompt-1`, `recovery-phrase`, and `relaunch-unlock-prompt`, so the workflow stored 1x1 placeholder PNGs and relied on the paired XML dumps for structural evidence.",
+      "resolved": true,
+      "resolution": "Validated the secure-surface stages through the corresponding `*.xml` dumps (`com.android.systemui` prompt nodes and redacted recovery-phrase hierarchy) while confirming the PNG files themselves remained valid artifacts.",
+      "affectedAssertions": [
+        "VAL-CI-014",
+        "VAL-CI-021",
+        "VAL-CI-033"
+      ]
+    },
+    {
+      "description": "Broad 40+ hex scans over `logcat-full.txt` and the rendered Actions log produced unrelated platform digests and workflow SHAs.",
+      "resolved": true,
+      "resolution": "Reviewed the matching contexts and confirmed none were Enbox wallet secrets, mnemonic material, or vault-associated leaks.",
+      "affectedAssertions": [
+        "VAL-CI-034",
+        "VAL-CI-035"
+      ]
+    }
+  ],
+  "blockers": [],
+  "summary": "Validated VAL-CI-001..037 against the exact-head debug-emulator run 24871162809 and exact-head ci.yml run 24871164204, plus the latest relevant build-apk run 24870269723 and a wrapper-executed exact-head debug-emulator run 24871926015. Result: 36 passed, 1 failed, 0 blocked.",
+  "overallStatus": "fail"
+}

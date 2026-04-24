@@ -141,6 +141,15 @@ The contract file `validation-contract.md` labels each assertion with its `Tool:
 - Keep execution single-threaded: at most one validator at a time and no nested validators.
 - Do not edit product code while validating. Only write the assigned flow report and any evidence notes/artifacts.
 
+## Flow Validator Guidance: ci-android-emulator
+
+- Isolation boundary: the shared repository checkout at `/home/liran/src/enboxorg/mobile`, the single mission branch `mission/biometric-vault`, GitHub Actions runs for that branch, and validator outputs under `.factory/validation/ci-emulator-validation/user-testing/` plus the mission evidence directory.
+- Allowed tools: `git` status/rev-parse/log, `bash scripts/run-ci-emulator.sh <branch>`, `gh run view/list/watch/download`, `file`, `python3`, and read-only inspection of downloaded artifacts/logs.
+- Keep execution single-threaded: one validator only, and never dispatch a second `debug-emulator.yml` run while another run for the branch is still in progress.
+- If the local branch tip is ahead of `origin/mission/biometric-vault`, push the branch before dispatch so the run's `headSha` matches the assertions being validated.
+- Do not edit product code while validating. Only write the assigned flow report, evidence files, and mission validation artifacts.
+- For this surface, validate all `VAL-CI-*` assertions using one exact-HEAD successful `debug-emulator.yml` run plus the matching latest successful `ci.yml` and `build-apk.yml` runs.
+
 ## Update policy
 
 `user-testing-validator` may append to this file with:
