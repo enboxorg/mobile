@@ -38,6 +38,23 @@ This mission has two testing surfaces:
   `RecoveryPhrase` screen's dump must be redacted or skipped before
   upload, and validators should scan uploaded XML dumps for mnemonic or
   other secret-bearing text, not just `logcat-*.txt`.
+- **RecoveryPhrase XML sanitization (VAL-CI, scrutiny 2026-04-24):**
+  `scripts/emulator-debug-flow.py` sanitizes the uiautomator dump
+  before writing `recovery-phrase.xml` (and the concurrent
+  `window_dump.xml` working copy). Every `<node>` whose `text` or
+  `content-desc` attribute matches the 3–8 char lowercase BIP-39
+  pattern AND is a member of the canonical 2048-word English
+  wordlist (embedded at `scripts/bip39_wordlist.py`) is replaced
+  with the literal string `[redacted]`. Structural nodes (hierarchy
+  wrappers, the `"Back up your recovery phrase"` title, the body
+  copy, the `"1."`–`"24."` index labels, and the
+  `content-desc="Recovery phrase"` grid wrapper) are preserved
+  verbatim so validators can still assert the screen was reached.
+  Only the `recovery-phrase*` dump is scrubbed — every other dump
+  (`main-wallet.xml`, `after-relaunch.xml`, `biometric-prompt-1.xml`,
+  etc.) passes through untouched. Run
+  `python3 scripts/emulator-debug-flow.py --self-test` for the
+  embedded unit check.
 
 ## Why `agent-browser` and `tuistory` do not apply
 

@@ -66,6 +66,10 @@ yarn-error.log
 # testing
 /coverage
 
+# Python scratch (scripts/ contains Python helpers for CI emulator flow)
+__pycache__/
+*.pyc
+
 # Yarn
 .yarn/*
 !.yarn/patches

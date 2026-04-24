@@ -36,6 +36,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Iterable, Optional
 
+# Make ``scripts/bip39_wordlist.py`` importable regardless of the CWD from
+# which this driver is invoked. The runner invokes it as
+# ``python3 scripts/emulator-debug-flow.py`` from the repo root, but the
+# ``--self-test`` hook + the sanitizer unit check may be run from elsewhere.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bip39_wordlist import BIP39_WORDS  # noqa: E402
+
 
 # Artifact output root. Both the workflow and validators read PNG/XML files
 # from here, so do not change without coordinating with the CI workflow.
@@ -113,20 +120,104 @@ def adb_emu(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]
 # -- UI dump / screenshot helpers --------------------------------------------
 
 
+# --- RecoveryPhrase sanitization --------------------------------------------
+#
+# ``FLAG_SECURE`` protects the RecoveryPhrase screen's PNG screenshot from
+# ``adb shell screencap -p`` (see VAL-UX-043) but does NOT stop
+# ``uiautomator dump`` from capturing the rendered BIP-39 mnemonic text.
+# Uploading the raw XML through ``actions/upload-artifact`` would leak the
+# 24-word recovery phrase into the GitHub Actions artifact store.
+#
+# We scrub the XML before it leaves the device-shaped file layout by
+# replacing every node ``text`` / ``content-desc`` whose value is a
+# BIP-39 word (lowercase, 3-8 letters, member of the canonical 2048-word
+# wordlist) with the literal string ``[redacted]``. Structural nodes
+# (ViewGroup wrappers, the "Back up your recovery phrase" title, the
+# "Write these 24 words…" body, word-cell index labels like ``"1."``)
+# stay intact so validators can still prove the RecoveryPhrase screen
+# was reached and rendered the expected number of cells.
+#
+# This scrub ONLY runs for dumps destined for files starting with
+# ``recovery-phrase`` — every other screen (main-wallet, after-relaunch,
+# biometric-prompt-1, etc.) is passed through untouched so the upload
+# contract in VAL-CI-014 is unaffected.
+
+_BIP39_WORD_RE = re.compile(r"^[a-z]{3,8}$")
+_SANITIZED_PLACEHOLDER = "[redacted]"
+_UIAUTOMATOR_XML_DECLARATION = (
+    b"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+)
+
+
+def _sanitize_bip39_xml(xml_bytes: bytes) -> bytes:
+    """Return ``xml_bytes`` with every BIP-39 word replaced by ``[redacted]``.
+
+    Only ``text`` and ``content-desc`` attributes on ``<node>`` elements
+    are scanned; all other structure (tree, index/resource-id/bounds,
+    non-word text content like "Back up your recovery phrase") is
+    preserved byte-for-byte through ``xml.etree.ElementTree`` re-
+    serialization. The uiautomator XML declaration is re-prepended
+    because ElementTree strips it on parse.
+
+    Matching criteria (intentionally narrow so the sanitizer can't
+    accidentally redact legitimate UI copy):
+
+    - attribute value, after ``.strip()``, is exactly 3–8 lowercase
+      ASCII letters (regex ``^[a-z]{3,8}$``);
+    - and that value is present in the frozen 2048-entry BIP-39
+      English wordlist.
+
+    The title ("Back up your recovery phrase"), body copy, index
+    labels ("1.", "2.", …), and the ``content-desc="Recovery phrase"``
+    on the grid wrapper all fail the regex and are therefore preserved.
+    """
+
+    root = ET.fromstring(xml_bytes)
+    for node in root.iter("node"):
+        for attr in ("text", "content-desc"):
+            value = node.attrib.get(attr, "")
+            if not value:
+                continue
+            candidate = value.strip()
+            if (
+                _BIP39_WORD_RE.match(candidate)
+                and candidate in BIP39_WORDS
+            ):
+                node.attrib[attr] = _SANITIZED_PLACEHOLDER
+    body = ET.tostring(root, encoding="utf-8")
+    return _UIAUTOMATOR_XML_DECLARATION + body
+
+
 def dump_ui(name: Optional[str] = None) -> ET.Element:
     """Dump the current UI hierarchy and return the parsed root element.
 
-    When ``name`` is provided, the XML is also copied to ``/tmp/emulator-ui/<name>.xml``
-    so downstream validators can read it alongside the matching screenshot.
+    When ``name`` is provided, the XML is also copied to
+    ``/tmp/emulator-ui/<name>.xml`` so downstream validators can read it
+    alongside the matching screenshot.
+
+    For dumps whose ``name`` starts with ``recovery-phrase`` the XML is
+    sanitized through :func:`_sanitize_bip39_xml` before being written
+    to BOTH the named file AND the working ``window_dump.xml``. The
+    working file is overwritten too so that a mid-flow failure — which
+    would leave ``window_dump.xml`` as the "last dump" uploaded
+    alongside the named artifacts — cannot leak the phrase either.
     """
 
     adb("shell", "uiautomator", "dump", "/sdcard/window_dump.xml")
     local = ROOT / "window_dump.xml"
     adb("pull", "/sdcard/window_dump.xml", str(local))
+    raw_bytes = local.read_bytes()
+    if name and name.startswith("recovery-phrase"):
+        raw_bytes = _sanitize_bip39_xml(raw_bytes)
+        # Overwrite the working file so the mnemonic cannot leak via
+        # ``window_dump.xml`` if the driver crashes before the next
+        # ``dump_ui`` call overwrites it with a non-RecoveryPhrase
+        # hierarchy.
+        local.write_bytes(raw_bytes)
     if name:
         named = ROOT / f"{name}.xml"
-        named.write_bytes(local.read_bytes())
-    return ET.parse(local).getroot()
+        named.write_bytes(raw_bytes)
+    return ET.fromstring(raw_bytes)
 
 
 def parse_bounds(bounds: str) -> tuple[int, int]:
@@ -1490,7 +1581,142 @@ def _dump_flow_error(exc: BaseException) -> None:
     print(f"FLOW_ERROR: {exc}", file=sys.stderr)
 
 
+def _self_test_sanitizer() -> int:
+    """Exercise :func:`_sanitize_bip39_xml` against a synthetic
+    RecoveryPhrase-shaped XML dump and assert that:
+
+    - every BIP-39 word cell is replaced with ``[redacted]`` (0 BIP-39
+      words remain as ``text`` / ``content-desc`` values);
+    - the screen title, body copy, index labels (``"1."``…), and
+      structural wrappers (``content-desc="Recovery phrase"``) are
+      preserved;
+    - the ``<?xml ... ?>`` declaration survives so downstream
+      validators' uiautomator-shape checks continue to pass.
+
+    Returns 0 on success, non-zero on failure. Designed to be runnable
+    without any device or emulator.
+    """
+
+    # 24-word sample drawn directly from ``node_modules/@scure/bip39``'s
+    # wordlist so every word is a real BIP-39 member (worst case for the
+    # sanitizer — every cell must be scrubbed).
+    sample_words = [
+        "abandon", "ability", "able", "about", "above", "absent",
+        "absorb", "abstract", "absurd", "abuse", "access", "accident",
+        "account", "accuse", "achieve", "acid", "acoustic", "acquire",
+        "across", "act", "action", "actor", "actress", "actual",
+    ]
+    assert len(sample_words) == 24
+
+    cells_xml = "".join(
+        # Structural wrapper cell (no text) followed by an index label
+        # cell (``"1."``) and a word-cell (the real mnemonic word).
+        (
+            f'<node index="{i * 3 + 0}" text="" resource-id="recovery-phrase-word-{i + 1}" '
+            f'class="android.view.ViewGroup" package="org.enbox.mobile" content-desc="" '
+            f'bounds="[0,0][100,100]" />'
+            f'<node index="{i * 3 + 1}" text="{i + 1}." resource-id="" '
+            f'class="android.widget.TextView" package="org.enbox.mobile" content-desc="" '
+            f'bounds="[0,0][20,20]" />'
+            f'<node index="{i * 3 + 2}" text="{word}" resource-id="" '
+            f'class="android.widget.TextView" package="org.enbox.mobile" content-desc="" '
+            f'bounds="[0,0][50,50]" />'
+        )
+        for i, word in enumerate(sample_words)
+    )
+    title_body = (
+        '<node index="0" text="Back up your recovery phrase" resource-id="" '
+        'class="android.view.View" package="org.enbox.mobile" content-desc="" '
+        'bounds="[0,0][1000,200]" />'
+        '<node index="1" text="Write these 24 words down in order." resource-id="" '
+        'class="android.widget.TextView" package="org.enbox.mobile" content-desc="" '
+        'bounds="[0,0][1000,300]" />'
+        '<node index="2" text="" resource-id="recovery-phrase-word-grid" '
+        'class="android.view.ViewGroup" package="org.enbox.mobile" '
+        'content-desc="Recovery phrase" bounds="[0,0][1000,2000]" />'
+    )
+    sample_xml = (
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+        f"<hierarchy rotation=\"0\">{title_body}{cells_xml}</hierarchy>"
+    ).encode("utf-8")
+
+    sanitized = _sanitize_bip39_xml(sample_xml)
+    sanitized_text = sanitized.decode("utf-8")
+
+    failures: list[str] = []
+
+    # 1) XML declaration preserved.
+    if not sanitized.startswith(_UIAUTOMATOR_XML_DECLARATION):
+        failures.append(
+            "XML declaration missing from sanitized output"
+        )
+
+    # 2) Zero BIP-39 words remain in any ``text`` / ``content-desc``
+    # attribute value. Re-parse rather than string-search so the check
+    # ignores word fragments inside resource-ids / class names.
+    root = ET.fromstring(sanitized)
+    for node in root.iter("node"):
+        for attr in ("text", "content-desc"):
+            value = (node.attrib.get(attr) or "").strip()
+            if (
+                _BIP39_WORD_RE.match(value)
+                and value in BIP39_WORDS
+            ):
+                failures.append(
+                    f"BIP-39 word {value!r} leaked through on attr={attr!r}"
+                )
+
+    # 3) Structural + non-mnemonic content survived intact.
+    for required in (
+        "Back up your recovery phrase",
+        "Write these 24 words down in order.",
+        'content-desc="Recovery phrase"',
+        'resource-id="recovery-phrase-word-grid"',
+        'resource-id="recovery-phrase-word-1"',
+        'resource-id="recovery-phrase-word-24"',
+        'text="1."',
+        'text="24."',
+    ):
+        if required not in sanitized_text:
+            failures.append(f"expected fragment missing after sanitize: {required!r}")
+
+    # 4) Every word cell was actually replaced — we should see at least
+    # 24 ``[redacted]`` occurrences.
+    redaction_count = sanitized_text.count(_SANITIZED_PLACEHOLDER)
+    if redaction_count < 24:
+        failures.append(
+            f"expected >=24 [redacted] replacements, saw {redaction_count}"
+        )
+
+    # 5) Non-RecoveryPhrase dumps (e.g. main-wallet) must be pass-through
+    # — guard here so we notice if the helper ever grows an unconditional
+    # scrub path.
+    passthrough_sample = (
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+        "<hierarchy rotation=\"0\"><node index=\"0\" text=\"Identities\" "
+        "resource-id=\"\" class=\"android.widget.TextView\" "
+        "package=\"org.enbox.mobile\" content-desc=\"\" "
+        "bounds=\"[0,0][100,100]\" /></hierarchy>"
+    ).encode("utf-8")
+    # The sanitizer itself should not be invoked from ``dump_ui`` for
+    # non-recovery-phrase names; calling it directly still leaves the
+    # "Identities" string alone because it's 10 chars — outside the
+    # 3..8 BIP-39 word window.
+    assert b"Identities" in _sanitize_bip39_xml(passthrough_sample)
+
+    if failures:
+        print("== sanitizer self-test FAILED ==", file=sys.stderr)
+        for line in failures:
+            print(f"  - {line}", file=sys.stderr)
+        return 1
+    print("== sanitizer self-test OK ==")
+    print(f"  redactions={redaction_count} bytes={len(sanitized)}")
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        sys.exit(_self_test_sanitizer())
     try:
         sys.exit(main())
     except SystemExit:
