@@ -53,7 +53,7 @@ src/features/session/                 # Session store + route matrix
 src/navigation/                       # App navigator (gate)
 src/hooks/                            # useAutoLock, etc.
 scripts/apply-patches.mjs             # postinstall @enbox + leveldb patcher
-scripts/emulator-debug-flow.py        # CI Android e2e driver
+scripts/emulator-debug-flow.ts        # CI Android e2e driver (bun-run TypeScript)
 .github/workflows/                    # ci.yml, build-apk.yml, debug-emulator.yml
 ```
 
@@ -400,9 +400,9 @@ bun run verify        # the three above
 
 ### Emulator end-to-end (Milestone 5 only)
 
-Driver: `scripts/emulator-debug-flow.py`. Highlights:
+Driver: `scripts/emulator-debug-flow.ts` (run via `bun`). Highlights:
 
-- `enroll_fingerprint()` helper:
+- `enrollFingerprint()` helper:
   `adb shell locksettings set-pin 0000` → open the fingerprint-enroll intent →
   loop `adb -e emu finger touch 1` until the UI says "Fingerprint added".
 - Waits for Welcome → taps **Get started**.
@@ -413,6 +413,11 @@ Driver: `scripts/emulator-debug-flow.py`. Highlights:
   is visible, then taps that anchor.
 - Asserts the main wallet UI ("Identities" tab, etc.).
 - Force-stops + relaunches, satisfies the prompt again, confirms Main.
+
+The driver was originally `scripts/emulator-debug-flow.py` and was ported
+to TypeScript on 2026-04-24 to remove the cross-language disconnect with
+the rest of the codebase. External behaviour (artifact names, sanitizer
+rules, CLI surface including `--self-test`) is unchanged.
 
 Dispatch from a dev machine:
 

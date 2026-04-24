@@ -20,28 +20,30 @@
 #   1. Ensure ``/tmp/emulator-ui`` + ``/tmp/emulator-ui-artifacts``
 #      exist so screenshots + dumps always have a destination.
 #   2. Install the release APK, clear logcat, launch the app, take a
-#      baseline startup logcat, then run ``emulator-debug-flow.py``
-#      with its exit code explicitly captured (no ``set -e``, no
-#      ``|| true``).
+#      baseline startup logcat, then run ``emulator-debug-flow.ts``
+#      via ``bun`` with its exit code explicitly captured (no ``set
+#      -e``, no ``|| true``).
 #   3. UNCONDITIONALLY copy screenshots/uiautomator dumps and dump
 #      the final logcat streams — this happens inside the same
 #      ``reactivecircus/android-emulator-runner`` step so ``adb`` is
 #      still alive (the emulator is torn down by the action's post
 #      hook, not by the script's end). The capture runs whether the
-#      Python driver succeeded, failed loudly, or was killed by an
+#      driver succeeded, failed loudly, or was killed by an
 #      unhandled exception — see VAL-CI-013 / VAL-CI-023 / VAL-CI-024
 #      / VAL-CI-032.
-#   4. Export the Python driver's exit code to ``$GITHUB_ENV`` as
+#   4. Export the driver's exit code to ``$GITHUB_ENV`` as
 #      ``SCRIPT_EXIT_CODE`` and exit ``0`` from this script. A
 #      downstream workflow step with ``if: always()`` reads the
 #      exported code and re-exits with it so the job fails loudly
 #      (VAL-CI-024) without short-circuiting the subsequent
 #      ``if: always()`` upload / verification steps.
 #
-# The script assumes ``adb`` is on ``PATH`` and ``ANDROID_SERIAL`` /
-# ``EMULATOR_PORT`` are set by ``reactivecircus/android-emulator-runner``
-# before invocation. When run locally (outside CI) it still works
-# against whichever emulator ``adb`` defaults to.
+# The script assumes ``adb`` and ``bun`` are on ``PATH`` (the workflow
+# installs both via ``oven-sh/setup-bun@v2`` and the Android SDK
+# action), and that ``ANDROID_SERIAL`` / ``EMULATOR_PORT`` are set by
+# ``reactivecircus/android-emulator-runner`` before invocation. When
+# run locally (outside CI) it still works against whichever emulator
+# ``adb`` defaults to.
 
 # Intentionally no ``set -e`` — we want the script to continue past a
 # failing Python driver so the always-run capture phase executes.
@@ -78,11 +80,11 @@ echo "=== Driving onboarding flow by UI text ==="
 # the outcome; a downstream ``if: always()`` workflow step re-exits
 # with this code so CI still fails loudly when the driver regresses.
 # See VAL-CI-013 / VAL-CI-024.
-python3 scripts/emulator-debug-flow.py
+bun run scripts/emulator-debug-flow.ts
 SCRIPT_EXIT_CODE=$?
 
 echo ""
-echo "=== [capture] Python driver exit code: ${SCRIPT_EXIT_CODE} ==="
+echo "=== [capture] Driver exit code: ${SCRIPT_EXIT_CODE} ==="
 
 # ----------------------------------------------------------------------
 # ALWAYS-RUN CAPTURE PHASE

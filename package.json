@@ -12,7 +12,8 @@
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage --runInBand",
-    "verify": "bun run lint && bun run typecheck && bun run test",
+    "emulator:self-test": "bun run scripts/emulator-debug-flow.ts --self-test",
+    "verify": "bun run lint && bun run typecheck && bun run test && bun run emulator:self-test",
     "build:apk:debug": "cd android && ./gradlew assembleDebug --no-daemon && cd ..",
     "build:apk:release": "cd android && ./gradlew assembleRelease --no-daemon && cd .."
   },

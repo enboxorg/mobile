@@ -55,7 +55,7 @@ Once the branch is on origin, a follow-up `ci-runner` worker session can run `ba
 ## What was verified locally before the blocker
 
 - `scripts/run-ci-emulator.sh` exists, is executable, has `set -euo pipefail`, and contains the three required primitives (`git push`, `gh workflow run debug-emulator.yml`, `gh run watch`).
-- `scripts/emulator-debug-flow.py` parses cleanly (`python3 -m py_compile` exit 0).
+- `scripts/emulator-debug-flow.ts` typechecks cleanly (`bun run typecheck` exit 0) and the bundled sanitizer self-test passes (`bun run emulator:self-test` exit 0). Driver was ported from Python on 2026-04-24.
 - `gh auth status` reports authenticated with `repo` scope.
 - No existing `debug-emulator.yml` or `build-apk.yml` runs on the mission branch. Latest `ci.yml` run is on origin tip `3357626` (pre-current-head) with `conclusion=success`, but it does NOT cover the 62 local commits that include the biometric vault source/tests.
 

@@ -47,7 +47,7 @@ on:
     #   - The workflow file itself — updating the runner pins or the
     #     artifact-upload glob without re-running the suite hides
     #     breakages until the next unrelated src change.
-    #   - `scripts/emulator-debug-flow.py` / `scripts/**` — the driver
+    #   - `scripts/emulator-debug-flow.ts` / `scripts/**` — the driver
     #     logic IS the suite. A regression in the driver (missing a
     #     sensitive-screen placeholder, a bad adb invocation, an
     #     assertion typo) would never run until a src change landed.
@@ -129,7 +129,7 @@ jobs:
         working-directory: android
 
       # STEP 1 — run the biometric onboarding flow on the emulator.
-      # The runner script captures the Python driver's exit code into
+      # The runner script captures the driver's exit code into
       # ``$GITHUB_ENV`` as ``SCRIPT_EXIT_CODE`` and ALWAYS exits 0 so
       # that the subsequent ``if: always()`` steps (artifact sanity
       # check, upload, exit-code propagation) run in a well-defined
@@ -206,8 +206,8 @@ jobs:
           # retention-days must be >= 7 per VAL-CI-030.
           retention-days: 7
 
-      # STEP 4 — re-exit with the Python driver's exit code so the job
-      # fails loudly whenever the onboarding flow regressed. STEP 1
+      # STEP 4 — re-exit with the driver's exit code so the job fails
+      # loudly whenever the onboarding flow regressed. STEP 1
       # deliberately exits 0 to let the ``if: always()`` sanity-check
       # and upload steps run; this step is the sole source of job
       # failure signal for driver regressions. ``if: always()`` so it
@@ -218,12 +218,12 @@ jobs:
         run: |
           CODE="${SCRIPT_EXIT_CODE:-}"
           if [ -z "$CODE" ]; then
-            echo "::error::SCRIPT_EXIT_CODE was not exported — the emulator step likely aborted before the Python driver ran."
+            echo "::error::SCRIPT_EXIT_CODE was not exported — the emulator step likely aborted before the driver ran."
             exit 1
           fi
           echo "=== Emulator flow script exit code: ${CODE} ==="
           if [ "$CODE" != "0" ]; then
-            echo "::error::Emulator onboarding flow failed (python3 scripts/emulator-debug-flow.py exited ${CODE}). Check the uploaded artifact 'emulator-debug-${{ github.sha }}' for logs and screenshots."
+            echo "::error::Emulator onboarding flow failed (bun run scripts/emulator-debug-flow.ts exited ${CODE}). Check the uploaded artifact 'emulator-debug-${{ github.sha }}' for logs and screenshots."
             exit "$CODE"
           fi
           echo "=== Emulator onboarding flow completed successfully ==="
