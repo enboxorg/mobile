@@ -308,6 +308,25 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         // need to carry a `password` property.
         recoveryPhrase = await agent.initialize({});
         console.log('[agent-store] vault initialized.');
+        // Upstream `EnboxUserAgent.initialize()` does NOT assign
+        // `agentDid` (only `start()` does). Without this assignment the
+        // `refreshIdentities()` race gate would early-return and the
+        // 2s retry poller would time out, leaving the store's
+        // identities list empty after a genuine first-launch flow. The
+        // vault is already unlocked in memory from the preceding
+        // biometric prompt inside `initialize()`, so `vault.getDid()`
+        // resolves synchronously from the in-memory BearerDid — no
+        // second biometric prompt is triggered here.
+        try {
+          const bearerDid = await vault.getDid();
+          (agent as unknown as { agentDid?: { uri: string } }).agentDid =
+            bearerDid as unknown as { uri: string };
+        } catch (err) {
+          console.warn(
+            '[agent-store] initializeFirstLaunch: could not assign agentDid',
+            err,
+          );
+        }
       } else {
         console.log('[agent-store] starting existing vault (biometric prompt)...');
         await agent.start({});
@@ -432,6 +451,29 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       //    widened to optional by the postinstall patch, so we omit it.
       await agent.initialize({ recoveryPhrase: mnemonic });
 
+      // Upstream `EnboxUserAgent.initialize()` does NOT assign
+      // `agentDid` — only `start()` does (`this.agentDid = await
+      // this.vault.getDid()`). Because the restore flow never calls
+      // `agent.start()`, the subsequent `refreshIdentities()` race
+      // gate would early-return and the 2s retry poller would time
+      // out, leaving restored wallets with a stale / empty identity
+      // list even though the vault is fully provisioned. Assign
+      // `agentDid` directly from `vault.getDid()` here — the vault is
+      // already unlocked in memory from the preceding biometric prompt
+      // inside `initialize({ recoveryPhrase })`, so this does NOT
+      // trigger a second biometric prompt. The try/catch keeps the
+      // restore flow resilient against an unexpected `getDid()` throw.
+      try {
+        const bearerDid = await vault.getDid();
+        (agent as unknown as { agentDid?: { uri: string } }).agentDid =
+          bearerDid as unknown as { uri: string };
+      } catch (err) {
+        console.warn(
+          '[agent-store] restoreFromMnemonic: could not assign agentDid',
+          err,
+        );
+      }
+
       set({
         agent,
         authManager,
@@ -495,7 +537,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         agent,
         () => get().agent,
         () => {
-          void get().refreshIdentities();
+          get().refreshIdentities().catch(() => {});
         },
       );
       return;
