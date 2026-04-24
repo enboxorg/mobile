@@ -16,25 +16,35 @@
 # is to dump the body of the step into a shell file and invoke that
 # file in a single one-liner. That's exactly what this script is.
 #
-# Behavior:
+# Behavior (Option A — workflow-level always-run capture):
 #   1. Ensure ``/tmp/emulator-ui`` + ``/tmp/emulator-ui-artifacts``
 #      exist so screenshots + dumps always have a destination.
-#   2. Register a ``trap ... EXIT`` that ALWAYS captures logcat and
-#      copies screenshots, so an enrollment timeout or any other
-#      Python flow regression still produces a full debug bundle
-#      (VAL-CI-013 / VAL-CI-023 / VAL-CI-024 / VAL-CI-032).
-#   3. Install the release APK, clear logcat, launch the app, take a
-#      baseline startup logcat, and run ``emulator-debug-flow.py``.
-#   4. Propagate the Python driver's non-zero exit code so the
-#      workflow step fails when the flow regresses (VAL-CI-013 /
-#      VAL-CI-024).
+#   2. Install the release APK, clear logcat, launch the app, take a
+#      baseline startup logcat, then run ``emulator-debug-flow.py``
+#      with its exit code explicitly captured (no ``set -e``, no
+#      ``|| true``).
+#   3. UNCONDITIONALLY copy screenshots/uiautomator dumps and dump
+#      the final logcat streams — this happens inside the same
+#      ``reactivecircus/android-emulator-runner`` step so ``adb`` is
+#      still alive (the emulator is torn down by the action's post
+#      hook, not by the script's end). The capture runs whether the
+#      Python driver succeeded, failed loudly, or was killed by an
+#      unhandled exception — see VAL-CI-013 / VAL-CI-023 / VAL-CI-024
+#      / VAL-CI-032.
+#   4. Export the Python driver's exit code to ``$GITHUB_ENV`` as
+#      ``SCRIPT_EXIT_CODE`` and exit ``0`` from this script. A
+#      downstream workflow step with ``if: always()`` reads the
+#      exported code and re-exits with it so the job fails loudly
+#      (VAL-CI-024) without short-circuiting the subsequent
+#      ``if: always()`` upload / verification steps.
 #
 # The script assumes ``adb`` is on ``PATH`` and ``ANDROID_SERIAL`` /
 # ``EMULATOR_PORT`` are set by ``reactivecircus/android-emulator-runner``
 # before invocation. When run locally (outside CI) it still works
 # against whichever emulator ``adb`` defaults to.
 
-set -e
+# Intentionally no ``set -e`` — we want the script to continue past a
+# failing Python driver so the always-run capture phase executes.
 
 UI_DIR=/tmp/emulator-ui
 ARTIFACT_DIR=/tmp/emulator-ui-artifacts
@@ -46,53 +56,6 @@ APP_PACKAGE=org.enbox.mobile
 APP_ACTIVITY="${APP_PACKAGE}/.MainActivity"
 
 mkdir -p "${UI_DIR}" "${ARTIFACT_DIR}"
-
-capture_artifacts() {
-    # Never exit this handler with a non-zero status — the trap fires on
-    # the normal exit path AND on set -e-induced failure, and the shell
-    # would otherwise clobber the original exit code. The original code
-    # is preserved by explicit ``exit`` at the end.
-    local original_exit_code=$?
-    set +e
-
-    echo ""
-    echo "=== [cleanup] Copying screenshots and dumps into the artifact tree ==="
-    if [ -d "${UI_DIR}" ]; then
-        # ``/.`` semantics: copy the contents of UI_DIR into ARTIFACT_DIR,
-        # not the directory itself. stderr silenced so a missing-source
-        # case (rare) doesn't spam the log.
-        cp -R "${UI_DIR}/." "${ARTIFACT_DIR}/" 2>/dev/null
-    fi
-
-    echo ""
-    echo "========================================="
-    echo "=== ReactNativeJS + Crash Logs ==="
-    echo "========================================="
-    adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1 || true
-
-    echo ""
-    echo "========================================="
-    echo "=== All ERROR level logs ==="
-    echo "========================================="
-    adb logcat -d '*:E' 2>&1 | grep -i 'react\|enbox\|level\|crypto\|fatal\|exception' || true
-
-    echo ""
-    echo "=== [cleanup] Saving full logcat (size-bounded to 10 MiB) ==="
-    # Always produce the two required artifact files even if adb is
-    # unresponsive — empty files are fine; missing files are not (the
-    # ``actions/upload-artifact`` step warns + uploads nothing when ALL
-    # paths are missing, which is what broke the run before this
-    # refactor).
-    adb logcat -d 2>&1 | head -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_FULL}" || true
-    adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1 \
-        | head -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_RN}" || true
-    if [ ! -s "${LOGCAT_FULL}" ]; then
-        echo "warning: ${LOGCAT_FULL} is empty (adb may be unreachable)" >&2
-    fi
-
-    exit "${original_exit_code}"
-}
-trap capture_artifacts EXIT
 
 echo "=== Installing release APK ==="
 adb install android/app/build/outputs/apk/release/app-release.apk
@@ -110,6 +73,73 @@ echo "=== Capturing initial logcat (size-bounded to 10 MiB) ==="
 adb logcat -d 2>&1 | head -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_STARTUP}"
 
 echo "=== Driving onboarding flow by UI text ==="
-# No `|| true` — the Python driver's exit code must propagate so flow
-# regressions fail the job. See VAL-CI-013 / VAL-CI-024.
+# No ``|| true`` and no ``set -e``: the driver's exit code is captured
+# explicitly. The unconditional capture block below runs regardless of
+# the outcome; a downstream ``if: always()`` workflow step re-exits
+# with this code so CI still fails loudly when the driver regresses.
+# See VAL-CI-013 / VAL-CI-024.
 python3 scripts/emulator-debug-flow.py
+SCRIPT_EXIT_CODE=$?
+
+echo ""
+echo "=== [capture] Python driver exit code: ${SCRIPT_EXIT_CODE} ==="
+
+# ----------------------------------------------------------------------
+# ALWAYS-RUN CAPTURE PHASE
+# Everything below this line MUST run whether the Python driver
+# succeeded, failed, or died on an unhandled exception. This replaces
+# the old ``trap capture_artifacts EXIT`` mechanism with explicit
+# linear flow so future readers can see the capture path on the page.
+# ----------------------------------------------------------------------
+
+echo ""
+echo "=== [capture] Copying screenshots and uiautomator dumps into the artifact tree ==="
+if [ -d "${UI_DIR}" ]; then
+    # ``/.`` semantics: copy the contents of UI_DIR into ARTIFACT_DIR,
+    # not the directory itself. stderr silenced so a missing-source
+    # case (rare) doesn't spam the log.
+    cp -R "${UI_DIR}/." "${ARTIFACT_DIR}/" 2>/dev/null || true
+fi
+
+echo ""
+echo "========================================="
+echo "=== ReactNativeJS + Crash Logs ==="
+echo "========================================="
+adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1 || true
+
+echo ""
+echo "========================================="
+echo "=== All ERROR level logs ==="
+echo "========================================="
+adb logcat -d '*:E' 2>&1 | grep -i 'react\|enbox\|level\|crypto\|fatal\|exception' || true
+
+echo ""
+echo "=== [capture] Saving full logcat (size-bounded to 10 MiB) ==="
+# Always produce the two required artifact files even if adb is
+# unresponsive — empty files are fine; missing files are not (the
+# ``actions/upload-artifact`` step warns + uploads nothing when ALL
+# paths are missing, which is what broke the run before this
+# refactor).
+adb logcat -d 2>&1 | head -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_FULL}" || true
+adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1 \
+    | head -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_RN}" || true
+if [ ! -s "${LOGCAT_FULL}" ]; then
+    echo "warning: ${LOGCAT_FULL} is empty (adb may be unreachable)" >&2
+fi
+
+# Export the Python driver's exit code to ``$GITHUB_ENV`` so a
+# downstream ``if: always()`` workflow step can re-exit with it. The
+# guard lets local (non-CI) invocations still work — they simply skip
+# the env export.
+if [ -n "${GITHUB_ENV:-}" ] && [ -w "${GITHUB_ENV}" ]; then
+    echo "SCRIPT_EXIT_CODE=${SCRIPT_EXIT_CODE}" >> "${GITHUB_ENV}"
+    echo "=== [capture] Exported SCRIPT_EXIT_CODE=${SCRIPT_EXIT_CODE} to GITHUB_ENV ==="
+else
+    echo "=== [capture] GITHUB_ENV unavailable; SCRIPT_EXIT_CODE=${SCRIPT_EXIT_CODE} (local mode) ==="
+fi
+
+# Always exit 0 from this step so subsequent ``if: always()`` steps
+# (artifact upload, sanity check, exit-code propagation) run in a
+# well-defined order. The propagation step is responsible for failing
+# the job when SCRIPT_EXIT_CODE != 0.
+exit 0

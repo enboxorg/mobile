@@ -63,6 +63,14 @@ jobs:
         run: ./gradlew assembleRelease --no-daemon -x lint
         working-directory: android
 
+      # STEP 1 — run the biometric onboarding flow on the emulator.
+      # The runner script captures the Python driver's exit code into
+      # ``$GITHUB_ENV`` as ``SCRIPT_EXIT_CODE`` and ALWAYS exits 0 so
+      # that the subsequent ``if: always()`` steps (artifact sanity
+      # check, upload, exit-code propagation) run in a well-defined
+      # order. Job failure when the driver regresses is asserted by
+      # the exit-code propagation step below (Option A — workflow-level
+      # always-run capture, VAL-CI-013 / VAL-CI-024).
       - name: Run on emulator and capture logs
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -85,11 +93,39 @@ jobs:
           # bash functions / `trap` handlers impossible here. All the
           # actual orchestration (install APK, launch app, capture
           # logcat, run the Python flow, always-run cleanup) lives in
-          # `scripts/ci-debug-emulator-runner.sh` so the trap + function
-          # bodies survive. Do not inline the script body back into this
-          # block.
+          # `scripts/ci-debug-emulator-runner.sh` so the logic survives.
+          # Do not inline the script body back into this block.
           script: bash scripts/ci-debug-emulator-runner.sh
 
+      # STEP 2 — verify the capture phase produced the artifacts the
+      # upload step expects. Runs unconditionally so failed runs still
+      # surface missing-artifact diagnostics in the workflow log. If
+      # any required artifact is missing, a placeholder file is
+      # written so ``actions/upload-artifact`` has something to upload
+      # (rather than silently skipping when all paths resolve to
+      # nothing — see VAL-CI-032).
+      - name: Verify captured artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          echo "=== [verify] Listing captured artifacts ==="
+          ls -la /tmp/logcat-full.txt /tmp/logcat-rn.txt /tmp/logcat-startup.txt 2>/dev/null \
+            || echo "warning: one or more logcat files are missing"
+          ls -la /tmp/emulator-ui-artifacts 2>/dev/null \
+            || echo "warning: /tmp/emulator-ui-artifacts directory is missing"
+
+          mkdir -p /tmp/emulator-ui-artifacts
+          for f in /tmp/logcat-full.txt /tmp/logcat-rn.txt /tmp/logcat-startup.txt; do
+            if [ ! -f "$f" ]; then
+              echo "=== [verify] creating placeholder for missing $f ===" >&2
+              echo "MISSING — emulator step aborted before capture phase could write this file." > "$f"
+            fi
+          done
+
+      # STEP 3 — upload whatever artifacts exist, even on failure.
+      # ``if: always()`` guarantees the upload runs when STEP 1 or
+      # STEP 2 report failure (VAL-CI-013 / VAL-CI-030).
       - name: Upload logs and screenshot
         if: always()
         uses: actions/upload-artifact@v4
@@ -104,3 +140,25 @@ jobs:
             /tmp/emulator-ui-artifacts/**
           # retention-days must be >= 7 per VAL-CI-030.
           retention-days: 7
+
+      # STEP 4 — re-exit with the Python driver's exit code so the job
+      # fails loudly whenever the onboarding flow regressed. STEP 1
+      # deliberately exits 0 to let the ``if: always()`` sanity-check
+      # and upload steps run; this step is the sole source of job
+      # failure signal for driver regressions. ``if: always()`` so it
+      # also runs when STEPS 2 or 3 reported a problem (VAL-CI-024).
+      - name: Propagate emulator flow exit code
+        if: always()
+        shell: bash
+        run: |
+          CODE="${SCRIPT_EXIT_CODE:-}"
+          if [ -z "$CODE" ]; then
+            echo "::error::SCRIPT_EXIT_CODE was not exported — the emulator step likely aborted before the Python driver ran."
+            exit 1
+          fi
+          echo "=== Emulator flow script exit code: ${CODE} ==="
+          if [ "$CODE" != "0" ]; then
+            echo "::error::Emulator onboarding flow failed (python3 scripts/emulator-debug-flow.py exited ${CODE}). Check the uploaded artifact 'emulator-debug-${{ github.sha }}' for logs and screenshots."
+            exit "$CODE"
+          fi
+          echo "=== Emulator onboarding flow completed successfully ==="
