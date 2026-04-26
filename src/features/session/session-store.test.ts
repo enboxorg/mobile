@@ -532,12 +532,17 @@ describe('useSessionStore', () => {
       });
     });
 
-    it('hydrate does NOT promote when hasCompletedOnboarding is false (user never got past Welcome)', async () => {
-      // Defense in depth: if `hasCompletedOnboarding === false` then
-      // the user never reached BiometricSetup, so any native secret on
-      // disk is stale (e.g. from a previous install on the same device)
-      // and should NOT be promoted — the user still needs to see the
-      // Welcome / BiometricSetup flow.
+    it('hydrate does NOT promote when no prior-init signal exists anywhere (truly stale native secret on a fresh-install timeline)', async () => {
+      // Defense in depth: if NO signal proves the vault was previously
+      // initialized — neither the session-store ``hasCompletedOnboarding``
+      // flag, nor the vault's own ``INITIALIZED='true'`` SecureStorage
+      // sentinel, nor a persisted ``biometricState`` — then any native
+      // secret on disk is stale (e.g. from a previous install on the
+      // same device whose SecureStorage was wiped but whose Keychain
+      // / Keystore was not). Promoting an orphan in that case would
+      // misroute the user to RecoveryPhrase for a wallet they never
+      // owned. Round-7 Finding 2 deliberately gates promotion on at
+      // least one of the three signals.
       nativeBiometric.hasSecret.mockResolvedValue(true);
       mockedGetSecureItem.mockResolvedValue(null);
 
@@ -546,6 +551,113 @@ describe('useSessionStore', () => {
       const state = useSessionStore.getState();
       expect(state.hasIdentity).toBe(false);
       expect(state.isPendingFirstBackup).toBe(false);
+    });
+
+    // -----------------------------------------------------------------
+    // Round-7 Finding 2: orphan promotion must NOT depend on the
+    // Welcome ``hasCompletedOnboarding`` write landing first.
+    //
+    // Pre-fix timeline that the regression captures:
+    //   1. User clicks Continue on Welcome.
+    //      ``completeOnboarding()`` flips the in-memory flag and queues
+    //      a fire-and-forget ``persistSession``. The persist may not
+    //      have committed yet.
+    //   2. User immediately reaches BiometricSetup which calls
+    //      ``initializeFirstLaunch()``. The vault's
+    //      ``_doInitialize()`` runs to completion: the native secret
+    //      is stored AND the vault's own
+    //      ``INITIALIZED_STORAGE_KEY='true'`` sentinel is written
+    //      synchronously inside the same call.
+    //   3. Process kill BEFORE the Welcome ``persistSession`` from
+    //      step 1 lands AND before
+    //      ``commitSetupInitialized()`` runs.
+    //   4. Relaunch observes:
+    //        - ``rawSession === null`` (Welcome write never committed)
+    //        - ``hasSecret === true`` (vault's ``_doInitialize`` did
+    //          succeed)
+    //        - ``INITIALIZED_RAW_KEY === 'true'`` (vault wrote it)
+    //
+    // Pre-fix code routed back to Welcome→Setup; ``agent.firstLaunch()``
+    // returned ``false`` (LevelDB entry exists), and the user never
+    // saw their recovery phrase. Post-fix uses the
+    // ``INITIALIZED_RAW_KEY`` sentinel as a parallel "vault was
+    // provisioned" signal so the orphan promotion fires regardless of
+    // whether the Welcome persist landed.
+    // -----------------------------------------------------------------
+    it('Round-7 F2: hydrate promotes orphan via vault INITIALIZED sentinel when Welcome persist did not land (hasCompletedOnboarding=false)', async () => {
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'session:state') return null;
+        // The vault's own ``INITIALIZED_STORAGE_KEY`` written at the
+        // end of ``_doInitialize()``.
+        if (key === 'enbox:enbox.vault.initialized') return 'true';
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.hasIdentity).toBe(true);
+      expect(state.isPendingFirstBackup).toBe(true);
+      // The Welcome flag is also flipped on so the navigator does
+      // not re-route the user back to Welcome (which would then drop
+      // them on BiometricSetup with ``agent.firstLaunch()=false``).
+      expect(state.hasCompletedOnboarding).toBe(true);
+      // The promotion is re-persisted.
+      const sessionWrites = mockedSetSecureItem.mock.calls.filter(
+        ([key]) => key === 'session:state',
+      );
+      expect(sessionWrites.length).toBeGreaterThan(0);
+      const lastWrite = JSON.parse(
+        sessionWrites[sessionWrites.length - 1][1] as string,
+      );
+      expect(lastWrite).toMatchObject({
+        hasCompletedOnboarding: true,
+        hasIdentity: true,
+        isPendingFirstBackup: true,
+      });
+    });
+
+    it('Round-7 F2: hydrate promotes orphan via biometricState=ready when Welcome persist did not land (defensive fallback path)', async () => {
+      // Fallback when ``INITIALIZED_RAW_KEY`` was somehow cleared but
+      // the ``biometricState`` is still ``ready`` (observed during
+      // SecureStorage backend swaps in testing). Either signal is
+      // sufficient evidence that the vault was previously
+      // provisioned, so the orphan must still fire.
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'session:state') return null;
+        if (key === 'enbox:enbox.vault.biometric-state') return 'ready';
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.hasIdentity).toBe(true);
+      expect(state.isPendingFirstBackup).toBe(true);
+      expect(state.hasCompletedOnboarding).toBe(true);
+    });
+
+    it('Round-7 F2: hydrate promotes orphan via biometricState=invalidated when Welcome persist did not land (defensive fallback path)', async () => {
+      // ``invalidated`` is also a valid prior-init signal — the
+      // vault has previously been provisioned AND has subsequently
+      // observed an enrollment-change invalidation. The user still
+      // needs to reach RecoveryPhrase / RecoveryRestore, so the
+      // orphan must still fire.
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === 'session:state') return null;
+        if (key === 'enbox:enbox.vault.biometric-state') return 'invalidated';
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.hasIdentity).toBe(true);
+      expect(state.isPendingFirstBackup).toBe(true);
+      expect(state.hasCompletedOnboarding).toBe(true);
     });
   });
 });

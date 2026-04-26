@@ -8,6 +8,7 @@ import {
 } from '@/lib/storage/secure-storage';
 import {
   BIOMETRIC_STATE_STORAGE_KEY,
+  INITIALIZED_STORAGE_KEY,
   WALLET_ROOT_KEY_ALIAS,
 } from '@/lib/enbox/vault-constants';
 
@@ -24,6 +25,19 @@ const SESSION_KEY = 'session:state';
  * `SecureStorageAdapter`.
  */
 const BIOMETRIC_STATE_RAW_KEY = `enbox:${BIOMETRIC_STATE_STORAGE_KEY}`;
+
+/**
+ * Raw SecureStorage key where BiometricVault persists its `INITIALIZED='true'`
+ * sentinel after a successful `_doInitialize()`. Session-store reads it
+ * directly so the orphan-secret recovery (Round-7 Finding 2) can detect
+ * "the vault has previously been provisioned" without depending on the
+ * separate Welcome `hasCompletedOnboarding` write — which is a
+ * fire-and-forget persist that may not have committed before a
+ * cold-kill.
+ *
+ * Same `enbox:`-prefixing convention as `BIOMETRIC_STATE_RAW_KEY`.
+ */
+const VAULT_INITIALIZED_RAW_KEY = `enbox:${INITIALIZED_STORAGE_KEY}`;
 
 /**
  * Biometric availability state exposed to the navigator / onboarding UI.
@@ -249,10 +263,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   hydrate: async () => {
     try {
-      const [rawSession, rawBiometricState] = await Promise.all([
-        getSecureItem(SESSION_KEY),
-        getSecureItem(BIOMETRIC_STATE_RAW_KEY),
-      ]);
+      // Round-7 Finding 2: ALSO read the vault's own
+      // ``INITIALIZED_STORAGE_KEY`` sentinel. The orphan-secret
+      // recovery below uses it as a parallel "user previously had a
+      // working vault" signal independent of the Welcome
+      // ``hasCompletedOnboarding`` write — which is fire-and-forget
+      // (``persistSession`` swallows errors and the caller does not
+      // await) so a cold-kill between native-secret provisioning and
+      // the Welcome persist can leave us with
+      // ``hasCompletedOnboarding=false`` on disk while
+      // ``hasSecret=true`` natively. The vault's own ``INITIALIZED``
+      // flag is the authoritative durable signal that
+      // ``_doInitialize()`` ran to completion.
+      const [rawSession, rawBiometricState, rawVaultInitialized] =
+        await Promise.all([
+          getSecureItem(SESSION_KEY),
+          getSecureItem(BIOMETRIC_STATE_RAW_KEY),
+          getSecureItem(VAULT_INITIALIZED_RAW_KEY),
+        ]);
 
       let session: Partial<PersistedSessionState> = {};
       if (rawSession) {
@@ -298,7 +326,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
 
       // -----------------------------------------------------------------
-      // Orphaned-secret recovery (VAL-VAULT-028)
+      // Orphaned-secret recovery (VAL-VAULT-028 + Round-7 Finding 2)
       //
       // If the app crashed between "native secret provisioned inside
       // `initializeFirstLaunch()`" and "`commitSetupInitialized()`
@@ -311,14 +339,35 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // already exists), returning `recoveryPhrase = ''` and never
       // surfacing the phrase to the user.
       //
-      // We detect the orphan by combining the three available signals:
+      // Round-7 Finding 2: the pre-fix orphan condition required
+      // `committedHasCompletedOnboarding === true`, but
+      // `completeOnboarding()` is fire-and-forget (its
+      // `persistSession` swallows errors and the caller does not
+      // await). A kill timeline that goes Welcome→continue (in-memory
+      // flag flips, persist queued)→BiometricSetup→native secret
+      // provisioned→kill (BEFORE the Welcome persist commits) leaves
+      // us with `hasSecret=true` AND `committedHasCompletedOnboarding
+      // === false` on relaunch, skipping orphan promotion and routing
+      // back to Welcome→Setup where `agent.firstLaunch()` returns
+      // `false` (LevelDB entry already exists) and the user never
+      // sees their recovery phrase. Use the vault's own
+      // `INITIALIZED_STORAGE_KEY='true'` sentinel — written
+      // synchronously at the END of `_doInitialize()` — as a
+      // parallel "vault was provisioned" signal so the orphan check
+      // does not depend on a separate, possibly-pending write
+      // landing first.
       //
-      //   - `hasCompletedOnboarding === true` (user at least got past
-      //     Welcome before crashing).
+      // The orphan now fires when ALL of these hold:
       //   - `hasIdentity === false` (the post-setup persist never landed).
       //   - `hasSecret === true` (the native keystore has a secret).
+      //   - `vaultPriorInitialized === true` (the vault itself recorded
+      //     a successful initialize via INITIALIZED, OR the vault has
+      //     observed a biometric state at least once via biometricState
+      //     ∈ {ready, invalidated}, OR the user got past Welcome via
+      //     `committedHasCompletedOnboarding`). Any of these prove
+      //     "this is not a fresh install".
       //
-      // When all three hold, we promote the session snapshot to
+      // When the orphan fires we promote the session snapshot to
       // `{hasIdentity: true, isPendingFirstBackup: true}` so the
       // navigator routes to RecoveryPhrase where the resume-backup
       // flow (`agentStore.resumePendingBackup()`) can re-derive the
@@ -332,17 +381,37 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const committedIsPendingFirstBackup = Boolean(
         session.isPendingFirstBackup,
       );
+      // Vault-side prior-init signals. ``rawVaultInitialized === 'true'``
+      // is the authoritative one (set at the END of `_doInitialize()`
+      // and never cleared except by `reset()`). The
+      // `biometricState ∈ {ready, invalidated}` check is a fallback
+      // for the rare case where the `INITIALIZED` write succeeded
+      // earlier on this device but was somehow cleared while the
+      // native secret was not — observed during testing on
+      // SecureStorage-backend swaps.
+      const vaultPriorInitialized =
+        rawVaultInitialized === 'true' ||
+        rawBiometricState === 'ready' ||
+        rawBiometricState === 'invalidated';
       const isOrphanedSecret =
-        committedHasCompletedOnboarding &&
         !committedHasIdentity &&
-        hasSecret;
+        hasSecret &&
+        (committedHasCompletedOnboarding || vaultPriorInitialized);
 
       const effectiveHasIdentity = committedHasIdentity || isOrphanedSecret;
       const effectiveIsPendingFirstBackup =
         committedIsPendingFirstBackup || isOrphanedSecret;
+      // When the orphan fires via the vault-side signal but the
+      // Welcome persist never landed, also flip
+      // `hasCompletedOnboarding` back on. The user previously
+      // engaged the setup flow far enough for `_doInitialize()` to
+      // run to completion — they are categorically NOT on a fresh
+      // install, so re-routing them through Welcome would be wrong.
+      const effectiveHasCompletedOnboarding =
+        committedHasCompletedOnboarding || isOrphanedSecret;
 
       set({
-        hasCompletedOnboarding: committedHasCompletedOnboarding,
+        hasCompletedOnboarding: effectiveHasCompletedOnboarding,
         hasIdentity: effectiveHasIdentity,
         // `isPendingFirstBackup` is optional on disk so older installs
         // (persisted before the field existed) hydrate as `false`, which
@@ -361,11 +430,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (isOrphanedSecret) {
         console.warn(
           '[session] orphaned native secret detected; promoting to isPendingFirstBackup',
+          {
+            committedHasCompletedOnboarding,
+            committedHasIdentity,
+            hasSecret,
+            vaultPriorInitialized,
+          },
         );
         // `void` marks a deliberately-unawaited fire-and-forget promise.
         // eslint-disable-next-line no-void
         void persistSession({
-          hasCompletedOnboarding: committedHasCompletedOnboarding,
+          hasCompletedOnboarding: effectiveHasCompletedOnboarding,
           hasIdentity: true,
           isPendingFirstBackup: true,
         });

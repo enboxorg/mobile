@@ -888,30 +888,115 @@ export class BiometricVault
         } catch {
           // best-effort
         }
+        throw mapped;
+      }
+      // Round-7 Finding 1: a native ``NOT_FOUND`` mapped to
+      // ``VAULT_ERROR_NOT_INITIALIZED`` means the OS-level item
+      // disappeared between the ``hasSecret()`` probe (which returned
+      // ``true`` — we only reach this catch on the post-probe ``getSecret``
+      // path) and the actual read. The most common cause is iOS's
+      // biometry-current-set ACL: the Keychain item is auto-deleted when
+      // the enrollment set changes, and the deletion can race with a
+      // concurrent unlock attempt so ``hasSecret`` saw it but
+      // ``SecItemCopyMatching`` does not (``errSecItemNotFound``). Without
+      // this branch, ``_doUnlock()`` would re-throw
+      // ``VAULT_ERROR_NOT_INITIALIZED`` and the agent-store would route
+      // the user to "set up new wallet" instead of RecoveryRestore —
+      // exactly the same misroute Round-6 Finding 1 fixed for the
+      // ``hasSecret=false`` path. Apply the SAME disambiguation here:
+      // the user observably had a vault (``hasSecret=true`` proved that),
+      // so a sudden disappearance is invalidation, not fresh-install.
+      // We still consult ``_wasPreviouslyInitialized()`` for symmetry
+      // with the F1 path so a corrupted-SecureStorage deployment that
+      // somehow has neither signal still surfaces ``NOT_INITIALIZED``
+      // verbatim — the prior-init check is the authoritative
+      // disambiguator.
+      if (mapped?.code === 'VAULT_ERROR_NOT_INITIALIZED') {
+        const wasInitialized = await this._wasPreviouslyInitialized();
+        if (wasInitialized) {
+          this._clearInMemoryState();
+          this._biometricState = 'invalidated';
+          try {
+            await this._persistBiometricState('invalidated');
+          } catch {
+            // best-effort
+          }
+          throw new VaultError(
+            'VAULT_ERROR_KEY_INVALIDATED',
+            'Native biometric secret disappeared between hasSecret() and getSecret() — biometric enrollment change suspected',
+          );
+        }
       }
       throw mapped ?? err;
     }
 
     // 3. Rebuild derived state.
-    const secretBytes = hexToBytes(secretHex);
-    if (secretBytes.length !== 32) {
-      throw new VaultError(
-        'VAULT_ERROR',
-        `Expected 32-byte native secret, got ${secretBytes.length}`,
-      );
-    }
-    const mnemonic = entropyToMnemonic(secretBytes, wordlist);
-    const rootSeed = await mnemonicToSeed(mnemonic);
-    const rootHdKey = HDKey.fromMasterSeed(rootSeed);
-    const bearerDid = await this._didFactory({ rootHdKey });
-    const cek = await deriveContentEncryptionKey(rootHdKey);
+    //
+    // Round-7 Finding 3: any throw inside this block — invalid
+    // hex from the native module, ``mnemonicToSeed`` PBKDF2 failure
+    // on a stripped React Native runtime, ``DidDht.create`` rejecting
+    // because of a transient agent dependency error, or
+    // ``deriveContentEncryptionKey`` failing — must NOT leave the
+    // vault in a half-derived state. Two specific failure modes the
+    // pre-fix code allowed:
+    //   (a) the local ``secretBytes`` and ``rootSeed`` arrays —
+    //       freshly allocated copies of the wallet entropy and seed —
+    //       would never be zeroed before the function unwound, so the
+    //       sensitive material lingers on the JS heap until GC.
+    //   (b) if the vault was already unlocked from a prior call,
+    //       ``this._secretBytes`` / ``this._bearerDid`` /
+    //       ``this._contentEncryptionKey`` keep their PRIOR values.
+    //       ``isLocked()`` continues to return ``false``, and the
+    //       caller's "unlock failed" error path runs side-by-side
+    //       with a vault that still serves stale ``getDid()`` /
+    //       ``encryptData()`` from the previous unlock — exactly the
+    //       state ``_clearInMemoryState`` exists to prevent.
+    // Wrap the entire derive-and-assign block in try/catch so a
+    // failure unwinds atomically: zero the local sensitive bytes,
+    // clear the vault's in-memory state, then re-throw the original
+    // error.
+    let secretBytes: Uint8Array | undefined;
+    let rootSeed: Uint8Array | undefined;
+    let cek: Uint8Array | undefined;
+    try {
+      secretBytes = hexToBytes(secretHex);
+      if (secretBytes.length !== 32) {
+        throw new VaultError(
+          'VAULT_ERROR',
+          `Expected 32-byte native secret, got ${secretBytes.length}`,
+        );
+      }
+      const mnemonic = entropyToMnemonic(secretBytes, wordlist);
+      rootSeed = await mnemonicToSeed(mnemonic);
+      const rootHdKey = HDKey.fromMasterSeed(rootSeed);
+      const bearerDid = await this._didFactory({ rootHdKey });
+      cek = await deriveContentEncryptionKey(rootHdKey);
 
-    this._secretBytes = secretBytes;
-    this._rootSeed = rootSeed;
-    this._rootHdKey = rootHdKey;
-    this._bearerDid = bearerDid;
-    this._contentEncryptionKey = cek;
-    this._biometricState = 'ready';
+      // Atomic publish: assign all five fields in one synchronous
+      // block AFTER every derivation step has succeeded. No partial
+      // assignment is ever observable.
+      this._secretBytes = secretBytes;
+      this._rootSeed = rootSeed;
+      this._rootHdKey = rootHdKey;
+      this._bearerDid = bearerDid;
+      this._contentEncryptionKey = cek;
+      this._biometricState = 'ready';
+    } catch (err) {
+      // Zero any locally-allocated sensitive bytes BEFORE wiping
+      // ``this._*``, then drop any stale prior-unlock material. The
+      // local zeroing is the regression-loud half of the fix: the
+      // ``_clearInMemoryState`` call below covers the
+      // already-unlocked-then-failed case, but we MUST also zero
+      // ``secretBytes`` / ``rootSeed`` / ``cek`` because they hold
+      // copies of the native secret / root seed / CEK that
+      // ``_clearInMemoryState`` never sees (it only zeroes the
+      // ``this._*`` fields).
+      zeroBytes(secretBytes);
+      zeroBytes(rootSeed);
+      zeroBytes(cek);
+      this._clearInMemoryState();
+      throw err;
+    }
   }
 
   // ---------------------------------------------------------------------

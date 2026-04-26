@@ -260,6 +260,79 @@ jobs:
             echo "EMULATOR_UI_XML_COUNT=${UI_XML_COUNT}" >> "${GITHUB_ENV}"
           fi
 
+          # Round-7 Finding 4: tally the REQUIRED named artifacts.
+          # Counting "any files" alone is insufficient — a partial copy
+          # that successfully transferred only the welcome screen
+          # artifacts could pass with UI_FILE_COUNT > 0 while
+          # ``recovery-phrase.png`` / ``recovery-phrase.xml`` (the
+          # privacy-critical mnemonic-display capture) is missing.
+          # The audit trail must positively assert each named pair the
+          # driver emits. The list below mirrors the
+          # ``screencap('<name>')`` + ``dumpUi('<name>')`` calls in
+          # ``mainFlow()`` of ``scripts/emulator-debug-flow.ts``. If
+          # the driver gains a new capture point, add it here too.
+          #
+          # The recovery-phrase pair is the privacy-gate keystone — it
+          # is the placeholder PNG and the sanitized XML that prove
+          # the suite did NOT leak the mnemonic, AND the FLAG_SECURE
+          # assertion's evidence trail. Missing either one means the
+          # gate cannot be audited; STEP 4 hard-fails the job.
+          REQUIRED_ARTIFACTS=(
+            welcome.png
+            welcome.xml
+            biometric-setup.png
+            biometric-setup.xml
+            biometric-prompt-1.png
+            biometric-prompt-1.xml
+            recovery-phrase.png
+            recovery-phrase.xml
+            main-wallet.png
+            main-wallet.xml
+            relaunch-unlock-prompt.png
+            relaunch-unlock-prompt.xml
+            after-relaunch.png
+            after-relaunch.xml
+          )
+          MISSING_REQUIRED=()
+          for f in "${REQUIRED_ARTIFACTS[@]}"; do
+            if [ ! -f "/tmp/emulator-ui-artifacts/${f}" ]; then
+              MISSING_REQUIRED+=("${f}")
+            fi
+          done
+          UI_REQUIRED_MISSING_COUNT=${#MISSING_REQUIRED[@]}
+          UI_REQUIRED_TOTAL_COUNT=${#REQUIRED_ARTIFACTS[@]}
+          echo "[verify] required artifacts: ${UI_REQUIRED_TOTAL_COUNT} expected, ${UI_REQUIRED_MISSING_COUNT} missing"
+          if [ "${UI_REQUIRED_MISSING_COUNT}" -gt "0" ]; then
+            echo "[verify] missing required artifacts:"
+            for f in "${MISSING_REQUIRED[@]}"; do
+              echo "  - ${f}"
+            done
+            # Surface the privacy-critical pair specifically so an
+            # operator scanning the workflow log lands on the most
+            # important diagnostic first.
+            for keystone in recovery-phrase.png recovery-phrase.xml; do
+              if [ ! -f "/tmp/emulator-ui-artifacts/${keystone}" ]; then
+                echo "::warning::PRIVACY-GATE KEYSTONE missing: /tmp/emulator-ui-artifacts/${keystone} — the FLAG_SECURE / sanitizer assertions for the mnemonic-display screen cannot be audited from this run's artifacts."
+              fi
+            done
+            # Write a manifest file into the artifact bundle so the
+            # uploaded zip carries an unambiguous record of the gap
+            # (the ``::warning::`` line is only in the workflow log).
+            {
+              echo "Round-7 F4: REQUIRED named artifacts missing from this run."
+              echo "Inspect the per-step ::error:: lines for the underlying cp / capture failure."
+              echo ""
+              echo "Missing (${UI_REQUIRED_MISSING_COUNT} of ${UI_REQUIRED_TOTAL_COUNT}):"
+              for f in "${MISSING_REQUIRED[@]}"; do
+                echo "  - ${f}"
+              done
+            } > /tmp/emulator-ui-artifacts/REQUIRED_ARTIFACTS_MISSING.txt
+          fi
+          if [ -n "${GITHUB_ENV:-}" ] && [ -w "${GITHUB_ENV}" ]; then
+            echo "EMULATOR_UI_REQUIRED_MISSING_COUNT=${UI_REQUIRED_MISSING_COUNT}" >> "${GITHUB_ENV}"
+            echo "EMULATOR_UI_REQUIRED_TOTAL_COUNT=${UI_REQUIRED_TOTAL_COUNT}" >> "${GITHUB_ENV}"
+          fi
+
       # STEP 3 — upload whatever artifacts exist, even on failure.
       # ``if: always()`` guarantees the upload runs when STEP 1 or
       # STEP 2 report failure (VAL-CI-013 / VAL-CI-030).
@@ -322,4 +395,24 @@ jobs:
             echo "::error::Emulator driver reported success but STEP 2 found ZERO UI artifacts under /tmp/emulator-ui-artifacts. The privacy-gate audit trail (recovery-phrase, biometric-prompt, etc.) is missing — failing loudly so a green run cannot mask a regression in the capture path. Inspect the 'Run on emulator and capture logs' step's ::error:: lines for the underlying cp / capture failure."
             exit 1
           fi
-          echo "=== Emulator onboarding flow completed successfully (UI artifacts: total=${UI_COUNT}, PNG=${EMULATOR_UI_PNG_COUNT:-?}, XML=${EMULATOR_UI_XML_COUNT:-?}) ==="
+          # Round-7 Finding 4: hard-fail when REQUIRED named artifacts
+          # are missing. A non-zero total count alone is insufficient
+          # — a partial copy that landed only ``welcome.png`` would
+          # pass the count gate while leaving ``recovery-phrase.{png,
+          # xml}`` (the privacy-gate keystone) absent. The exported
+          # ``EMULATOR_UI_REQUIRED_MISSING_COUNT`` reports how many
+          # entries from the required list (mirrors the
+          # ``screencap('<name>')`` + ``dumpUi('<name>')`` calls in
+          # ``mainFlow()``) are missing. Any non-zero value with a
+          # successful driver exit indicates the audit trail is
+          # incomplete and the privacy gate cannot be confirmed.
+          REQUIRED_MISSING="${EMULATOR_UI_REQUIRED_MISSING_COUNT:-}"
+          if [ -z "${REQUIRED_MISSING}" ]; then
+            echo "::error::EMULATOR_UI_REQUIRED_MISSING_COUNT was not exported — STEP 2 (Verify captured artifacts) likely did not run its required-artifacts probe, so the privacy-gate audit cannot be confirmed."
+            exit 1
+          fi
+          if [ "${REQUIRED_MISSING}" != "0" ]; then
+            echo "::error::Emulator driver reported success but ${REQUIRED_MISSING} of ${EMULATOR_UI_REQUIRED_TOTAL_COUNT:-?} REQUIRED named artifacts are missing under /tmp/emulator-ui-artifacts. The privacy-gate audit trail is incomplete — failing loudly so a partial-copy or partial-capture regression cannot mask a missing recovery-phrase.{png,xml} keystone. Inspect /tmp/emulator-ui-artifacts/REQUIRED_ARTIFACTS_MISSING.txt and the 'Verify captured artifacts' step's log for the specific missing names."
+            exit 1
+          fi
+          echo "=== Emulator onboarding flow completed successfully (UI artifacts: total=${UI_COUNT}, PNG=${EMULATOR_UI_PNG_COUNT:-?}, XML=${EMULATOR_UI_XML_COUNT:-?}, required=${EMULATOR_UI_REQUIRED_TOTAL_COUNT:-?} all present) ==="

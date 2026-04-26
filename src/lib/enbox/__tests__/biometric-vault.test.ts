@@ -1027,6 +1027,269 @@ describe('BiometricVault — Round-6 regressions (F1: iOS NOT_FOUND mis-route, F
 });
 
 // ===========================================================================
+// Round-7 regressions — getSecret() NOT_FOUND race + derivation cleanup
+//
+// Findings 1 and 3 from the Round-7 review:
+//
+//   F1 (High): the Round-6 prior-init disambiguation only ran on the
+//      ``hasSecret()=false`` path. If ``hasSecret()`` returned ``true``
+//      but ``getSecret()`` then observed iOS auto-delete as
+//      ``NOT_FOUND`` (a real race on the iOS biometry-current-set
+//      ACL between probe and read), the catch path mapped it to
+//      ``VAULT_ERROR_NOT_INITIALIZED`` and re-threw verbatim. The
+//      agent-store routed the user to "set up new wallet" instead of
+//      RecoveryRestore — same misroute Round-6 F1 fixed for the
+//      false-from-probe path. Fix: extend the disambiguation to the
+//      ``getSecret()`` catch.
+//
+//   F3 (High): after a successful ``getSecret()``, the derivation
+//      block (hex decode → mnemonic → seed → DID → CEK) ran without
+//      a try/catch wrapping. Two specific failure modes:
+//        (a) freshly-allocated local ``secretBytes`` and ``rootSeed``
+//            arrays — copies of the wallet entropy + seed — would
+//            never be zeroed before the function unwound, so
+//            sensitive material lingered on the JS heap until GC.
+//        (b) ``this._secretBytes`` / DID / CEK from a prior unlock
+//            kept their values, leaving ``isLocked()`` reporting
+//            false and the four data accessors operable on stale
+//            material. Fix: try/catch around derive-and-assign,
+//            zero the locals + ``_clearInMemoryState()`` on throw,
+//            re-throw the original error.
+// ===========================================================================
+describe('BiometricVault — Round-7 regressions (F1: NOT_FOUND-from-getSecret race, F3: unlock derivation failure cleanup)', () => {
+  it('F1: getSecret rejects with NOT_FOUND while INITIALIZED="true" routes to VAULT_ERROR_KEY_INVALIDATED (iOS post-enrollment-change race between hasSecret and getSecret)', async () => {
+    // Setup: hasSecret returns true (probe sees the item) but
+    // getSecret then rejects with NOT_FOUND (item disappeared
+    // between probe and read — the iOS auto-delete race the
+    // Round-7 reviewer flagged). SecureStorage shows
+    // INITIALIZED='true' so the JS-layer disambiguator can prove
+    // the user previously had a vault.
+    const { api, store } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+    expect(store.get(INITIALIZED_STORAGE_KEY)).toBe('true');
+    await vault.lock();
+
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockRejectedValueOnce(withErrorCode('NOT_FOUND'));
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_KEY_INVALIDATED',
+    });
+
+    // The persisted biometric state must flip to invalidated so the
+    // agent-store / UI can route to RecoveryRestore.
+    expect(api.set).toHaveBeenCalledWith(BIOMETRIC_STATE_STORAGE_KEY, 'invalidated');
+    expect(store.get(BIOMETRIC_STATE_STORAGE_KEY)).toBe('invalidated');
+    // The vault is left locked.
+    expect(vault.isLocked()).toBe(true);
+  });
+
+  it('F1: getSecret rejects with NOT_FOUND while biometricState="ready" routes to VAULT_ERROR_KEY_INVALIDATED (defensive — biometricState as fallback signal)', async () => {
+    // Same scenario but the prior-init signal is the
+    // ``biometricState='ready'`` SecureStorage entry rather than
+    // ``INITIALIZED='true'``. Mirrors the F1 Round-6 fallback test.
+    const { api, store } = makeSecureStorage();
+    store.set(BIOMETRIC_STATE_STORAGE_KEY, 'ready');
+
+    const vault = new BiometricVault({ secureStorage: api });
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockRejectedValueOnce(withErrorCode('NOT_FOUND'));
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_KEY_INVALIDATED',
+    });
+    expect(store.get(BIOMETRIC_STATE_STORAGE_KEY)).toBe('invalidated');
+  });
+
+  it('F1: getSecret rejects with NOT_FOUND WITHOUT any prior-init signal still surfaces VAULT_ERROR_NOT_INITIALIZED (negative-parity — disambiguator must NOT over-fire on truly-fresh installs)', async () => {
+    // Negative-parity: even on the getSecret race path, the
+    // disambiguator must default to NOT_INITIALIZED when SecureStorage
+    // has no prior-init evidence. This pins the symmetry with the
+    // hasSecret=false branch and prevents the F1 fix from being
+    // over-broad on edge cases (e.g. an extremely rare deployment
+    // where SecureStorage was wiped while the native item was kept).
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockRejectedValueOnce(withErrorCode('NOT_FOUND'));
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_NOT_INITIALIZED',
+    });
+    // No invalidated-state side-effect on a non-prior-init device.
+    expect(api.set).not.toHaveBeenCalledWith(
+      BIOMETRIC_STATE_STORAGE_KEY,
+      'invalidated',
+    );
+  });
+
+  it('F1: getSecret rejects with NOT_FOUND while UNLOCKED with INITIALIZED="true" — also clears in-memory state (F2 cleanup applies on the F1 path too)', async () => {
+    // Compound regression: the F1 disambiguator path must also
+    // zero the in-memory material — same contract as the
+    // KEY_INVALIDATED catch path Round-6 F2 fixed. If the vault
+    // was already unlocked from a prior call, the OS-level item
+    // is now gone and the cached _secretBytes/DID/CEK no longer
+    // map to a recoverable vault.
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+    expect(vault.isLocked()).toBe(false);
+    await expect(vault.getDid()).resolves.toBeDefined();
+
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockRejectedValueOnce(withErrorCode('NOT_FOUND'));
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_KEY_INVALIDATED',
+    });
+
+    expect(vault.isLocked()).toBe(true);
+    await expect(vault.getDid()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
+    await expect(vault.getMnemonic()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
+    await expect(
+      vault.encryptData({ plaintext: new Uint8Array([1, 2, 3]) }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_LOCKED' });
+  });
+
+  it('F3: derivation failure on a previously-unlocked vault clears in-memory state (DID throws → vault locks; getDid/getMnemonic/encryptData reject VAULT_ERROR_LOCKED)', async () => {
+    // Setup: provision and unlock so the vault holds in-memory
+    // _secretBytes/DID/CEK from a prior successful unlock.
+    const didError = new Error('simulated DID-derivation failure');
+    let didFactoryCallCount = 0;
+    const didFactory: any = jest.fn(async (args: any) => {
+      didFactoryCallCount += 1;
+      // First call (from initialize) succeeds; second call (from
+      // unlock-after-lock) throws. Mirrors the production surface
+      // where DID factory is non-deterministic on transient
+      // network / dependency failures.
+      if (didFactoryCallCount === 1) {
+        // Return a minimal BearerDid stub — the test does not
+        // consult its shape, only that it's truthy.
+        return {
+          uri: 'did:dht:fake',
+          metadata: {},
+          document: {},
+          keyManager: args.keyManager,
+        };
+      }
+      throw didError;
+    });
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ didFactory, secureStorage: api });
+    await vault.initialize({});
+
+    // Pre-condition: vault is unlocked and serving a DID.
+    expect(vault.isLocked()).toBe(false);
+    await expect(vault.getDid()).resolves.toBeDefined();
+    await expect(vault.getMnemonic()).resolves.toBeDefined();
+
+    // Now: lock and trigger an unlock attempt where DID derivation
+    // throws AFTER getSecret succeeds.
+    await vault.lock();
+    expect(vault.isLocked()).toBe(true);
+
+    await expect(vault.unlock({})).rejects.toBe(didError);
+
+    // Post-fix: vault remains locked AND the four accessors reject
+    // with VAULT_ERROR_LOCKED. The test pre-fix could see
+    // ``isLocked()`` return false because ``_secretBytes`` /
+    // ``_bearerDid`` / ``_contentEncryptionKey`` would still be set
+    // from the prior successful unlock — the failed unlock would
+    // leave a dangerous "unlock failed but vault still serves data"
+    // state.
+    expect(vault.isLocked()).toBe(true);
+    await expect(vault.getDid()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
+    await expect(vault.getMnemonic()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
+    await expect(
+      vault.encryptData({ plaintext: new Uint8Array([1, 2, 3]) }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_LOCKED' });
+  });
+
+  it('F3: derivation failure does NOT corrupt subsequent successful unlock (try/catch unwinds cleanly so the next attempt sees a clean slate)', async () => {
+    // The F3 fix calls _clearInMemoryState() on the catch path,
+    // which already-existing tests cover. This regression also
+    // exercises the cleanup-then-retry path: after a derivation
+    // throw, a fresh unlock that succeeds must produce a fully
+    // working vault — the cleanup must not leave any sticky state
+    // that breaks subsequent unlocks.
+    let didFactoryCallCount = 0;
+    const didFactory: any = jest.fn(async (args: any) => {
+      didFactoryCallCount += 1;
+      if (didFactoryCallCount === 1) {
+        return {
+          uri: 'did:dht:initial',
+          metadata: {},
+          document: {},
+          keyManager: args.keyManager,
+        };
+      }
+      if (didFactoryCallCount === 2) {
+        throw new Error('transient DID failure');
+      }
+      return {
+        uri: 'did:dht:recovered',
+        metadata: {},
+        document: {},
+        keyManager: args.keyManager,
+      };
+    });
+    const vault = new BiometricVault({ didFactory });
+    await vault.initialize({});
+    await vault.lock();
+
+    await expect(vault.unlock({})).rejects.toThrow('transient DID failure');
+    expect(vault.isLocked()).toBe(true);
+
+    // Retry: this unlock must succeed cleanly. Pre-fix, the cached
+    // _secretBytes / _rootSeed could survive across the failed
+    // unlock and confuse the retry's reassignment.
+    await expect(vault.unlock({})).resolves.toBeUndefined();
+    expect(vault.isLocked()).toBe(false);
+    await expect(vault.getDid()).resolves.toEqual(
+      expect.objectContaining({ uri: 'did:dht:recovered' }),
+    );
+  });
+
+  it('F3: invalid hex from native module throws synchronously and clears in-memory state (defensive — native modules should always return 64 hex chars but the JS path must defend the contract)', async () => {
+    // The fix wraps hexToBytes() in the same try/catch as the rest
+    // of derivation. If the native module returned malformed hex
+    // (a length-mismatched secret, garbage from a corrupted
+    // Keychain item, etc.) the pre-fix code would have thrown a
+    // ``VAULT_ERROR`` from the length check WITHOUT zeroing the
+    // partial ``secretBytes`` allocation. Pin the cleanup contract.
+    const vault = new BiometricVault();
+    await vault.initialize({});
+    await vault.lock();
+
+    // Return a 30-byte hex string (60 chars) — fewer than the
+    // expected 64. The hex regex in the native mock would reject
+    // this, so we override getSecret directly with a malformed
+    // string. The length check inside _doUnlock then throws
+    // VAULT_ERROR.
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockResolvedValueOnce('aa'.repeat(30));
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR',
+    });
+    expect(vault.isLocked()).toBe(true);
+    await expect(vault.getDid()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
+  });
+});
+
+// ===========================================================================
 // Additional coverage — mapNativeErrorToVaultError helper
 // ===========================================================================
 describe('mapNativeErrorToVaultError', () => {

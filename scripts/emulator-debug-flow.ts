@@ -777,12 +777,17 @@ function foregroundIsSensitive(): boolean {
 // phrase screen is foregrounded, so the assertion exercises the same
 // window the user sees during the actual mnemonic display.
 //
-// ``flagSecureOnPackageWindow`` is the pure parser; the IO wrapper
+// ``flagSecureOnFocusedPackageWindow`` is the pure parser (Round-7
+// Finding 5: focus-coupled — pre-fix variant returned true for ANY
+// org.enbox.mobile window, which let a non-focused background window
+// with FLAG_SECURE mask a focused window without it); the IO wrapper
 // ``assertFlagSecureOnForeground`` runs ``adb shell dumpsys`` and
 // throws on any negative outcome (parser miss, dumpsys failure, no
-// foreground window for our package). The selfTestSanitizer adds a
-// ``case (h)`` that exercises the parser with synthetic dumpsys
-// fixtures so a no-device CI run can still gate on parser regressions.
+// foreground window, foreground belongs to another package, focused
+// org.enbox.mobile window without FLAG_SECURE). The selfTestSanitizer
+// adds ``case (h.1)..(h.10)`` exercising the parser with synthetic
+// dumpsys fixtures so a no-device CI run can still gate on parser
+// regressions.
 
 interface AdbLike {
   (
@@ -792,41 +797,116 @@ interface AdbLike {
 }
 
 /**
- * Pure parser: return ``true`` iff ``dumpsysOutput`` shows at least one
- * window for ``packageName`` whose attribute block contains ``FLAG_SECURE``.
+ * Round-7 Finding 5: extract the focused window descriptor from
+ * ``dumpsys window windows`` output. Returns the contents inside
+ * ``Window{...}`` from the first ``mCurrentFocus=`` line, falling back
+ * to ``mFocusedWindow=`` if ``mCurrentFocus`` is missing (older API
+ * levels emit only the latter). Returns ``null`` when neither line is
+ * present or neither line has a parseable ``Window{...}`` segment.
  *
- * The parser is deliberately permissive on the input format — the
- * ``dumpsys window windows`` output format varies subtly between Android
- * API levels, but every variant we care about emits per-window blocks
- * starting with ``Window #<n> Window{<id> u<userId> <component>}`` (or
- * a close variant) and a multi-line body that includes a flags=
- * fragment when the secure flag is set. We extract every block that
- * mentions ``packageName`` (regardless of leading "Window #N" decoration)
- * and check each block for the literal ``FLAG_SECURE`` token.
+ * Examples of what we parse out:
+ *   ``mCurrentFocus=Window{def456 u0 org.enbox.mobile/...MainActivity}``
+ *     → ``"def456 u0 org.enbox.mobile/...MainActivity"``
+ *   ``mCurrentFocus=null``
+ *     → ``null`` (no window currently has focus)
  */
-function flagSecureOnPackageWindow(
+function parseFocusedWindowDescriptor(
+  dumpsysOutput: string,
+): string | null {
+  if (!dumpsysOutput) return null;
+  // Prefer ``mCurrentFocus=`` (post-API 30 canonical name); fall back
+  // to ``mFocusedWindow=`` for older devices. Match the FIRST
+  // occurrence of either — system_server emits one per display, and
+  // the default display is always first.
+  const focusRegex = /m(?:CurrentFocus|FocusedWindow)=Window\{([^}]+)\}/;
+  const match = dumpsysOutput.match(focusRegex);
+  if (!match) return null;
+  const desc = (match[1] ?? '').trim();
+  return desc.length === 0 ? null : desc;
+}
+
+/**
+ * Round-7 Finding 5: extract the body lines for a SPECIFIC window
+ * descriptor from a dumpsys output. ``descriptor`` is the inside of
+ * ``Window{...}`` (e.g. ``"def456 u0 org.enbox.mobile/...MainActivity"``).
+ *
+ * Returns the body text between this window's header and the next
+ * window's header (or end-of-input), suitable for searching for
+ * ``FLAG_SECURE``. Returns ``null`` when no block matches.
+ */
+function extractWindowBlockByDescriptor(
+  dumpsysOutput: string,
+  descriptor: string,
+): string | null {
+  if (!dumpsysOutput || !descriptor) return null;
+  const escaped = descriptor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Anchor on the literal ``Window{<descriptor>}`` then greedy-consume
+  // until the next ``Window{`` or end of input. The cutoff on
+  // ``Window{`` (with the brace) avoids false truncation on attribute
+  // lines that happen to start with the bare word "Window".
+  const blockRegex = new RegExp(
+    `Window\\{${escaped}\\}([\\s\\S]*?)(?=Window\\{|$)`,
+  );
+  const m = dumpsysOutput.match(blockRegex);
+  return m ? (m[1] ?? '') : null;
+}
+
+/**
+ * Round-7 Finding 5 (focus-aware FLAG_SECURE check): return ``true``
+ * iff ``dumpsysOutput`` shows that the FOCUSED window belongs to
+ * ``packageName`` AND its attribute block contains ``FLAG_SECURE``.
+ *
+ * This is a strict tightening of the pre-Round-7 ``flagSecureOnPackageWindow``
+ * which returned ``true`` if ANY window of ``packageName`` carried
+ * ``FLAG_SECURE`` — including offscreen / non-focused windows. That
+ * was a real privacy hole: in multi-window or transient-overlay
+ * scenarios, a non-visible app-owned window could carry FLAG_SECURE
+ * while the focused window (the one the user actually sees and the
+ * Recents thumbnail captures) does not. The pre-Round-7 assertion
+ * would pass even though the user-visible window leaks the mnemonic.
+ *
+ * Returns ``false`` when:
+ *   - ``mCurrentFocus`` / ``mFocusedWindow`` is absent or ``null``
+ *   - the focused window does not belong to ``packageName``
+ *   - the focused window's body does not contain ``FLAG_SECURE``
+ *
+ * Each of those is a legitimate privacy-gate FAILURE that the IO
+ * wrapper below converts into a descriptive error.
+ *
+ * NOTE: prior to Round-7 the helper was named
+ * ``flagSecureOnPackageWindow``. The new name reflects the focus
+ * coupling — the old "any window" semantics are no longer available.
+ */
+function flagSecureOnFocusedPackageWindow(
   dumpsysOutput: string,
   packageName: string,
 ): boolean {
   if (!dumpsysOutput || !packageName) return false;
-  const escaped = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Match each ``Window{...}`` block whose id mentions our package, then
-  // greedy-consume up to the next ``Window{`` or end-of-string. We must
-  // permit nested attribute lines that happen to start with `Window`
-  // by anchoring the cutoff on ``Window{`` rather than ``Window``.
-  const blockRegex = new RegExp(
-    `Window\\{[^}]*${escaped}[^}]*\\}([\\s\\S]*?)(?=Window\\{|$)`,
-    'g',
-  );
-  const matches = Array.from(dumpsysOutput.matchAll(blockRegex));
-  if (matches.length === 0) return false;
-  return matches.some((m) => (m[1] ?? '').includes('FLAG_SECURE'));
+  const focusedDescriptor = parseFocusedWindowDescriptor(dumpsysOutput);
+  if (!focusedDescriptor) return false;
+  // The descriptor format from dumpsys is
+  // ``<id> u<userId> <package>/<component>``. Require ``<package>/``
+  // to anchor on the package boundary — substring matching alone
+  // would incorrectly accept e.g. ``com.example.org.enbox.mobile/...``.
+  if (!focusedDescriptor.includes(`${packageName}/`)) return false;
+  const block = extractWindowBlockByDescriptor(dumpsysOutput, focusedDescriptor);
+  if (block === null) return false;
+  return block.includes('FLAG_SECURE');
 }
 
 /**
- * IO wrapper: run ``adb shell dumpsys window windows`` and assert at
- * least one window for ``APP_PACKAGE`` carries ``FLAG_SECURE``. Throw a
- * descriptive ``Error`` on any negative outcome.
+ * IO wrapper: run ``adb shell dumpsys window windows`` and assert
+ * that the FOCUSED window (per ``mCurrentFocus``) belongs to
+ * ``APP_PACKAGE`` and carries ``FLAG_SECURE``. Throw a descriptive
+ * ``Error`` on any negative outcome.
+ *
+ * Round-7 Finding 5 strengthens this from the pre-fix any-window
+ * check: we must now correlate the FLAG_SECURE presence with the
+ * specific window the user is currently looking at. The pre-fix
+ * helper would pass on a multi-window setup where a non-visible
+ * org.enbox.mobile window carried FLAG_SECURE while the focused
+ * window did not — exactly the regression mode the assertion is
+ * supposed to detect.
  *
  * The default ``adbRunner`` is the production ``adb`` binary; the
  * ``adbRunner`` parameter is for the no-device self-test, which feeds
@@ -848,24 +928,44 @@ function assertFlagSecureOnForeground(
     );
   }
   const out = result.stdout ?? '';
-  if (!flagSecureOnPackageWindow(out, APP_PACKAGE)) {
-    // Surface a short, ID-bearing fragment of the dumpsys output to aid
-    // debugging without dumping multi-MB of window state into the log.
-    // The first ``mCurrentFocus`` line is usually enough to identify
-    // which (non-secure) window is on top of our app.
-    const focusLine =
-      out
-        .split('\n')
-        .find((l) => l.includes('mCurrentFocus=') || l.includes('mFocusedWindow=')) ??
-      '(mCurrentFocus / mFocusedWindow line not found)';
+
+  // Surface focus-line details on every failure so the operator can
+  // tell *why* the assertion failed: missing focus, focus on a
+  // different package, or focus on our package but no FLAG_SECURE.
+  const focusLine =
+    out
+      .split('\n')
+      .find((l) => l.includes('mCurrentFocus=') || l.includes('mFocusedWindow=')) ??
+    '(mCurrentFocus / mFocusedWindow line not found)';
+  const focusedDescriptor = parseFocusedWindowDescriptor(out);
+
+  if (!focusedDescriptor) {
     throw new Error(
-      `${context}: foreground ${APP_PACKAGE} window does NOT carry FLAG_SECURE — ` +
+      `${context}: dumpsys reported NO foreground window (mCurrentFocus is null/missing). ` +
+        'Cannot positively assert FLAG_SECURE on the recovery-phrase window. Focus line: ' +
+        JSON.stringify(focusLine.trim()),
+    );
+  }
+  if (!focusedDescriptor.includes(`${APP_PACKAGE}/`)) {
+    throw new Error(
+      `${context}: foreground window does not belong to ${APP_PACKAGE} ` +
+        `(focus is on ${JSON.stringify(focusedDescriptor)}). The recovery-phrase ` +
+        'screen is not actually visible — assertion cannot vouch for the OS-level ' +
+        'FLAG_SECURE protection on the user-visible window. Focus line: ' +
+        JSON.stringify(focusLine.trim()),
+    );
+  }
+  if (!flagSecureOnFocusedPackageWindow(out, APP_PACKAGE)) {
+    throw new Error(
+      `${context}: focused ${APP_PACKAGE} window does NOT carry FLAG_SECURE — ` +
         'OS-level mnemonic-capture protection has regressed. The emulator suite ' +
         'still produced a placeholder PNG via the higher-level gates, but ' +
         'Recents thumbnails / screen-mirroring / accessibility capture vectors ' +
         'would leak the mnemonic on a real device. Inspect ' +
         '`MainActivity.onCreate` (window.setFlags(FLAG_SECURE, FLAG_SECURE)) and ' +
-        'the FlagSecureModule reference counting. Focus line: ' +
+        'the FlagSecureModule reference counting. Note that this assertion is ' +
+        'now FOCUS-AWARE (Round-7 Finding 5): a non-focused org.enbox.mobile ' +
+        'window with FLAG_SECURE no longer satisfies the gate. Focus line: ' +
         JSON.stringify(focusLine.trim()),
     );
   }
@@ -2292,18 +2392,26 @@ function selfTestSanitizer(): number {
     );
   }
 
-  // ---------- (h) Round-6 Finding 4: FLAG_SECURE assertion parser ----
+  // ---------- (h) Round-6 F4 / Round-7 F5: FOCUS-AWARE FLAG_SECURE ----
   // ``assertFlagSecureOnForeground`` runs at the moment the recovery-
   // phrase screen is foregrounded and asserts that the OS-level
-  // ``FLAG_SECURE`` flag is set on our package's window. A regression
-  // that removed the flag (e.g. ``MainActivity.onCreate`` no longer
-  // calling ``window.setFlags``, or ``FlagSecureModule`` losing its
-  // baseline-preserving refcount) would slip through the higher-level
-  // placeholder gates because the emulator driver still won't capture
-  // the mnemonic — but the OS-level guarantee on Recents thumbnails /
-  // screen-mirroring / accessibility ScreenshotProvider would be gone.
-  // We pin the parser contract here with synthetic dumpsys fixtures so
-  // the no-device self-test can break on parser regressions.
+  // ``FLAG_SECURE`` flag is set on the FOCUSED window of our package.
+  // A regression that removed the flag (e.g. ``MainActivity.onCreate``
+  // no longer calling ``window.setFlags``, or ``FlagSecureModule``
+  // losing its baseline-preserving refcount) would slip through the
+  // higher-level placeholder gates because the emulator driver still
+  // won't capture the mnemonic — but the OS-level guarantee on
+  // Recents thumbnails / screen-mirroring / accessibility
+  // ScreenshotProvider would be gone.
+  //
+  // Round-7 Finding 5 tightened the assertion: we must positively
+  // correlate FLAG_SECURE with the FOCUSED window. The pre-Round-7
+  // ``flagSecureOnPackageWindow`` returned ``true`` on ANY app-owned
+  // window — so a non-focused (offscreen / background) app window
+  // with FLAG_SECURE would mask a focused window without it. The
+  // focus-aware variant ``flagSecureOnFocusedPackageWindow`` correlates
+  // ``mCurrentFocus`` / ``mFocusedWindow`` with the matching window
+  // block.
   //
   // Fixtures mirror the real ``dumpsys window windows`` output as
   // emitted on Android API 31 (the version the emulator suite targets):
@@ -2320,7 +2428,8 @@ function selfTestSanitizer(): number {
     '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION ' +
     'flags=FLAG_SECURE FLAG_SHOW_WHEN_LOCKED}\n' +
     '  mViewVisibility=0x0 mHaveFrame=true\n' +
-    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n' +
+    'mFocusedWindow=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
   const dumpsysWithoutFlag =
     'Window #0 Window{abc123 u0 com.android.systemui/.StatusBar}:\n' +
     '  mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=STATUS_BAR ' +
@@ -2338,25 +2447,71 @@ function selfTestSanitizer(): number {
     '\n' +
     'Window #1 Window{def456 u0 com.example.other/com.example.other.MainActivity}:\n' +
     '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION ' +
-    'flags=FLAG_SECURE}\n';
-  // (h.1) Positive case: org.enbox.mobile window with FLAG_SECURE present.
-  if (!flagSecureOnPackageWindow(dumpsysWithFlag, APP_PACKAGE)) {
+    'flags=FLAG_SECURE}\n' +
+    'mCurrentFocus=Window{def456 u0 com.example.other/com.example.other.MainActivity}\n';
+  // Round-7 F5 fixture: app has TWO windows. The non-focused
+  // background window has FLAG_SECURE set; the focused user-visible
+  // window does NOT. The pre-Round-7 helper would PASS on this
+  // input — a real privacy hole — so we exercise it explicitly to
+  // pin the focus coupling.
+  const dumpsysFocusOnInsecureAppWindow =
+    'Window #0 Window{aaa111 u0 org.enbox.mobile/org.enbox.mobile.BackgroundService}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=APPLICATION ' +
+    'flags=FLAG_SECURE FLAG_NOT_FOCUSABLE}\n' +
+    '\n' +
+    'Window #1 Window{bbb222 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION ' +
+    'flags=FLAG_SHOW_WHEN_LOCKED FLAG_HARDWARE_ACCELERATED}\n' +
+    '  mViewVisibility=0x0 mHaveFrame=true\n' +
+    'mCurrentFocus=Window{bbb222 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  // Round-7 F5 fixture: focus is on a SYSTEM (com.android.systemui)
+  // window — e.g. the BiometricPrompt overlay. Our app has a window
+  // with FLAG_SECURE behind it. The focus-aware helper must still
+  // reject this — the user-visible content is the system overlay,
+  // not our window.
+  const dumpsysFocusOnSystemWindow =
+    'Window #0 Window{ccc333 u0 com.android.systemui/.BiometricDialog}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=SYSTEM_DIALOG ' +
+    'flags=FLAG_DIM_BEHIND}\n' +
+    '\n' +
+    'Window #1 Window{ddd444 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION ' +
+    'flags=FLAG_SECURE FLAG_SHOW_WHEN_LOCKED}\n' +
+    'mCurrentFocus=Window{ccc333 u0 com.android.systemui/.BiometricDialog}\n';
+  // Round-7 F5 fixture: ``mCurrentFocus=null`` — no window currently
+  // has focus. The helper must reject; it cannot vouch for an
+  // OS-level guarantee on a non-existent window.
+  const dumpsysFocusNull =
+    'Window #0 Window{abc123 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION flags=FLAG_SECURE}\n' +
+    'mCurrentFocus=null\n';
+  // Round-7 F5 fixture: older API-level dumpsys variant that emits
+  // ONLY ``mFocusedWindow=`` (no ``mCurrentFocus=`` line). The
+  // parser must accept both names so the assertion still works on
+  // older API levels.
+  const dumpsysOnlyFocusedWindow =
+    'Window #0 Window{abc123 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION flags=FLAG_SECURE}\n' +
+    'mFocusedWindow=Window{abc123 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+
+  // (h.1) Positive case: org.enbox.mobile FOCUSED window with FLAG_SECURE.
+  if (!flagSecureOnFocusedPackageWindow(dumpsysWithFlag, APP_PACKAGE)) {
     failures.push(
-      'case (h.1): false negative — flagSecureOnPackageWindow returned false on a clean dumpsys with FLAG_SECURE set on the org.enbox.mobile window',
+      'case (h.1): false negative — flagSecureOnFocusedPackageWindow returned false on a clean dumpsys with FLAG_SECURE set on the focused org.enbox.mobile window',
     );
   }
-  // (h.2) Negative case: org.enbox.mobile window present, FLAG_SECURE absent.
-  if (flagSecureOnPackageWindow(dumpsysWithoutFlag, APP_PACKAGE)) {
+  // (h.2) Negative case: org.enbox.mobile focused, FLAG_SECURE absent.
+  if (flagSecureOnFocusedPackageWindow(dumpsysWithoutFlag, APP_PACKAGE)) {
     failures.push(
-      'case (h.2): false positive — flagSecureOnPackageWindow returned true on a dumpsys whose org.enbox.mobile window does NOT carry FLAG_SECURE; the assertion would not fail an actual MainActivity FLAG_SECURE regression',
+      'case (h.2): false positive — flagSecureOnFocusedPackageWindow returned true on a dumpsys whose focused org.enbox.mobile window does NOT carry FLAG_SECURE; the assertion would not fail an actual MainActivity FLAG_SECURE regression',
     );
   }
-  // (h.3) Negative case: a different package has FLAG_SECURE but ours does
-  // not exist in the dumpsys output. The parser must NOT treat any
+  // (h.3) Negative case: focus is on a different package (no
+  // org.enbox.mobile in dumpsys). The parser must NOT treat any
   // package's FLAG_SECURE as our package's.
-  if (flagSecureOnPackageWindow(dumpsysWithoutOurPackage, APP_PACKAGE)) {
+  if (flagSecureOnFocusedPackageWindow(dumpsysWithoutOurPackage, APP_PACKAGE)) {
     failures.push(
-      'case (h.3): false positive — flagSecureOnPackageWindow returned true on a dumpsys where another package has FLAG_SECURE but ours has no window at all; the assertion would mask a "no foreground" condition',
+      'case (h.3): false positive — flagSecureOnFocusedPackageWindow returned true on a dumpsys where focus is on another package',
     );
   }
   // (h.4) IO wrapper: dumpsys returning rc!=0 must throw — fail-loud
@@ -2378,10 +2533,9 @@ function selfTestSanitizer(): number {
       'case (h.4): assertFlagSecureOnForeground did not throw when dumpsys returned a non-zero exit — privacy-gate assertion would silently pass on adb transport hiccups',
     );
   }
-  // (h.5) IO wrapper: dumpsys output that lacks FLAG_SECURE on our
-  // package must throw with a descriptive message that includes the
-  // package name. This is the primary branch exercising the
-  // production assertion path.
+  // (h.5) IO wrapper: dumpsys output that lacks FLAG_SECURE on the
+  // focused org.enbox.mobile window must throw with a descriptive
+  // message that includes the package name. Primary regression branch.
   let h5Threw = false;
   let h5Msg = '';
   try {
@@ -2396,16 +2550,15 @@ function selfTestSanitizer(): number {
   }
   if (!h5Threw) {
     failures.push(
-      'case (h.5): assertFlagSecureOnForeground did not throw when org.enbox.mobile window lacked FLAG_SECURE — primary regression branch is dead',
+      'case (h.5): assertFlagSecureOnForeground did not throw when focused org.enbox.mobile window lacked FLAG_SECURE — primary regression branch is dead',
     );
   } else if (!h5Msg.includes(APP_PACKAGE) || !h5Msg.includes('FLAG_SECURE')) {
     failures.push(
       `case (h.5): assertFlagSecureOnForeground error message missing diagnostic content — got ${JSON.stringify(h5Msg.slice(0, 120))}`,
     );
   }
-  // (h.6) IO wrapper: clean dumpsys output where our package window
-  // has FLAG_SECURE must NOT throw — the fast path that lets a
-  // healthy run continue.
+  // (h.6) IO wrapper: clean dumpsys with focused FLAG_SECURE window
+  // must NOT throw — the fast path that lets a healthy run continue.
   let h6Threw = false;
   try {
     assertFlagSecureOnForeground('selftest', () => ({
@@ -2418,7 +2571,107 @@ function selfTestSanitizer(): number {
   }
   if (h6Threw) {
     failures.push(
-      'case (h.6): assertFlagSecureOnForeground threw on a healthy dumpsys with FLAG_SECURE present — false positive would block every emulator run',
+      'case (h.6): assertFlagSecureOnForeground threw on a healthy dumpsys with FLAG_SECURE present on the focused window — false positive would block every emulator run',
+    );
+  }
+  // (h.7) Round-7 F5 PRIMARY regression: focus is on an INSECURE
+  // org.enbox.mobile window while a different (background)
+  // org.enbox.mobile window has FLAG_SECURE. The pre-Round-7
+  // ``any-window`` helper would PASS this — a privacy hole — so
+  // we positively assert the focus-aware variant rejects it.
+  if (
+    flagSecureOnFocusedPackageWindow(
+      dumpsysFocusOnInsecureAppWindow,
+      APP_PACKAGE,
+    )
+  ) {
+    failures.push(
+      'case (h.7): false positive — flagSecureOnFocusedPackageWindow returned true when focus was on an INSECURE org.enbox.mobile window despite a non-focused org.enbox.mobile window carrying FLAG_SECURE; the assertion would mask a real regression in MainActivity FLAG_SECURE',
+    );
+  }
+  // (h.7-IO) IO wrapper variant: assertFlagSecureOnForeground on
+  // the same fixture must throw with a message mentioning
+  // FLAG_SECURE and the package — pin the production-path symmetry.
+  let h7IoThrew = false;
+  let h7IoMsg = '';
+  try {
+    assertFlagSecureOnForeground('selftest', () => ({
+      stdout: dumpsysFocusOnInsecureAppWindow,
+      stderr: '',
+      returncode: 0,
+    }));
+  } catch (e) {
+    h7IoThrew = true;
+    h7IoMsg = (e as Error).message;
+  }
+  if (!h7IoThrew) {
+    failures.push(
+      'case (h.7-IO): assertFlagSecureOnForeground did not throw when focused org.enbox.mobile window lacked FLAG_SECURE despite a non-focused FLAG_SECURE window — Round-7 F5 regression branch is dead',
+    );
+  } else if (!h7IoMsg.includes('FLAG_SECURE') || !h7IoMsg.includes(APP_PACKAGE)) {
+    failures.push(
+      `case (h.7-IO): assertFlagSecureOnForeground error message missing diagnostic content — got ${JSON.stringify(h7IoMsg.slice(0, 120))}`,
+    );
+  }
+  // (h.8) Round-7 F5: focus on a system_ui overlay. The IO wrapper
+  // must throw with a "foreground does not belong to APP_PACKAGE"
+  // diagnostic so the operator knows the recovery-phrase screen is
+  // not actually visible at the moment of assertion — the assertion
+  // cannot vouch for a window the user is not looking at.
+  let h8Threw = false;
+  let h8Msg = '';
+  try {
+    assertFlagSecureOnForeground('selftest', () => ({
+      stdout: dumpsysFocusOnSystemWindow,
+      stderr: '',
+      returncode: 0,
+    }));
+  } catch (e) {
+    h8Threw = true;
+    h8Msg = (e as Error).message;
+  }
+  if (!h8Threw) {
+    failures.push(
+      'case (h.8): assertFlagSecureOnForeground did not throw when focus was on a com.android.systemui overlay — recovery-phrase visibility precondition is unverified',
+    );
+  } else if (!h8Msg.toLowerCase().includes('foreground')) {
+    failures.push(
+      `case (h.8): assertFlagSecureOnForeground error message missing 'foreground' diagnostic on system-overlay focus case — got ${JSON.stringify(h8Msg.slice(0, 120))}`,
+    );
+  }
+  // (h.9) Round-7 F5: ``mCurrentFocus=null`` (no foreground window).
+  // Must throw with a "no foreground window" diagnostic.
+  let h9Threw = false;
+  let h9Msg = '';
+  try {
+    assertFlagSecureOnForeground('selftest', () => ({
+      stdout: dumpsysFocusNull,
+      stderr: '',
+      returncode: 0,
+    }));
+  } catch (e) {
+    h9Threw = true;
+    h9Msg = (e as Error).message;
+  }
+  if (!h9Threw) {
+    failures.push(
+      'case (h.9): assertFlagSecureOnForeground did not throw when mCurrentFocus=null — assertion silently passed on a no-focus dumpsys',
+    );
+  } else if (!h9Msg.toLowerCase().includes('no foreground') &&
+             !h9Msg.toLowerCase().includes('null')) {
+    failures.push(
+      `case (h.9): assertFlagSecureOnForeground error message missing 'no foreground' / 'null' diagnostic — got ${JSON.stringify(h9Msg.slice(0, 120))}`,
+    );
+  }
+  // (h.10) Round-7 F5: older API-level dumpsys with only
+  // ``mFocusedWindow=`` (no ``mCurrentFocus=``). The parser must
+  // recognise this name as well so the assertion is forward-
+  // compatible with older devices.
+  if (
+    !flagSecureOnFocusedPackageWindow(dumpsysOnlyFocusedWindow, APP_PACKAGE)
+  ) {
+    failures.push(
+      'case (h.10): false negative — flagSecureOnFocusedPackageWindow returned false on dumpsys that uses mFocusedWindow= (older API) instead of mCurrentFocus=',
     );
   }
 
@@ -2446,7 +2699,7 @@ function selfTestSanitizer(): number {
     '  (g) classifyForegroundDumpFromReader: fail-CLOSED on thrown reader, parity with classifier on successful reads',
   );
   logInfo(
-    '  (h) flagSecureOnPackageWindow + assertFlagSecureOnForeground: parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message)',
+    '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only)',
   );
   return 0;
 }
