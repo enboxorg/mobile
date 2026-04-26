@@ -81,6 +81,15 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         // failure cannot wipe a working wallet via the silent
         // delete-before-write pattern.
         private const val ERR_ALREADY_INITIALIZED = "VAULT_ERROR_ALREADY_INITIALIZED"
+
+        // Round-4 Finding 3: strict lower-case-hex validator for the
+        // optional `secretHex` parameter on `generateAndStoreSecret`.
+        // The TurboModule spec (`specs/NativeBiometricVault.ts:36-38`)
+        // and the Jest mock (`jest.setup.js:113`) both pin
+        // `^[0-9a-f]{64}$`. Centralising the regex here keeps Android,
+        // iOS and JS in lock-step — see the call site for the full
+        // contract-drift rationale.
+        private val LOWER_HEX_64_REGEX = Regex("^[0-9a-f]{64}$")
     }
 
     override fun getName(): String = NAME
@@ -369,21 +378,31 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         // let the JS layer derive the HD seed / mnemonic from the same bytes
         // that will be stored here without a follow-up biometric read during
         // provisioning (that would fire a second BiometricPrompt).
+        //
+        // Strict lower-case-hex contract (Round-4 Finding 3). The TurboModule
+        // spec at `specs/NativeBiometricVault.ts` and the Jest mock at
+        // `jest.setup.js` both pin `^[0-9a-f]{64}$`. The pre-fix Kotlin
+        // implementation parsed with `Character.digit(c, 16)`, which accepts
+        // `[A-F]` too — a silent platform contract drift. We now reject
+        // anything outside `[0-9a-f]{64}` BEFORE parsing so all three
+        // surfaces (spec, mock, native) agree byte-for-byte and a future
+        // caller that accidentally upper-cases its hex sees the same
+        // deterministic rejection on every platform.
         val secret = ByteArray(SECRET_BYTES)
         val providedHex = if (options.hasKey("secretHex")) options.getString("secretHex") else null
         if (providedHex != null) {
-            if (providedHex.length != SECRET_BYTES * 2) {
-                promise.reject(ERR_VAULT, "secretHex must be 64 lower-case hex characters")
+            if (!LOWER_HEX_64_REGEX.matches(providedHex)) {
+                promise.reject(
+                    ERR_VAULT,
+                    "secretHex must be exactly 64 lower-case hex characters " +
+                        "(^[0-9a-f]{64}\$)",
+                )
                 return
             }
             for (i in 0 until SECRET_BYTES) {
+                // Safe: regex already pinned both characters to [0-9a-f].
                 val hi = Character.digit(providedHex[i * 2], 16)
                 val lo = Character.digit(providedHex[i * 2 + 1], 16)
-                if (hi < 0 || lo < 0) {
-                    secret.fill(0.toByte())
-                    promise.reject(ERR_VAULT, "secretHex is not valid hex")
-                    return
-                }
                 secret[i] = ((hi shl 4) or lo).toByte()
             }
         } else {

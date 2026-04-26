@@ -674,28 +674,77 @@ function classifyForegroundDump(rawXml: string): {
  * the dumpUi sanitizer uses, so the screencap and the dump-XML side stay
  * in lock-step: if a dump would be redacted, the screenshot is suppressed.
  *
- * All exceptions are swallowed and treated as "unknown ⇒ assume safe ⇒
- * allow capture". The recovery-phrase named capture path is independently
- * protected by the SENSITIVE_SCREEN_NAMES short-circuit, so a uiautomator
- * failure here cannot widen the known leak path.
+ * **Fail CLOSED on dump failure** (Round-4 Finding 1). The pre-fix code
+ * returned ``false`` on any uiautomator / pull / readFileSync error,
+ * which let ``screencap()`` proceed to a real framebuffer capture even
+ * though the driver had no idea what was foregrounded. The justification
+ * given was "SENSITIVE_SCREEN_NAMES protects the named recovery-phrase
+ * path", which is true ONLY for the literal ``screencap("recovery-
+ * phrase")`` call site. The diagnostic capture path is different:
+ * ``dumpFlowError()`` calls ``screencap("flow-error")`` BEFORE
+ * ``dumpUi("flow-error")``, so a transient uiautomator failure while
+ * RecoveryPhrase was foregrounded — the very moment a top-level handler
+ * is most likely to fire — would let ``flow-error.png`` capture the
+ * live framebuffer if FLAG_SECURE regressed. Returning ``true`` on the
+ * catch path makes ``screencap()`` write the placeholder PNG instead.
+ * The cost is occasional placeholder screenshots on emulators with
+ * flaky uiautomator — acceptable because (a) those runs were already
+ * in trouble and (b) the matching ``<name>.xml`` dump and adb / logcat
+ * logs are still captured separately by ``dumpFlowError`` /
+ * ``ci-debug-emulator-runner.sh``.
  */
-function foregroundIsSensitive(): boolean {
+/**
+ * Pure helper that pairs a foreground-dump reader callback with the
+ * fail-closed classification contract. Split out from
+ * ``foregroundIsSensitive`` so the catch-path semantics (Round-4
+ * Finding 1) are testable from ``selfTestSanitizer`` without mocking
+ * ``adb`` / the filesystem.
+ *
+ * Contract:
+ * - If ``readRawXml()`` returns successfully, the result is the
+ *   classifier's verdict on that XML, plus the raw and sanitized
+ *   payloads so the caller can persist the sanitized form.
+ * - If ``readRawXml()`` throws (uiautomator wedged, ``adb pull``
+ *   failed, ``readFileSync`` couldn't open the local mirror), the
+ *   helper returns ``isSensitive: true`` with both payloads ``null``.
+ *   This is the fail-CLOSED branch — see Round-4 Finding 1.
+ */
+function classifyForegroundDumpFromReader(readRawXml: () => string): {
+  isSensitive: boolean;
+  rawXml: string | null;
+  sanitizedXml: string | null;
+} {
   try {
-    adb(['shell', 'uiautomator', 'dump', '/sdcard/window_dump.xml']);
-    const local = join(ROOT, 'window_dump.xml');
-    adb(['pull', '/sdcard/window_dump.xml', local]);
-    const rawText = readFileSync(local, 'utf-8');
-    const {isSensitive, sanitized} = classifyForegroundDump(rawText);
-    // Persist the sanitized form so the on-disk window_dump.xml never
-    // carries plaintext mnemonic words even if the driver crashes
-    // before the next dumpUi() call overwrites it.
-    if (sanitized !== rawText) {
-      writeFileSync(local, sanitized, 'utf-8');
-    }
-    return isSensitive;
+    const raw = readRawXml();
+    const {isSensitive, sanitized} = classifyForegroundDump(raw);
+    return {isSensitive, rawXml: raw, sanitizedXml: sanitized};
   } catch {
-    return false;
+    // Fail CLOSED. We cannot tell what's foregrounded, so we MUST
+    // assume sensitive content is on screen and let `screencap()`
+    // write the placeholder PNG. See the docstring on
+    // ``foregroundIsSensitive`` for the full rationale (Round-4
+    // Finding 1).
+    return {isSensitive: true, rawXml: null, sanitizedXml: null};
   }
+}
+
+function foregroundIsSensitive(): boolean {
+  const local = join(ROOT, 'window_dump.xml');
+  const {isSensitive, rawXml, sanitizedXml} = classifyForegroundDumpFromReader(
+    () => {
+      adb(['shell', 'uiautomator', 'dump', '/sdcard/window_dump.xml']);
+      adb(['pull', '/sdcard/window_dump.xml', local]);
+      return readFileSync(local, 'utf-8');
+    },
+  );
+  // Persist the sanitized form so the on-disk window_dump.xml never
+  // carries plaintext mnemonic words even if the driver crashes before
+  // the next dumpUi() call overwrites it. Skip the write on the
+  // fail-closed branch (rawXml === null) — there is nothing to persist.
+  if (rawXml !== null && sanitizedXml !== null && sanitizedXml !== rawXml) {
+    writeFileSync(local, sanitizedXml, 'utf-8');
+  }
+  return isSensitive;
 }
 
 /**
@@ -712,10 +761,16 @@ function foregroundIsSensitive(): boolean {
  * For names in SENSITIVE_SCREEN_NAMES we skip the ``adb screencap`` call
  * entirely and write the placeholder directly. Beyond the name-based skip
  * we also probe the actual foreground UI via ``foregroundIsSensitive``
- * and skip the capture when it indicates a RecoveryPhrase-bearing dump.
- * This closes the failure-handler leak path: ``screencap("flow-error")``
- * is invoked by the top-level exception handler with NO knowledge of
- * which screen was foregrounded at crash time.
+ * and skip the capture when it indicates a RecoveryPhrase-bearing dump
+ * **OR when the probe itself failed**. ``foregroundIsSensitive`` is
+ * fail-CLOSED (Round-4 Finding 1): a uiautomator / adb-pull /
+ * readFileSync error is reported as "sensitive" rather than "safe",
+ * so a transient dump failure while RecoveryPhrase is foregrounded
+ * cannot widen the framebuffer-capture path. This closes the
+ * failure-handler leak path: ``screencap("flow-error")`` is invoked
+ * by the top-level exception handler with NO knowledge of which
+ * screen was foregrounded at crash time, and the moment that handler
+ * runs is exactly when uiautomator is most likely to be wedged.
  */
 function screencap(name: string): void {
   const devicePath = `/sdcard/${name}.png`;
@@ -731,10 +786,12 @@ function screencap(name: string): void {
   }
   if (foregroundIsSensitive()) {
     logInfo(
-      `[screencap] ${JSON.stringify(name)}: foreground UI looks like ` +
-        'RecoveryPhrase (uiautomator dump triggered the BIP-39 / title ' +
-        'indicator); writing placeholder PNG without invoking adb ' +
-        `screencap to prevent a mnemonic leak via ${JSON.stringify(name)}.png.`,
+      `[screencap] ${JSON.stringify(name)}: foreground gate flagged ` +
+        'sensitive (uiautomator dump matched the BIP-39 / title ' +
+        'indicator, OR the dump itself failed and the gate fell ' +
+        'through to its fail-closed branch); writing placeholder PNG ' +
+        'without invoking adb screencap to prevent a mnemonic leak ' +
+        `via ${JSON.stringify(name)}.png.`,
     );
     writePlaceholderPng(localPath);
     return;
@@ -2004,6 +2061,100 @@ function selfTestSanitizer(): number {
     );
   }
 
+  // ---------- (g) Round-4 Finding 1: fail-CLOSED on dump-read failure --
+  // foregroundIsSensitive() probes the live emulator via
+  // adb shell uiautomator dump → adb pull → readFileSync. Any of
+  // those three steps can fail transiently (uiautomator wedged after
+  // a JNI crash, /sdcard remount race, adb transport hiccup). The
+  // pre-fix catch path returned `false` ("assume safe ⇒ allow
+  // capture"), which let `screencap("flow-error")` proceed to a real
+  // framebuffer capture even when the driver had no idea what was
+  // foregrounded — and that path is invoked by `dumpFlowError`
+  // EXACTLY when the flow is in trouble (i.e. the same conditions
+  // that wedge uiautomator). The fix makes the gate fail CLOSED:
+  // when the read throws, the helper reports `isSensitive: true` so
+  // `screencap()` writes the placeholder PNG instead. We pin the
+  // contract here by exercising the pure helper with synthetic
+  // readers — no adb required.
+  const failClosedSyntheticReader = () => {
+    throw new Error('synthetic uiautomator dump failure (Round-4 F1)');
+  };
+  const failClosedResult = classifyForegroundDumpFromReader(
+    failClosedSyntheticReader,
+  );
+  if (!failClosedResult.isSensitive) {
+    failures.push(
+      'case (g.1): fail-CLOSED contract violated — classifyForegroundDumpFromReader returned isSensitive=false on a thrown reader; screencap("flow-error") would proceed to a real framebuffer capture if FLAG_SECURE regressed',
+    );
+  }
+  if (failClosedResult.rawXml !== null) {
+    failures.push(
+      'case (g.1): fail-CLOSED contract — rawXml MUST be null when the reader threw',
+    );
+  }
+  if (failClosedResult.sanitizedXml !== null) {
+    failures.push(
+      'case (g.1): fail-CLOSED contract — sanitizedXml MUST be null when the reader threw',
+    );
+  }
+
+  // (g.2) Positive parity: a successful clean-welcome reader returns
+  // isSensitive=false and round-trips raw / sanitized payloads
+  // byte-for-byte. This pins that the fail-closed branch is taken
+  // ONLY on read failure, never on a clean dump.
+  const cleanReaderResult = classifyForegroundDumpFromReader(
+    () => WELCOME_FIXTURE_XML,
+  );
+  if (cleanReaderResult.isSensitive) {
+    failures.push(
+      'case (g.2): clean welcome reader marked sensitive — gate would block legitimate screencaps',
+    );
+  }
+  if (cleanReaderResult.rawXml !== WELCOME_FIXTURE_XML) {
+    failures.push(
+      'case (g.2): rawXml mismatch on clean welcome reader — should round-trip byte-for-byte',
+    );
+  }
+  if (cleanReaderResult.sanitizedXml !== WELCOME_FIXTURE_XML) {
+    failures.push(
+      'case (g.2): sanitizedXml modified on a clean welcome reader — sanitizer should be a no-op on negative inputs',
+    );
+  }
+
+  // (g.3) Positive parity: an RP-bearing reader (cluster-only,
+  // exercising the same hostile fixture as case (f)) returns
+  // isSensitive=true and a sanitized payload that drops the BIP-39
+  // words. Demonstrates that the IO wrapper produces the same verdict
+  // as `classifyForegroundDump` on a successful read — i.e. the
+  // fail-closed branch is purely additive coverage on the failure
+  // path, not a behavioural regression on the success path.
+  const rpReaderResult = classifyForegroundDumpFromReader(
+    () => clusterOnlyXml,
+  );
+  if (!rpReaderResult.isSensitive) {
+    failures.push(
+      'case (g.3): RP-bearing reader marked safe — gate would let screencap proceed on a real RecoveryPhrase dump',
+    );
+  }
+  if (rpReaderResult.rawXml !== clusterOnlyXml) {
+    failures.push(
+      'case (g.3): rawXml mismatch on RP-bearing reader — should round-trip byte-for-byte',
+    );
+  }
+  if (rpReaderResult.sanitizedXml === clusterOnlyXml) {
+    failures.push(
+      'case (g.3): sanitizedXml byte-for-byte on RP-bearing reader — sanitizer regression',
+    );
+  }
+  if (
+    rpReaderResult.sanitizedXml === null ||
+    countOccurrences(rpReaderResult.sanitizedXml, SANITIZED_PLACEHOLDER) < 24
+  ) {
+    failures.push(
+      'case (g.3): sanitizedXml dropped redaction markers on RP-bearing reader',
+    );
+  }
+
   if (failures.length > 0) {
     logErr('== sanitizer self-test FAILED ==');
     for (const line of failures) {
@@ -2023,6 +2174,9 @@ function selfTestSanitizer(): number {
   logInfo('  (e) hasRecoveryPhraseContent gate matches sanitizer for all 4 fixtures');
   logInfo(
     `  (f) cluster-only RecoveryPhrase dump: gate-on-raw=true, sanitized redactions=${clusterOnlyRedactions} bytes=${Buffer.byteLength(clusterOnlyClassified.sanitized, 'utf-8')}`,
+  );
+  logInfo(
+    '  (g) classifyForegroundDumpFromReader: fail-CLOSED on thrown reader, parity with classifier on successful reads',
   );
   return 0;
 }

@@ -22,7 +22,12 @@ on:
   #     PR snapshots.
   #
   # Both triggers share the same `paths:` filter so unrelated doc /
-  # rule / lockfile churn does not consume an emulator slot.
+  # rule / cursor-config churn does not consume an emulator slot.
+  # NB: `bun.lock` IS in the path filter (Round-4 Finding 2) — the
+  # driver imports lock-resolved code (`@scure/bip39`) used by the
+  # sanitizer's cluster gate, so a lockfile-only dep bump must
+  # re-validate the privacy suite even though the source tree is
+  # otherwise untouched.
   pull_request:
     paths:
       - 'src/**'
@@ -35,6 +40,16 @@ on:
       - 'babel.config.js'
       - 'index.js'
       - 'package.json'
+      # `bun.lock` is part of the trigger surface (Round-4 Finding 2).
+      # The TS emulator driver imports `@scure/bip39/wordlists/english`
+      # — a lock-resolved dependency — and the sanitizer's wordlist
+      # cluster gate IS the privacy-validation primitive. A
+      # lockfile-only dependency change (e.g. `bun update @scure/bip39`
+      # with no `package.json` edit) can therefore alter the driver's
+      # runtime behaviour without re-running the suite. Keep `package.json`
+      # AND `bun.lock` in the trigger paths so the privacy gate
+      # re-validates on either spec-level OR resolved-version drift.
+      - 'bun.lock'
   push:
     branches:
       - main
@@ -55,6 +70,11 @@ on:
     #     and `MainActivity.onCreate`'s FLAG_SECURE baseline live here;
     #     a regression in either is EXACTLY what the emulator run
     #     catches.
+    #   - `package.json` AND `bun.lock` — the driver imports lock-
+    #     resolved code (`@scure/bip39/wordlists/english`) used by the
+    #     sanitizer's cluster gate. A lockfile-only dependency bump
+    #     can therefore change runtime behaviour with no source-tree
+    #     diff. Keep both in the trigger paths (Round-4 Finding 2).
     paths:
       - 'src/**'
       - 'specs/**'
@@ -66,6 +86,7 @@ on:
       - 'babel.config.js'
       - 'index.js'
       - 'package.json'
+      - 'bun.lock'
 
 # Cancel an in-flight run for the same ref (PR head or branch) when a
 # new push lands so we don't burn an emulator slot validating a stale

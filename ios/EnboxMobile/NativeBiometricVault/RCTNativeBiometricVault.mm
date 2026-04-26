@@ -269,10 +269,22 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
     //     deterministic error so the JS layer can surface the mismatch.
     NSMutableData *secretData = [NSMutableData dataWithLength:kBiometricVaultSecretByteLength];
     if (secretHex != nil) {
+      // Round-4 Finding 3: strict lower-case-hex contract. The TurboModule
+      // spec at `specs/NativeBiometricVault.ts:36-38` pins
+      // "lower-case hex (length 64)", and the Jest mock at
+      // `jest.setup.js:113` enforces `/^[0-9a-f]{64}$/`. The pre-fix
+      // parser accepted `[A-F]` too (the `'A'..'F'` arms below this
+      // comment in the previous revision), which was a silent
+      // platform contract drift between iOS, Android and the JS mock.
+      // We now reject anything outside `[0-9a-f]{64}` with the same
+      // canonical error code Android raises, so all three surfaces
+      // agree byte-for-byte. The length check stays for early-exit on
+      // the trivially wrong inputs.
       if (secretHex.length != kBiometricVaultSecretByteLength * 2) {
         [secretData resetBytesInRange:NSMakeRange(0, secretData.length)];
         reject(kErrVault,
-               @"secretHex must be exactly 64 hex characters (32 bytes)",
+               @"secretHex must be exactly 64 lower-case hex characters "
+               @"(^[0-9a-f]{64}$)",
                nil);
         return;
       }
@@ -285,10 +297,10 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
         int loVal = -1;
         if (hi >= '0' && hi <= '9') hiVal = hi - '0';
         else if (hi >= 'a' && hi <= 'f') hiVal = 10 + (hi - 'a');
-        else if (hi >= 'A' && hi <= 'F') hiVal = 10 + (hi - 'A');
+        // NOTE: uppercase A-F is intentionally NOT accepted here —
+        // see the Round-4 Finding 3 comment above this loop.
         if (lo >= '0' && lo <= '9') loVal = lo - '0';
         else if (lo >= 'a' && lo <= 'f') loVal = 10 + (lo - 'a');
-        else if (lo >= 'A' && lo <= 'F') loVal = 10 + (lo - 'A');
         if (hiVal < 0 || loVal < 0) {
           parseOk = NO;
           break;
@@ -297,7 +309,10 @@ static const NSUInteger kBiometricVaultSecretByteLength = 32;
       }
       if (!parseOk) {
         [secretData resetBytesInRange:NSMakeRange(0, secretData.length)];
-        reject(kErrVault, @"secretHex is not valid 64-character lower-case hex", nil);
+        reject(kErrVault,
+               @"secretHex must be exactly 64 lower-case hex characters "
+               @"(^[0-9a-f]{64}$)",
+               nil);
         return;
       }
     } else {

@@ -428,6 +428,106 @@ describe('NativeBiometricVault — Round-3 regressions (Findings 3 & 4)', () => 
   });
 });
 
+describe('NativeBiometricVault — Round-4 regressions (Finding 3: strict lower-case secretHex contract)', () => {
+  it('Jest mock rejects uppercase secretHex with VAULT_ERROR (parity with Android Round-4 LOWER_HEX_64_REGEX + iOS lowercase-only parser)', async () => {
+    // The TurboModule spec at `specs/NativeBiometricVault.ts:36-38` pins
+    // "lower-case hex (length 64)". The pre-fix Android parser used
+    // `Character.digit(c, 16)` (which accepts `[A-F]`) and the iOS
+    // parser had explicit `'A'..'F'` arms, so a caller that passed
+    // uppercase / mixed-case hex would silently succeed on Android
+    // and iOS while the JS mock rejected — a platform contract drift.
+    // Round-4 Finding 3 fixed both native parsers; this test pins the
+    // JS-side mirror of that same regex so any future regression on
+    // EITHER native side fails this regression here AND the native
+    // emulator suite at the same time.
+    const alias = 'enbox.wallet.root';
+    const upperCaseHex =
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    expect(upperCaseHex).toHaveLength(64);
+    expect(upperCaseHex).toMatch(/^[A-F]{64}$/);
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: upperCaseHex,
+      }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+
+    // The alias MUST NOT exist after the rejected provision —
+    // mid-failure must never persist anything.
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+  });
+
+  it('Jest mock rejects mixed-case secretHex with VAULT_ERROR', async () => {
+    const alias = 'enbox.wallet.root';
+    // 63 lower-case chars + 1 uppercase — guaranteed regex mismatch.
+    const mixedCase =
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' +
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA';
+    expect(mixedCase).toHaveLength(64);
+    expect(/^[0-9a-f]{64}$/.test(mixedCase)).toBe(false);
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: mixedCase,
+      }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+  });
+
+  it('Jest mock rejects non-hex secretHex with VAULT_ERROR', async () => {
+    const alias = 'enbox.wallet.root';
+    const withZ =
+      'zaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' +
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    expect(withZ).toHaveLength(64);
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: withZ,
+      }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+  });
+
+  it('Jest mock rejects wrong-length secretHex (63 chars) with VAULT_ERROR', async () => {
+    const alias = 'enbox.wallet.root';
+    const tooShort = 'a'.repeat(63);
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: tooShort,
+      }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+  });
+
+  it('Jest mock accepts lower-case 64-char hex (positive parity with the strict regex)', async () => {
+    const alias = 'enbox.wallet.root';
+    const lowerCaseHex =
+      'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4' +
+      'e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
+    expect(lowerCaseHex).toMatch(/^[0-9a-f]{64}$/);
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: lowerCaseHex,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+  });
+});
+
 describe('NativeBiometricVault — getSecret success path', () => {
   const prompt = {
     promptTitle: 'Unlock Enbox',
