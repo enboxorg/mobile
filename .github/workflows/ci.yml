@@ -20,6 +20,13 @@ jobs:
       - run: bun run lint
       - run: bun run typecheck
       - run: bun run test
+      # No-device regression gate for the emulator driver's content-aware
+      # sanitizer + screenshot leak gate. Deliberately INSIDE the verify
+      # job (not the optional debug-emulator workflow) so a PR cannot
+      # turn green while the BIP-39 / RecoveryPhrase redaction path is
+      # broken. The self-test runs locally with no APK / emulator
+      # required and exits non-zero on any sanitizer parity failure.
+      - run: bun run emulator:self-test
 
   build-android:
     runs-on: ubuntu-latest

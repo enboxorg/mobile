@@ -116,6 +116,43 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
     }
 
     /**
+     * Drop ALL persistent state for `alias` so a subsequent
+     * `hasSecret(alias)` resolves false and a fresh provisioning round
+     * starts from a clean slate.
+     *
+     * Used on every "the key is dead" signal — `KeyPermanentlyInvalidated`
+     * (raised by either `Cipher.init(DECRYPT_MODE, ...)` OR `doFinal()`
+     * after a biometric enrollment change), `UnrecoverableKey` at
+     * `KeyStore.getKey()` time, etc. The pre-fix code only wiped the
+     * keystore alias on the cipher-init path; if the same exception
+     * surfaced from `doFinal()` (post-auth) the wrapped ciphertext +
+     * IV were left in SharedPreferences. Subsequent unlock attempts
+     * could then read the stale prefs, fail to load the deleted key,
+     * and surface `NOT_FOUND` instead of the canonical
+     * `KEY_INVALIDATED` that routes the user to recovery (Round-3
+     * Finding 4). Routing both signals through this helper keeps the
+     * cleanup symmetric.
+     *
+     * Best-effort by construction: both inner ops swallow exceptions.
+     * The caller has already decided the entry is unusable; logging or
+     * surfacing a secondary error here would only obscure the original
+     * `KEY_INVALIDATED` rejection.
+     */
+    private fun invalidateAlias(alias: String) {
+        deleteKeystoreKey(alias)
+        try {
+            prefs().edit().remove(ivKey(alias)).remove(ctKey(alias)).apply()
+        } catch (_: Exception) {
+            // SharedPreferences I/O on a private file effectively never
+            // throws on Android, but we belt-and-suspender it because
+            // any throw here would be triggered AFTER we already decided
+            // the alias is unrecoverable, and we MUST NOT mask the
+            // KEY_INVALIDATED rejection with a stale-prefs cleanup
+            // failure.
+        }
+    }
+
+    /**
      * Build the KeyGenParameterSpec for the biometric-bound AES-256-GCM
      * wrapping key. All of the security-critical flags listed in the mission
      * contract (VAL-NATIVE-015 / VAL-NATIVE-041) are set here.
@@ -272,6 +309,30 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         // drift away from the safe pattern. Callers that intend to
         // overwrite MUST first call `deleteSecret(...)` explicitly,
         // which makes the destructive intent visible and auditable.
+        //
+        // The probe MUST fail CLOSED. The pre-fix Round-2 code caught
+        // every exception inside the try block below and fell through
+        // to the destructive `deleteKeystoreKey` + `createKeystoreKey`
+        // path. A transient probe failure (e.g. `KeyStore.load(null)`
+        // momentarily unavailable, partial UnrecoverableKeyException)
+        // could therefore destroy a perfectly valid existing alias
+        // before realizing it should have rejected with
+        // ERR_ALREADY_INITIALIZED instead (Round-3 Finding 3).
+        //
+        // Concrete failure mode: if `loadKeystoreKey()` throws while a
+        // valid alias exists, the catch swallowed the throw, fell into
+        // the provisioning path, and the very first thing that path did
+        // (`deleteKeystoreKey(keyAlias)` ~30 lines below) wiped the
+        // user's working wallet key. That's exactly the destructive
+        // upsert pattern this guard exists to prevent.
+        //
+        // Fail-closed strategy: if either `prefs().contains(...)` or
+        // `loadKeystoreKey(...)` throws, surface a transient
+        // VAULT_ERROR. The caller can retry; on retry the probe
+        // typically succeeds and we land deterministically on either
+        // ERR_ALREADY_INITIALIZED (alias really exists) or fresh
+        // provisioning (alias really absent). No destructive side
+        // effects happen on the rejected path.
         try {
             val hasPrefs = prefs().contains(ivKey(keyAlias)) && prefs().contains(ctKey(keyAlias))
             val hasKey = loadKeystoreKey(keyAlias) != null
@@ -283,12 +344,23 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                 )
                 return
             }
+            // At this point at least one of (prefs, key) is genuinely
+            // absent. The provisioning path below is safe to enter:
+            // it will overwrite any orphan prefs and create a fresh
+            // key under the missing alias, with no destructive impact
+            // on a valid pre-existing setup (which we just proved
+            // does not exist).
         } catch (e: Exception) {
-            // Defensive: if we can't determine existence, fall through
-            // to the legacy provisioning path. The original code did
-            // exactly this — an exception in the existence check would
-            // not have prevented provisioning either. The pre-check is
-            // belt-and-suspenders, not the primary guard.
+            // Probe genuinely failed; we cannot tell whether a valid
+            // alias is hiding behind the exception. Refuse rather
+            // than risk wiping it. The intentionally generic message
+            // mirrors the no-secret-leak rule for every error path.
+            promise.reject(
+                ERR_VAULT,
+                "Could not determine whether a biometric secret already exists; " +
+                    "refusing to provision to avoid overwriting a valid alias",
+            )
+            return
         }
 
         // Resolve the 32-byte wallet secret up-front — caller-provided bytes
@@ -495,11 +567,23 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         try {
             val loaded = loadKeystoreKey(keyAlias)
             if (loaded == null) {
+                // Stale prefs cleanup: there is a wrapped ciphertext on
+                // disk but no key to unwrap it with. Drop the prefs so a
+                // future hasSecret(alias) reports false and the user
+                // routes through fresh setup or recovery instead of
+                // looping back to this same NOT_FOUND every unlock.
+                invalidateAlias(keyAlias)
                 promise.reject(ERR_NOT_FOUND, "No Keystore key for alias")
                 return
             }
             key = loaded
         } catch (e: UnrecoverableKeyException) {
+            // The keystore entry exists but cannot be loaded — treat as
+            // a hard invalidation event and clean up BOTH the key and
+            // the wrapped ciphertext so the alias presents as fully
+            // absent on the next probe. (Round-3 Finding 4 — symmetric
+            // cleanup with the cipher-init invalidation path below.)
+            invalidateAlias(keyAlias)
             promise.reject(ERR_KEY_INVALIDATED, "Keystore key is unrecoverable")
             return
         } catch (e: Exception) {
@@ -522,10 +606,13 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
         } catch (e: KeyPermanentlyInvalidatedException) {
-            // Enrollment change — drop the invalidated material so the caller
-            // can route the user through recovery.
-            deleteKeystoreKey(keyAlias)
-            prefs().edit().remove(ivKey(keyAlias)).remove(ctKey(keyAlias)).apply()
+            // Enrollment change — drop the invalidated material so the
+            // caller can route the user through recovery. `invalidateAlias`
+            // wipes both the keystore entry AND the wrapped ciphertext
+            // prefs in one place so this path stays in lock-step with
+            // the post-doFinal invalidation path inside the
+            // AuthenticationCallback below.
+            invalidateAlias(keyAlias)
             promise.reject(ERR_KEY_INVALIDATED, "Key invalidated by biometric enrollment change")
             return
         } catch (e: GeneralSecurityException) {
@@ -575,6 +662,23 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                     } catch (e: AEADBadTagException) {
                         promise.reject(ERR_AUTH_FAILED, "Decryption failed")
                     } catch (e: KeyPermanentlyInvalidatedException) {
+                        // Round-3 Finding 4: enrollment-change
+                        // invalidation can also surface here at
+                        // `doFinal()` time — the cipher init succeeded
+                        // (Android Keystore lazily validates auth state
+                        // on operation completion), but the post-auth
+                        // commit detected that the key has been
+                        // permanently invalidated. The pre-fix code only
+                        // rejected; stale prefs + key entry were left on
+                        // disk and `hasSecret(alias)` would keep
+                        // resolving true forever, trapping the user in
+                        // a loop where every unlock attempt rejected
+                        // with KEY_INVALIDATED yet `isInitialized()`
+                        // never converged to false. Wipe both sides via
+                        // invalidateAlias so the next probe reports a
+                        // clean uninitialized state and routes the user
+                        // through recovery / re-setup.
+                        invalidateAlias(keyAlias)
                         promise.reject(ERR_KEY_INVALIDATED, "Key invalidated by biometric enrollment change")
                     } catch (e: GeneralSecurityException) {
                         promise.reject(mapKeystoreException(e), "Decryption failed")

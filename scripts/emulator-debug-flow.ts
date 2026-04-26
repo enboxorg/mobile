@@ -622,6 +622,41 @@ function writePlaceholderPng(localPath: string): void {
 const SENSITIVE_SCREEN_NAMES: ReadonlySet<string> = new Set(['recovery-phrase']);
 
 /**
+ * Pure helper: decide whether the supplied raw uiautomator XML represents
+ * a RecoveryPhrase-bearing screen, AND return the sanitized form to
+ * persist alongside the screenshot.
+ *
+ * **Order matters.** The detection MUST run on the RAW input — sanitizing
+ * first would replace every BIP-39 wordlist hit with ``[redacted]``,
+ * which (a) drops the cluster count to zero and (b) leaves only the
+ * "Back up your recovery phrase" title needle as an indicator. A
+ * cluster-only RecoveryPhrase dump (Round-3 review Finding 1) — for
+ * example a captured XML that dropped the screen title due to
+ * accessibility reordering, framework drift, or A/B test copy — would
+ * fail the predicate on the sanitized tree and the gate would let
+ * ``screencap("flow-error")`` proceed to a real framebuffer capture
+ * containing the mnemonic. Detect first, sanitize second.
+ *
+ * Exposed as a free function so the no-device sanitizer self-test can
+ * exercise the gate's exact decision-on-raw + sanitize-on-write
+ * sequence without standing up an emulator.
+ */
+function classifyForegroundDump(rawXml: string): {
+  isSensitive: boolean;
+  sanitized: string;
+} {
+  // CRITICAL: parse + detect on the RAW XML, BEFORE sanitization. See
+  // the Round-3 Finding-1 note above.
+  const isSensitive = hasRecoveryPhraseContent(parseUiNodes(rawXml));
+  // Sanitize for persistence regardless. ``sanitizeBip39Xml`` is itself
+  // a no-op on dumps that don't contain RecoveryPhrase content, so on
+  // negative inputs ``sanitized === rawXml`` (byte-for-byte) and the
+  // caller can skip the disk write.
+  const sanitized = sanitizeBip39Xml(rawXml);
+  return {isSensitive, sanitized};
+}
+
+/**
  * Return true if the current foreground UI is a RecoveryPhrase-bearing
  * screen, based on a fresh uiautomator dump.
  *
@@ -650,11 +685,14 @@ function foregroundIsSensitive(): boolean {
     const local = join(ROOT, 'window_dump.xml');
     adb(['pull', '/sdcard/window_dump.xml', local]);
     const rawText = readFileSync(local, 'utf-8');
-    const sanitized = sanitizeBip39Xml(rawText);
+    const {isSensitive, sanitized} = classifyForegroundDump(rawText);
+    // Persist the sanitized form so the on-disk window_dump.xml never
+    // carries plaintext mnemonic words even if the driver crashes
+    // before the next dumpUi() call overwrites it.
     if (sanitized !== rawText) {
       writeFileSync(local, sanitized, 'utf-8');
     }
-    return hasRecoveryPhraseContent(parseUiNodes(sanitized));
+    return isSensitive;
   } catch {
     return false;
   }
@@ -1752,6 +1790,17 @@ const STRAY_FIXTURE_XML =
  * Predicate parity case:
  *   (e) hasRecoveryPhraseContent matches the sanitizer for all four fixtures.
  *
+ * Round-3 Finding 1 regression (cluster-only detection ordering):
+ *   (f) classifyForegroundDump correctly gates on a RecoveryPhrase dump
+ *       whose only positive signal is the >=3-BIP-39-word cluster — i.e.
+ *       no "Back up your recovery phrase" title and no
+ *       content-desc="Recovery phrase" wrapper. The sanitizer would
+ *       (correctly) replace those words with [redacted] in the persisted
+ *       form, but the gate decision MUST be made on the RAW XML or the
+ *       cluster signal disappears and screencap("flow-error") leaks the
+ *       framebuffer. This case directly pins the contract that the gate
+ *       runs on raw input.
+ *
  * Returns 0 on success, non-zero on failure. Designed to be runnable
  * without any device or emulator.
  */
@@ -1860,6 +1909,101 @@ function selfTestSanitizer(): number {
     );
   }
 
+  // ---------- (f) Round-3 Finding 1: cluster-only detection ordering ----
+  // Build a RecoveryPhrase-shaped dump WITHOUT the "Back up your recovery
+  // phrase" title chrome and WITHOUT the content-desc="Recovery phrase"
+  // grid wrapper. The only positive signal left is the cluster of 24
+  // BIP-39 wordlist hits in the cell labels.
+  const clusterOnlyXml = buildRecoveryPhraseXml({
+    includeTitle: false,
+    includeGridWrapper: false,
+  });
+
+  // (f.1) Sanitizer must still redact the cluster — i.e. the predicate
+  // is reached on the RAW dump, BIP-39 words become [redacted].
+  const clusterOnlySanitized = sanitizeBip39Xml(clusterOnlyXml);
+  if (clusterOnlySanitized === clusterOnlyXml) {
+    failures.push(
+      'case (f.1): cluster-only RecoveryPhrase dump returned byte-for-byte from sanitizer — content detection failed on RAW XML',
+    );
+  }
+  const clusterOnlyRedactions = countOccurrences(
+    clusterOnlySanitized,
+    SANITIZED_PLACEHOLDER,
+  );
+  if (clusterOnlyRedactions < 24) {
+    failures.push(
+      `case (f.1): expected >=24 [redacted] replacements on cluster-only dump, saw ${clusterOnlyRedactions}`,
+    );
+  }
+  for (const node of parseUiNodes(clusterOnlySanitized)) {
+    for (const attr of ['text', 'content-desc'] as const) {
+      const value = (node.attributes[attr] ?? '').trim();
+      if (isBip39Word(value)) {
+        failures.push(
+          `case (f.1): BIP-39 word ${JSON.stringify(value)} leaked through on attr=${JSON.stringify(attr)}`,
+        );
+      }
+    }
+  }
+
+  // (f.2) The pre-fix bug, demonstrated: if the gate is asked on the
+  // SANITIZED tree, the cluster signal is gone and the predicate
+  // returns false. This is the exact failure mode Finding 1 calls out.
+  // The check exists so the suite breaks the moment anyone reorders
+  // foregroundIsSensitive() back to "sanitize first, detect second".
+  if (hasRecoveryPhraseContent(parseUiNodes(clusterOnlySanitized))) {
+    failures.push(
+      'case (f.2): wordlist drift — hasRecoveryPhraseContent flagged a sanitized cluster-only dump; the regression demo no longer demonstrates the bug',
+    );
+  }
+
+  // (f.3) The fix: the gate (run on RAW XML) MUST detect the cluster.
+  if (!hasRecoveryPhraseContent(parseUiNodes(clusterOnlyXml))) {
+    failures.push(
+      'case (f.3): hasRecoveryPhraseContent rejected a cluster-only RecoveryPhrase dump on RAW XML — gate would let screencap("flow-error") leak the mnemonic via the failure-handler path',
+    );
+  }
+
+  // (f.4) End-to-end: classifyForegroundDump on the RAW input MUST
+  // return isSensitive=true AND a sanitized payload that still carries
+  // the redactions. This pins the public contract the IO wrapper
+  // (foregroundIsSensitive) builds on.
+  const clusterOnlyClassified = classifyForegroundDump(clusterOnlyXml);
+  if (!clusterOnlyClassified.isSensitive) {
+    failures.push(
+      'case (f.4): classifyForegroundDump.isSensitive=false on a cluster-only RecoveryPhrase dump — foregroundIsSensitive() would allow framebuffer capture',
+    );
+  }
+  if (clusterOnlyClassified.sanitized === clusterOnlyXml) {
+    failures.push(
+      'case (f.4): classifyForegroundDump.sanitized was byte-for-byte for a cluster-only RecoveryPhrase dump — sanitizer no-op on a positive case',
+    );
+  }
+  if (
+    countOccurrences(clusterOnlyClassified.sanitized, SANITIZED_PLACEHOLDER) <
+    24
+  ) {
+    failures.push(
+      'case (f.4): classifyForegroundDump.sanitized lost the [redacted] markers — sanitization regression',
+    );
+  }
+
+  // (f.5) Negative parity: classifyForegroundDump on a clean welcome
+  // dump MUST report isSensitive=false AND return the input
+  // byte-for-byte (no spurious sanitization).
+  const welcomeClassified = classifyForegroundDump(WELCOME_FIXTURE_XML);
+  if (welcomeClassified.isSensitive) {
+    failures.push(
+      'case (f.5): classifyForegroundDump.isSensitive=true on a clean welcome dump — gate would block legitimate screencaps',
+    );
+  }
+  if (welcomeClassified.sanitized !== WELCOME_FIXTURE_XML) {
+    failures.push(
+      'case (f.5): classifyForegroundDump.sanitized modified a clean welcome dump — expected byte-exact passthrough',
+    );
+  }
+
   if (failures.length > 0) {
     logErr('== sanitizer self-test FAILED ==');
     for (const line of failures) {
@@ -1877,6 +2021,9 @@ function selfTestSanitizer(): number {
     `  (d) welcome.xml + 1 stray BIP-39 hit: passthrough bytes=${Buffer.byteLength(straySanitized, 'utf-8')}`,
   );
   logInfo('  (e) hasRecoveryPhraseContent gate matches sanitizer for all 4 fixtures');
+  logInfo(
+    `  (f) cluster-only RecoveryPhrase dump: gate-on-raw=true, sanitized redactions=${clusterOnlyRedactions} bytes=${Buffer.byteLength(clusterOnlyClassified.sanitized, 'utf-8')}`,
+  );
   return 0;
 }
 

@@ -164,6 +164,33 @@ const mockNativeBiometricVault = {
 global.__enboxBiometricVaultStore = mockBiometricVaultStore;
 global.__enboxBiometricVaultMock = mockNativeBiometricVault;
 
+// Simulate the Android-native `invalidateAlias` cleanup that the
+// NativeBiometricVaultModule.kt now performs whenever
+// `KeyPermanentlyInvalidatedException` surfaces — at cipher-init OR
+// post-`doFinal` (Round-3 review Finding 4). Mirrors the contract the
+// native layer guarantees:
+//
+//   1. The alias' wrapped ciphertext + IV prefs are dropped.
+//   2. The Keystore key entry is dropped.
+//   3. The very next `getSecret(alias, ...)` rejects with
+//      `KEY_INVALIDATED`.
+//
+// JS consumers (`BiometricVault._doUnlock`, navigation gate matrices)
+// rely on (1) + (2) so a subsequent `hasSecret(alias)` resolves false
+// and the user routes through recovery instead of looping forever on
+// the same `KEY_INVALIDATED` rejection. Tests use this simulator to
+// exercise the post-invalidation state without standing up an Android
+// emulator.
+global.__enboxBiometricVaultSimulateInvalidation = function (alias) {
+  mockBiometricVaultStore.delete(alias);
+  mockNativeBiometricVault.getSecret.mockRejectedValueOnce(
+    mockBiometricVaultMakeError(
+      'KEY_INVALIDATED',
+      'Key invalidated by biometric enrollment change',
+    ),
+  );
+};
+
 // Reset the shared store and default mock implementations before every
 // test so one test's state cannot leak into another. Per-test overrides
 // via mockResolvedValueOnce / mockRejectedValueOnce are preserved because

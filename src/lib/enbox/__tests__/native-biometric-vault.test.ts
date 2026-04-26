@@ -271,6 +271,163 @@ describe('NativeBiometricVault — non-destructive contract (VAL-VAULT-030)', ()
   });
 });
 
+// Round-3 review regressions:
+//
+//   Finding 3 (Medium) — Android `generateAndStoreSecret()` existence
+//   probe used to fail-OPEN: any throw inside the
+//   `prefs().contains(...)` / `loadKeystoreKey(...)` block fell through
+//   to the destructive `deleteKeystoreKey(keyAlias)` ~30 lines below,
+//   wiping a perfectly valid existing alias on a transient probe
+//   error. The native module now fail-CLOSES — a probe exception
+//   rejects with `VAULT_ERROR` and never reaches the destructive
+//   provisioning path. The JS-observable contract this pins:
+//   ANY rejection from `generateAndStoreSecret(alias, ...)` (cancel,
+//   transient `VAULT_ERROR`, biometry lockout, etc.) MUST preserve a
+//   pre-existing alias byte-for-byte.
+//
+//   Finding 4 (Medium) — `KeyPermanentlyInvalidatedException` thrown
+//   by `Cipher.doFinal` inside the post-auth callback used to reject
+//   without dropping the wrapped ciphertext / IV in
+//   SharedPreferences. `hasSecret(alias)` then kept returning `true`
+//   forever and every subsequent unlock looped on the same
+//   `KEY_INVALIDATED` rejection. The native module now routes BOTH
+//   the cipher-init invalidation path AND the post-`doFinal`
+//   invalidation path through `invalidateAlias()`, which drops the
+//   key entry AND the prefs symmetrically. The JS-observable
+//   contract this pins: a `getSecret(alias, ...)` rejection with
+//   code `KEY_INVALIDATED` MUST be followed by `hasSecret(alias)`
+//   resolving `false`, so the UI can route the user through
+//   recovery instead of looping.
+describe('NativeBiometricVault — Round-3 regressions (Findings 3 & 4)', () => {
+  const prompt = {
+    promptTitle: 'Unlock',
+    promptMessage: 'Authenticate',
+    promptCancel: 'Cancel',
+  };
+
+  it('Finding 3: generateAndStoreSecret rejecting with VAULT_ERROR after a transient probe failure preserves the pre-existing alias byte-for-byte', async () => {
+    const alias = 'enbox.wallet.root';
+    const originalHex =
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' +
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+    // Provision the alias under the canonical 32-byte secret.
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: originalHex,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+
+    // Simulate a transient native probe failure on the next
+    // `generateAndStoreSecret(alias, ...)` call. The pre-fix native
+    // path would have caught this internally and proceeded to delete
+    // the existing alias. The fixed native path rejects with
+    // `VAULT_ERROR` instead. We model that by returning the same
+    // canonical rejection here.
+    mock.generateAndStoreSecret.mockRejectedValueOnce(
+      biometricError(
+        'VAULT_ERROR',
+        'Could not determine whether a biometric secret already exists; ' +
+          'refusing to provision to avoid overwriting a valid alias',
+      ),
+    );
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+      }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+
+    // Critical assertion: the rejected re-provision attempt MUST NOT
+    // have wiped the original alias. Both surfaces still see the
+    // valid secret.
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+    const survivingSecret = await NativeBiometricVault.getSecret(alias, prompt);
+    expect(survivingSecret).toBe(originalHex);
+  });
+
+  it('Finding 4: getSecret rejecting with KEY_INVALIDATED is followed by hasSecret=false (native invalidateAlias cleanup ran)', async () => {
+    const alias = 'enbox.wallet.root';
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+
+    // Trigger the simulated native invalidateAlias() cleanup. Mirrors
+    // the contract: the next getSecret(alias) rejects with
+    // KEY_INVALIDATED, AND the native side has already cleared the
+    // wrapped ciphertext + key entry so hasSecret returns false.
+    const simulate = (
+      globalThis as unknown as { __enboxBiometricVaultSimulateInvalidation: (alias: string) => void }
+    ).__enboxBiometricVaultSimulateInvalidation;
+    expect(typeof simulate).toBe('function');
+    simulate(alias);
+
+    await expect(
+      NativeBiometricVault.getSecret(alias, prompt),
+    ).rejects.toMatchObject({ code: 'KEY_INVALIDATED' });
+
+    // Critical assertion: the alias is gone after the
+    // KEY_INVALIDATED rejection. Pre-fix the prefs lingered and
+    // hasSecret kept returning true, trapping the user in a
+    // KEY_INVALIDATED loop.
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+    await expect(
+      NativeBiometricVault.getSecret(alias, prompt),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('Finding 4: re-provisioning is permitted immediately after a KEY_INVALIDATED rejection (no orphan-alias trap)', async () => {
+    const alias = 'enbox.wallet.root';
+    const originalHex =
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' +
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const replacementHex =
+      'cccccccccccccccccccccccccccccccc' +
+      'cccccccccccccccccccccccccccccccc';
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: originalHex,
+      }),
+    ).resolves.toBeUndefined();
+
+    const simulate = (
+      globalThis as unknown as { __enboxBiometricVaultSimulateInvalidation: (alias: string) => void }
+    ).__enboxBiometricVaultSimulateInvalidation;
+    simulate(alias);
+
+    await expect(
+      NativeBiometricVault.getSecret(alias, prompt),
+    ).rejects.toMatchObject({ code: 'KEY_INVALIDATED' });
+
+    // After the cleanup the alias is fully absent — re-provisioning
+    // is allowed without first calling `deleteSecret(alias)`. This
+    // is the recovery path the UI relies on when the user lands on
+    // the BiometricInvalidated screen and proceeds through
+    // RecoveryRestore.
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: replacementHex,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+    const newSecret = await NativeBiometricVault.getSecret(alias, prompt);
+    expect(newSecret).toBe(replacementHex);
+  });
+});
+
 describe('NativeBiometricVault — getSecret success path', () => {
   const prompt = {
     promptTitle: 'Unlock Enbox',
