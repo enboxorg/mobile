@@ -613,13 +613,29 @@ export class BiometricVault
     dwnEndpoints?: string[];
   }): Promise<string> {
     // 1. Refuse to overwrite a pre-existing native secret.
-    let hasExisting = false;
+    //
+    // Round-6 Finding 3: a native rejection from `hasSecret()` is NOT
+    // the same as a resolved `false`. The pre-fix code collapsed both
+    // into `hasExisting=false` and proceeded to provisioning, which
+    // would silently destroy a recoverable wallet on a transient
+    // device error: the user re-provisions over an alias the JS layer
+    // wrongly believes is empty, and the native non-destructive guard
+    // (Round-2 Finding 3) would then reject with
+    // `VAULT_ERROR_ALREADY_INITIALIZED` — exposing a generic error
+    // path instead of letting the caller retry. Surface the rejection
+    // verbatim so the UI / agent-store can decide whether to retry or
+    // route to recovery, matching the same posture used by
+    // `_doUnlock()` above.
+    let hasExisting: boolean;
     try {
       hasExisting = await this._native.hasSecret(WALLET_ROOT_KEY_ALIAS);
-    } catch {
-      // Defensive: treat native errors here as "unknown" and let
-      // generateAndStoreSecret() surface the true cause.
-      hasExisting = false;
+    } catch (err) {
+      const mapped = mapNativeErrorToVaultError(err);
+      if (mapped) throw mapped;
+      throw new VaultError(
+        'VAULT_ERROR',
+        'Native hasSecret() failed during initialization; cannot determine vault state',
+      );
     }
     if (hasExisting) {
       throw new VaultError(
@@ -772,14 +788,70 @@ export class BiometricVault
   }
 
   private async _doUnlock(): Promise<void> {
-    // 1. Fast-fail when there is no provisioned secret.
-    let hasExisting = false;
+    // 1. Probe native presence. Round-6 Finding 3: distinguish a
+    //    rejection (transient native-layer issue — Keystore corruption
+    //    on Android, non-NotFound OSStatus on iOS) from a resolved
+    //    `false` (truly no vault). The pre-fix code collapsed both
+    //    into "vault not initialized" and routed the user to the setup
+    //    flow, which would silently destroy a recoverable wallet on a
+    //    transient device error (the user would re-provision over
+    //    nothing only to find their old wallet vanished from
+    //    SecureStorage's perspective on the next launch). A native
+    //    rejection now surfaces as a transient `VAULT_ERROR` so the UI
+    //    can show "try again" instead.
+    let hasExisting: boolean;
     try {
       hasExisting = await this._native.hasSecret(WALLET_ROOT_KEY_ALIAS);
-    } catch {
-      hasExisting = false;
+    } catch (err) {
+      const mapped = mapNativeErrorToVaultError(err);
+      if (mapped) throw mapped;
+      throw new VaultError(
+        'VAULT_ERROR',
+        'Native hasSecret() failed; cannot determine vault state',
+      );
     }
     if (!hasExisting) {
+      // Round-6 Finding 1: iOS auto-deletes biometry-current-set Keychain
+      // items at the enrollment-change boundary. Subsequent
+      // `SecItemCopyMatching` returns `errSecItemNotFound`, which
+      // `RCTNativeBiometricVault` correctly maps to `NOT_FOUND`, which
+      // `mapNativeErrorToVaultError` then maps to
+      // `VAULT_ERROR_NOT_INITIALIZED`. Without further context the
+      // unlock flow would route the user to "set up new wallet" — the
+      // same path a fresh install takes — and the user's existing
+      // recovery phrase becomes unusable for routing purposes.
+      //
+      // The disambiguation lives at the JS layer because SecureStorage
+      // (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, no biometric
+      // ACL) survives the same enrollment-change auto-delete that wipes
+      // the vault item. Either SecureStorage signal — `INITIALIZED='true'`
+      // (set on initialize success) or `biometricState ∈ {ready,
+      // invalidated}` (set on initialize / observed-invalidation) —
+      // proves the user has previously had a working vault. When that
+      // signal exists AND the native item is gone, route as
+      // `KEY_INVALIDATED` so the UI surfaces RecoveryRestore.
+      //
+      // The same path also covers Android's post-Round-3-fix
+      // `invalidateAlias()` cleanup (the Keystore key + SharedPrefs are
+      // wiped on `KeyPermanentlyInvalidatedException`, so a subsequent
+      // unlock would otherwise hit the same `hasSecret=false`
+      // misroute).
+      const wasInitialized = await this._wasPreviouslyInitialized();
+      if (wasInitialized) {
+        // Persist the `invalidated` state and clear any in-memory key
+        // material before throwing — see Finding 2 below.
+        this._clearInMemoryState();
+        this._biometricState = 'invalidated';
+        try {
+          await this._persistBiometricState('invalidated');
+        } catch {
+          // best-effort
+        }
+        throw new VaultError(
+          'VAULT_ERROR_KEY_INVALIDATED',
+          'Native biometric secret is missing despite prior initialization — biometric enrollment change suspected',
+        );
+      }
       throw new VaultError(
         'VAULT_ERROR_NOT_INITIALIZED',
         'Biometric vault has not been initialized',
@@ -796,8 +868,26 @@ export class BiometricVault
     } catch (err) {
       const mapped = mapNativeErrorToVaultError(err);
       if (mapped?.code === 'VAULT_ERROR_KEY_INVALIDATED') {
+        // Round-6 Finding 2: clear in-memory state BEFORE persisting
+        // the new biometric state. If this vault instance was already
+        // unlocked from a prior call, the OS-level key material is now
+        // gone (Android's `KeyPermanentlyInvalidatedException` /
+        // iOS's `errSecInvalidData` family); leaving the previously-
+        // derived `_secretBytes`, DID, CEK, and root seed in memory
+        // would let `getDid()`, `getMnemonic()`, `encryptData()`, and
+        // `decryptData()` keep returning material that no longer maps
+        // to a recoverable vault. The pre-fix code only persisted the
+        // `invalidated` flag, leaving `isLocked()` reporting `false`
+        // because `_secretBytes` and `_bearerDid` were still set.
+        // Zeroing the buffers here is the symmetric counterpart to the
+        // native-side `invalidateAlias()` cleanup in Round-3 Finding 4.
+        this._clearInMemoryState();
         this._biometricState = 'invalidated';
-        await this._persistBiometricState('invalidated');
+        try {
+          await this._persistBiometricState('invalidated');
+        } catch {
+          // best-effort
+        }
       }
       throw mapped ?? err;
     }
@@ -1014,5 +1104,53 @@ export class BiometricVault
     } catch {
       // best-effort
     }
+  }
+
+  /**
+   * Round-6 Finding 1: detect whether the user has previously had a
+   * working biometric vault on this device.
+   *
+   * Returns `true` if either persistent SecureStorage signal is
+   * present:
+   *   - `INITIALIZED_STORAGE_KEY === 'true'` — set at the end of a
+   *     successful `_doInitialize()` and never cleared except by
+   *     `reset()`.
+   *   - `BIOMETRIC_STATE_STORAGE_KEY ∈ {ready, invalidated}` —
+   *     persisted on initialize success and on observed
+   *     `KEY_INVALIDATED`. Both values prove the vault was real at
+   *     some point.
+   *
+   * This is the JS-layer disambiguator that survives iOS's silent
+   * auto-delete of biometry-current-set Keychain items at enrollment
+   * change. iOS SecureStorage (`RCTNativeSecureStorage`) uses
+   * `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` with NO biometric
+   * ACL, so the SecureStorage-backed flags are unaffected by
+   * enrollment changes and remain authoritative across the boundary.
+   * Android's SharedPreferences-backed SecureStorage similarly
+   * survives the post-`KeyPermanentlyInvalidatedException` cleanup
+   * that `invalidateAlias()` performs on the Keystore + per-alias
+   * prefs (Round-3 Finding 4) — so this check works uniformly across
+   * both platforms.
+   *
+   * Treats individual SecureStorage read failures as unknown (returns
+   * `false` only when both reads either threw or returned non-matches);
+   * this is the same fail-quiet posture `getStatus()` uses for
+   * SecureStorage reads.
+   */
+  private async _wasPreviouslyInitialized(): Promise<boolean> {
+    if (!this._secureStorage) return false;
+    try {
+      const initialized = await this._secureStorage.get(INITIALIZED_STORAGE_KEY);
+      if (initialized === 'true') return true;
+    } catch {
+      // ignore individual read failures; fall through to the second probe
+    }
+    try {
+      const state = await this._secureStorage.get(BIOMETRIC_STATE_STORAGE_KEY);
+      if (state === 'ready' || state === 'invalidated') return true;
+    } catch {
+      // ignore individual read failures; treat as unknown ⇒ false
+    }
+    return false;
   }
 }

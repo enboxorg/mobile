@@ -96,11 +96,25 @@ echo "=== [capture] Driver exit code: ${SCRIPT_EXIT_CODE} ==="
 
 echo ""
 echo "=== [capture] Copying screenshots and uiautomator dumps into the artifact tree ==="
+# Round-6 Finding 5: surface ``cp`` failures loudly. The pre-fix
+# variant silenced stderr and forced exit 0, which let a copy
+# failure silently zero out the privacy-gate audit trail without
+# anyone noticing. The downstream verify step (Round-6 F5 part 2)
+# now hard-fails the job when ``/tmp/emulator-ui-artifacts`` is
+# empty, but the loud error here makes the root cause obvious in
+# the logs without requiring a developer to chase a "missing
+# artifacts" workflow failure back to a swallowed copy stderr.
 if [ -d "${UI_DIR}" ]; then
     # ``/.`` semantics: copy the contents of UI_DIR into ARTIFACT_DIR,
-    # not the directory itself. stderr silenced so a missing-source
-    # case (rare) doesn't spam the log.
-    cp -R "${UI_DIR}/." "${ARTIFACT_DIR}/" 2>/dev/null || true
+    # not the directory itself.
+    if cp -R "${UI_DIR}/." "${ARTIFACT_DIR}/"; then
+        ARTIFACT_FILE_COUNT=$(find "${ARTIFACT_DIR}" -type f 2>/dev/null | wc -l)
+        echo "[capture] copied UI artifacts into ${ARTIFACT_DIR} (${ARTIFACT_FILE_COUNT} file(s) total)"
+    else
+        echo "::error::cp -R ${UI_DIR}/. ${ARTIFACT_DIR}/ FAILED — privacy-gate audit trail (PNGs / uiautomator dumps) will be missing from the uploaded artifact bundle. Inspect the ::error:: line above for the underlying cp diagnostic." >&2
+    fi
+else
+    echo "::error::UI artifact source directory ${UI_DIR} is missing — ci-debug-emulator-runner.sh's mkdir -p step earlier in this script should have created it. The privacy-gate audit trail is unavailable for this run." >&2
 fi
 
 echo ""

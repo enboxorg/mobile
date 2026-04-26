@@ -747,6 +747,130 @@ function foregroundIsSensitive(): boolean {
   return isSensitive;
 }
 
+// ---------------------------------------------------------------------------
+// FLAG_SECURE positive assertion (Round-6 Finding 4)
+// ---------------------------------------------------------------------------
+//
+// The pre-Round-6 emulator suite gated mnemonic-bearing screencaps via
+// two layers — both of which sit ABOVE the OS-level SurfaceFlinger
+// guarantee:
+//
+//   1. ``SENSITIVE_SCREEN_NAMES`` short-circuits ``screencap()`` to a
+//      placeholder PNG for the literal ``"recovery-phrase"`` name.
+//   2. ``foregroundIsSensitive()`` probes uiautomator and short-circuits
+//      to a placeholder when the dump matches the BIP-39 / title
+//      indicator (and fail-closed on dump errors per Round-4 Finding 1).
+//
+// Both layers prevent the suite ITSELF from leaking the mnemonic. They
+// do NOT — and cannot — prove that ``MainActivity`` actually sets the
+// ``FLAG_SECURE`` window flag. A regression that removed the
+// ``window.setFlags(FLAG_SECURE, FLAG_SECURE)`` call from
+// ``MainActivity.onCreate`` (or the per-screen ``FlagSecureModule``
+// reference-counting) would slip through the suite green even though
+// the actual privacy guarantee is gone — Recents thumbnails, screen-
+// mirroring, and accessibility ``ScreenshotProvider`` would all leak the
+// mnemonic on a real device.
+//
+// This module provides a positive assertion: query ``dumpsys window
+// windows``, find the org.enbox.mobile window block(s), and verify
+// ``FLAG_SECURE`` is present. We call it at the moment the recovery-
+// phrase screen is foregrounded, so the assertion exercises the same
+// window the user sees during the actual mnemonic display.
+//
+// ``flagSecureOnPackageWindow`` is the pure parser; the IO wrapper
+// ``assertFlagSecureOnForeground`` runs ``adb shell dumpsys`` and
+// throws on any negative outcome (parser miss, dumpsys failure, no
+// foreground window for our package). The selfTestSanitizer adds a
+// ``case (h)`` that exercises the parser with synthetic dumpsys
+// fixtures so a no-device CI run can still gate on parser regressions.
+
+interface AdbLike {
+  (
+    args: readonly string[],
+    opts?: RunOpts,
+  ): {stdout: string; stderr: string; returncode: number};
+}
+
+/**
+ * Pure parser: return ``true`` iff ``dumpsysOutput`` shows at least one
+ * window for ``packageName`` whose attribute block contains ``FLAG_SECURE``.
+ *
+ * The parser is deliberately permissive on the input format — the
+ * ``dumpsys window windows`` output format varies subtly between Android
+ * API levels, but every variant we care about emits per-window blocks
+ * starting with ``Window #<n> Window{<id> u<userId> <component>}`` (or
+ * a close variant) and a multi-line body that includes a flags=
+ * fragment when the secure flag is set. We extract every block that
+ * mentions ``packageName`` (regardless of leading "Window #N" decoration)
+ * and check each block for the literal ``FLAG_SECURE`` token.
+ */
+function flagSecureOnPackageWindow(
+  dumpsysOutput: string,
+  packageName: string,
+): boolean {
+  if (!dumpsysOutput || !packageName) return false;
+  const escaped = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Match each ``Window{...}`` block whose id mentions our package, then
+  // greedy-consume up to the next ``Window{`` or end-of-string. We must
+  // permit nested attribute lines that happen to start with `Window`
+  // by anchoring the cutoff on ``Window{`` rather than ``Window``.
+  const blockRegex = new RegExp(
+    `Window\\{[^}]*${escaped}[^}]*\\}([\\s\\S]*?)(?=Window\\{|$)`,
+    'g',
+  );
+  const matches = Array.from(dumpsysOutput.matchAll(blockRegex));
+  if (matches.length === 0) return false;
+  return matches.some((m) => (m[1] ?? '').includes('FLAG_SECURE'));
+}
+
+/**
+ * IO wrapper: run ``adb shell dumpsys window windows`` and assert at
+ * least one window for ``APP_PACKAGE`` carries ``FLAG_SECURE``. Throw a
+ * descriptive ``Error`` on any negative outcome.
+ *
+ * The default ``adbRunner`` is the production ``adb`` binary; the
+ * ``adbRunner`` parameter is for the no-device self-test, which feeds
+ * synthetic dumpsys fixtures so the parser branches stay covered in
+ * CI even without an emulator in scope.
+ */
+function assertFlagSecureOnForeground(
+  context: string,
+  adbRunner: AdbLike = adb,
+): void {
+  const result = adbRunner(['shell', 'dumpsys', 'window', 'windows'], {
+    check: false,
+  });
+  if (result.returncode !== 0) {
+    throw new Error(
+      `${context}: 'adb shell dumpsys window windows' failed (rc=${result.returncode}); ` +
+        'cannot positively assert FLAG_SECURE on foreground window. ' +
+        `stderr: ${JSON.stringify((result.stderr ?? '').slice(0, 200))}`,
+    );
+  }
+  const out = result.stdout ?? '';
+  if (!flagSecureOnPackageWindow(out, APP_PACKAGE)) {
+    // Surface a short, ID-bearing fragment of the dumpsys output to aid
+    // debugging without dumping multi-MB of window state into the log.
+    // The first ``mCurrentFocus`` line is usually enough to identify
+    // which (non-secure) window is on top of our app.
+    const focusLine =
+      out
+        .split('\n')
+        .find((l) => l.includes('mCurrentFocus=') || l.includes('mFocusedWindow=')) ??
+      '(mCurrentFocus / mFocusedWindow line not found)';
+    throw new Error(
+      `${context}: foreground ${APP_PACKAGE} window does NOT carry FLAG_SECURE — ` +
+        'OS-level mnemonic-capture protection has regressed. The emulator suite ' +
+        'still produced a placeholder PNG via the higher-level gates, but ' +
+        'Recents thumbnails / screen-mirroring / accessibility capture vectors ' +
+        'would leak the mnemonic on a real device. Inspect ' +
+        '`MainActivity.onCreate` (window.setFlags(FLAG_SECURE, FLAG_SECURE)) and ' +
+        'the FlagSecureModule reference counting. Focus line: ' +
+        JSON.stringify(focusLine.trim()),
+    );
+  }
+}
+
 /**
  * Capture a screenshot and pull it to ``/tmp/emulator-ui/<name>.png``.
  *
@@ -1692,6 +1816,19 @@ async function mainFlow(): Promise<number> {
   // First wait for the RecoveryPhrase screen to mount — any anchor that is
   // always at the top of the screen works.
   await waitForText('Back up your recovery phrase', 45.0);
+  // Round-6 Finding 4: positive assertion on the OS-level FLAG_SECURE
+  // guarantee BEFORE we issue the placeholder screencap. The placeholder
+  // path (SENSITIVE_SCREEN_NAMES short-circuit + foregroundIsSensitive
+  // gate) keeps the emulator suite itself from leaking the mnemonic, but
+  // it cannot prove that MainActivity actually set the secure window
+  // flag. Without this assertion a regression that removed
+  // `window.setFlags(FLAG_SECURE, FLAG_SECURE)` would slip through the
+  // suite green even though Recents thumbnails / screen-mirroring /
+  // accessibility ScreenshotProvider would leak the mnemonic on a real
+  // device. The assertion runs while the recovery-phrase screen is
+  // demonstrably foregrounded (we just anchored on the title) so it
+  // exercises the exact window the user sees during mnemonic display.
+  assertFlagSecureOnForeground('recovery-phrase');
   screencap('recovery-phrase');
   await dumpUi('recovery-phrase');
   // The 24-word grid pushes the "I've saved it" confirm button below the
@@ -2155,6 +2292,136 @@ function selfTestSanitizer(): number {
     );
   }
 
+  // ---------- (h) Round-6 Finding 4: FLAG_SECURE assertion parser ----
+  // ``assertFlagSecureOnForeground`` runs at the moment the recovery-
+  // phrase screen is foregrounded and asserts that the OS-level
+  // ``FLAG_SECURE`` flag is set on our package's window. A regression
+  // that removed the flag (e.g. ``MainActivity.onCreate`` no longer
+  // calling ``window.setFlags``, or ``FlagSecureModule`` losing its
+  // baseline-preserving refcount) would slip through the higher-level
+  // placeholder gates because the emulator driver still won't capture
+  // the mnemonic — but the OS-level guarantee on Recents thumbnails /
+  // screen-mirroring / accessibility ScreenshotProvider would be gone.
+  // We pin the parser contract here with synthetic dumpsys fixtures so
+  // the no-device self-test can break on parser regressions.
+  //
+  // Fixtures mirror the real ``dumpsys window windows`` output as
+  // emitted on Android API 31 (the version the emulator suite targets):
+  // a per-window block with a ``Window{<id> u<userId> <component>}``
+  // header and a multi-line body that includes a ``mAttrs={... flags=
+  // FLAG_SECURE FLAG_SHOW_WHEN_LOCKED ...}`` fragment when the secure
+  // flag is set.
+  const dumpsysWithFlag =
+    'Window #0 Window{abc123 u0 com.android.systemui/.StatusBar}:\n' +
+    '  mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=STATUS_BAR ' +
+    'flags=FLAG_LAYOUT_NO_LIMITS FLAG_LAYOUT_INSET_DECOR}\n' +
+    '\n' +
+    'Window #1 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION ' +
+    'flags=FLAG_SECURE FLAG_SHOW_WHEN_LOCKED}\n' +
+    '  mViewVisibility=0x0 mHaveFrame=true\n' +
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  const dumpsysWithoutFlag =
+    'Window #0 Window{abc123 u0 com.android.systemui/.StatusBar}:\n' +
+    '  mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=STATUS_BAR ' +
+    'flags=FLAG_LAYOUT_NO_LIMITS FLAG_LAYOUT_INSET_DECOR}\n' +
+    '\n' +
+    'Window #1 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION ' +
+    'flags=FLAG_SHOW_WHEN_LOCKED FLAG_HARDWARE_ACCELERATED}\n' +
+    '  mViewVisibility=0x0 mHaveFrame=true\n' +
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  const dumpsysWithoutOurPackage =
+    'Window #0 Window{abc123 u0 com.android.systemui/.StatusBar}:\n' +
+    '  mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=STATUS_BAR ' +
+    'flags=FLAG_LAYOUT_NO_LIMITS FLAG_LAYOUT_INSET_DECOR}\n' +
+    '\n' +
+    'Window #1 Window{def456 u0 com.example.other/com.example.other.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION ' +
+    'flags=FLAG_SECURE}\n';
+  // (h.1) Positive case: org.enbox.mobile window with FLAG_SECURE present.
+  if (!flagSecureOnPackageWindow(dumpsysWithFlag, APP_PACKAGE)) {
+    failures.push(
+      'case (h.1): false negative — flagSecureOnPackageWindow returned false on a clean dumpsys with FLAG_SECURE set on the org.enbox.mobile window',
+    );
+  }
+  // (h.2) Negative case: org.enbox.mobile window present, FLAG_SECURE absent.
+  if (flagSecureOnPackageWindow(dumpsysWithoutFlag, APP_PACKAGE)) {
+    failures.push(
+      'case (h.2): false positive — flagSecureOnPackageWindow returned true on a dumpsys whose org.enbox.mobile window does NOT carry FLAG_SECURE; the assertion would not fail an actual MainActivity FLAG_SECURE regression',
+    );
+  }
+  // (h.3) Negative case: a different package has FLAG_SECURE but ours does
+  // not exist in the dumpsys output. The parser must NOT treat any
+  // package's FLAG_SECURE as our package's.
+  if (flagSecureOnPackageWindow(dumpsysWithoutOurPackage, APP_PACKAGE)) {
+    failures.push(
+      'case (h.3): false positive — flagSecureOnPackageWindow returned true on a dumpsys where another package has FLAG_SECURE but ours has no window at all; the assertion would mask a "no foreground" condition',
+    );
+  }
+  // (h.4) IO wrapper: dumpsys returning rc!=0 must throw — fail-loud
+  // posture so a transient adb failure cannot silently bypass the
+  // privacy gate. Use a synthetic ``adbRunner`` so this branch is
+  // exercised without standing up an emulator.
+  let h4Threw = false;
+  try {
+    assertFlagSecureOnForeground('selftest', () => ({
+      stdout: '',
+      stderr: 'dumpsys not available',
+      returncode: 1,
+    }));
+  } catch {
+    h4Threw = true;
+  }
+  if (!h4Threw) {
+    failures.push(
+      'case (h.4): assertFlagSecureOnForeground did not throw when dumpsys returned a non-zero exit — privacy-gate assertion would silently pass on adb transport hiccups',
+    );
+  }
+  // (h.5) IO wrapper: dumpsys output that lacks FLAG_SECURE on our
+  // package must throw with a descriptive message that includes the
+  // package name. This is the primary branch exercising the
+  // production assertion path.
+  let h5Threw = false;
+  let h5Msg = '';
+  try {
+    assertFlagSecureOnForeground('selftest', () => ({
+      stdout: dumpsysWithoutFlag,
+      stderr: '',
+      returncode: 0,
+    }));
+  } catch (e) {
+    h5Threw = true;
+    h5Msg = (e as Error).message;
+  }
+  if (!h5Threw) {
+    failures.push(
+      'case (h.5): assertFlagSecureOnForeground did not throw when org.enbox.mobile window lacked FLAG_SECURE — primary regression branch is dead',
+    );
+  } else if (!h5Msg.includes(APP_PACKAGE) || !h5Msg.includes('FLAG_SECURE')) {
+    failures.push(
+      `case (h.5): assertFlagSecureOnForeground error message missing diagnostic content — got ${JSON.stringify(h5Msg.slice(0, 120))}`,
+    );
+  }
+  // (h.6) IO wrapper: clean dumpsys output where our package window
+  // has FLAG_SECURE must NOT throw — the fast path that lets a
+  // healthy run continue.
+  let h6Threw = false;
+  try {
+    assertFlagSecureOnForeground('selftest', () => ({
+      stdout: dumpsysWithFlag,
+      stderr: '',
+      returncode: 0,
+    }));
+  } catch {
+    h6Threw = true;
+  }
+  if (h6Threw) {
+    failures.push(
+      'case (h.6): assertFlagSecureOnForeground threw on a healthy dumpsys with FLAG_SECURE present — false positive would block every emulator run',
+    );
+  }
+
   if (failures.length > 0) {
     logErr('== sanitizer self-test FAILED ==');
     for (const line of failures) {
@@ -2177,6 +2444,9 @@ function selfTestSanitizer(): number {
   );
   logInfo(
     '  (g) classifyForegroundDumpFromReader: fail-CLOSED on thrown reader, parity with classifier on successful reads',
+  );
+  logInfo(
+    '  (h) flagSecureOnPackageWindow + assertFlagSecureOnForeground: parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message)',
   );
   return 0;
 }

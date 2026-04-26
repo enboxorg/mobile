@@ -36,6 +36,19 @@ on:
       - 'android/**'
       - 'ios/**'
       - '.github/workflows/debug-emulator.yml'
+      # Round-6 Finding 6: ``.github/workflows/ci.yml`` is in the
+      # trigger surface because it OWNS the always-on
+      # ``bun run emulator:self-test`` gate (Round-3 Finding 2 fix).
+      # That self-test is the no-device validation of the sanitizer
+      # / FLAG_SECURE-parser / classify-on-raw contracts that protect
+      # against mnemonic leakage. A CI-only edit that weakened or
+      # removed the gate (for example, dropping the
+      # ``emulator:self-test`` step from the ``verify`` job) would
+      # NOT re-run the emulator workflow if ``ci.yml`` were absent
+      # from this filter — both gates would slip past the next PR.
+      # Adding it here makes a regression in the self-test gate
+      # automatically re-validated by the full emulator run.
+      - '.github/workflows/ci.yml'
       - 'metro.config.js'
       - 'babel.config.js'
       - 'index.js'
@@ -82,6 +95,11 @@ on:
       - 'android/**'
       - 'ios/**'
       - '.github/workflows/debug-emulator.yml'
+      # Round-6 Finding 6: ci.yml owns the always-on self-test gate
+      # (see comment on the pull_request trigger above). Keep both
+      # workflow files in the trigger surface so a CI-only weakening
+      # of the gate is caught by an emulator re-run.
+      - '.github/workflows/ci.yml'
       - 'metro.config.js'
       - 'babel.config.js'
       - 'index.js'
@@ -190,6 +208,20 @@ jobs:
       # written so ``actions/upload-artifact`` has something to upload
       # (rather than silently skipping when all paths resolve to
       # nothing — see VAL-CI-032).
+      #
+      # Round-6 Finding 5: previously this step only created
+      # placeholders for the three logcat files; the UI artifact
+      # directory was treated as best-effort and a run that produced
+      # zero PNGs/XMLs would still report green. The privacy-gate
+      # audit trail (recovery-phrase, biometric-prompt, etc.) lives
+      # exclusively under ``/tmp/emulator-ui-artifacts``, so a green
+      # run with an empty directory means nobody can audit whether
+      # the gate actually ran. We now record the UI file count as
+      # ``EMULATOR_UI_FILE_COUNT`` in ``$GITHUB_ENV``; the
+      # exit-code-propagation step (STEP 4) hard-fails the job when
+      # that count is zero AND the driver claimed success. We still
+      # write a marker file here so the upload step always has
+      # something diagnostic to surface.
       - name: Verify captured artifacts
         if: always()
         shell: bash
@@ -208,6 +240,25 @@ jobs:
               echo "MISSING — emulator step aborted before capture phase could write this file." > "$f"
             fi
           done
+
+          # Round-6 F5: count UI artifacts (PNGs + XMLs) and export the
+          # count to GITHUB_ENV so STEP 4 can hard-fail on zero. Also
+          # write a marker file when the directory is empty so the
+          # upload step has unambiguous evidence of the gap.
+          UI_FILE_COUNT=$(find /tmp/emulator-ui-artifacts -type f 2>/dev/null | wc -l | tr -d ' ')
+          UI_PNG_COUNT=$(find /tmp/emulator-ui-artifacts -type f -name '*.png' 2>/dev/null | wc -l | tr -d ' ')
+          UI_XML_COUNT=$(find /tmp/emulator-ui-artifacts -type f -name '*.xml' 2>/dev/null | wc -l | tr -d ' ')
+          echo "[verify] UI artifacts: total=${UI_FILE_COUNT}, PNG=${UI_PNG_COUNT}, XML=${UI_XML_COUNT}"
+          if [ "${UI_FILE_COUNT}" = "0" ]; then
+            echo "::warning::No UI artifacts under /tmp/emulator-ui-artifacts. STEP 4 will hard-fail this job if the driver reported success."
+            echo "MISSING — emulator capture phase produced no PNGs or uiautomator XMLs. The privacy-gate audit trail (recovery-phrase, biometric-prompt, etc.) is unavailable for this run. Inspect the runner step's ::error:: lines above for the underlying cp / capture failure." \
+              > /tmp/emulator-ui-artifacts/UI_ARTIFACTS_MISSING.txt
+          fi
+          if [ -n "${GITHUB_ENV:-}" ] && [ -w "${GITHUB_ENV}" ]; then
+            echo "EMULATOR_UI_FILE_COUNT=${UI_FILE_COUNT}" >> "${GITHUB_ENV}"
+            echo "EMULATOR_UI_PNG_COUNT=${UI_PNG_COUNT}" >> "${GITHUB_ENV}"
+            echo "EMULATOR_UI_XML_COUNT=${UI_XML_COUNT}" >> "${GITHUB_ENV}"
+          fi
 
       # STEP 3 — upload whatever artifacts exist, even on failure.
       # ``if: always()`` guarantees the upload runs when STEP 1 or
@@ -233,6 +284,18 @@ jobs:
       # and upload steps run; this step is the sole source of job
       # failure signal for driver regressions. ``if: always()`` so it
       # also runs when STEPS 2 or 3 reported a problem (VAL-CI-024).
+      #
+      # Round-6 Finding 5: ALSO fail when the driver claimed success
+      # but STEP 2 saw zero UI artifacts under
+      # ``/tmp/emulator-ui-artifacts``. The privacy-gate audit trail
+      # (recovery-phrase, biometric-prompt, etc.) lives exclusively
+      # there, and a green run with an empty directory means the
+      # gate cannot be audited — exactly the state the reviewer
+      # flagged as "a green run can omit screenshots/XML artifacts
+      # needed to audit the privacy gate". Failing here prevents the
+      # green-but-evidence-free run from masking a regression in the
+      # capture path itself (cp failure, runner crash, missing
+      # mkdir).
       - name: Propagate emulator flow exit code
         if: always()
         shell: bash
@@ -247,4 +310,16 @@ jobs:
             echo "::error::Emulator onboarding flow failed (bun run scripts/emulator-debug-flow.ts exited ${CODE}). Check the uploaded artifact 'emulator-debug-${{ github.sha }}' for logs and screenshots."
             exit "$CODE"
           fi
-          echo "=== Emulator onboarding flow completed successfully ==="
+          # Round-6 F5: hard-fail when no UI artifacts were captured
+          # despite the driver reporting success. The count is
+          # exported by STEP 2 (Verify captured artifacts).
+          UI_COUNT="${EMULATOR_UI_FILE_COUNT:-}"
+          if [ -z "${UI_COUNT}" ]; then
+            echo "::error::EMULATOR_UI_FILE_COUNT was not exported — STEP 2 (Verify captured artifacts) likely did not run, so the privacy-gate audit cannot be confirmed."
+            exit 1
+          fi
+          if [ "${UI_COUNT}" = "0" ]; then
+            echo "::error::Emulator driver reported success but STEP 2 found ZERO UI artifacts under /tmp/emulator-ui-artifacts. The privacy-gate audit trail (recovery-phrase, biometric-prompt, etc.) is missing — failing loudly so a green run cannot mask a regression in the capture path. Inspect the 'Run on emulator and capture logs' step's ::error:: lines for the underlying cp / capture failure."
+            exit 1
+          fi
+          echo "=== Emulator onboarding flow completed successfully (UI artifacts: total=${UI_COUNT}, PNG=${EMULATOR_UI_PNG_COUNT:-?}, XML=${EMULATOR_UI_XML_COUNT:-?}) ==="

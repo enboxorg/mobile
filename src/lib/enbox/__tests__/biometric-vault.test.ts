@@ -763,6 +763,270 @@ describe('BiometricVault — mutex (VAL-VAULT-028)', () => {
 });
 
 // ===========================================================================
+// Round-6 regressions — _doUnlock / _doInitialize routing & in-memory cleanup
+//
+// Findings 1, 2, 3 from the Round-6 review:
+//
+//   F1 (High): iOS biometric enrollment invalidation auto-deletes the
+//      Keychain item, surfacing as ``errSecItemNotFound`` → ``NOT_FOUND``
+//      → ``VAULT_ERROR_NOT_INITIALIZED`` from the JS layer. The user
+//      gets routed to "set up new wallet" instead of RecoveryRestore.
+//      Fix: when ``hasSecret()`` resolves false BUT a SecureStorage
+//      signal proves the user has previously initialized
+//      (``INITIALIZED='true'`` OR ``biometricState ∈ {ready,
+//      invalidated}``), surface as ``VAULT_ERROR_KEY_INVALIDATED`` so
+//      the agent-store routes correctly.
+//
+//   F2 (High): an observed ``KEY_INVALIDATED`` did not zero the
+//      already-resident in-memory ``_secretBytes`` / DID / CEK / root
+//      seed. ``isLocked()`` could return false from a prior unlock,
+//      leaving ``getDid()`` / ``getMnemonic()`` / ``encryptData()`` /
+//      ``decryptData()`` operable on stale material. Fix: call
+//      ``_clearInMemoryState()`` BEFORE persisting the invalidated
+//      flag in the catch path.
+//
+//   F3 (Medium): ``hasSecret()`` rejection (vs resolved-false) was
+//      collapsed to "no vault". A transient native-layer failure
+//      (Keystore corruption, OSStatus that isn't a NotFound family
+//      member) misroutes to setup. Fix: surface the native rejection
+//      as ``VAULT_ERROR`` (or its mapped equivalent) so the UI shows
+//      "try again" instead of "set up new wallet".
+// ===========================================================================
+describe('BiometricVault — Round-6 regressions (F1: iOS NOT_FOUND mis-route, F2: KEY_INVALIDATED in-memory cleanup, F3: hasSecret rejection)', () => {
+  it('F1: hasSecret=false + INITIALIZED="true" routes to VAULT_ERROR_KEY_INVALIDATED (iOS post-enrollment-change)', async () => {
+    const { api, store } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+
+    // Pre-condition: SecureStorage carries INITIALIZED='true'.
+    expect(store.get(INITIALIZED_STORAGE_KEY)).toBe('true');
+
+    // Simulate iOS post-enrollment-change: the biometry-current-set
+    // Keychain item has been auto-deleted, so hasSecret resolves
+    // false. The vault is locked from a prior session (the in-memory
+    // path doesn't apply — this test exercises the cold-start path).
+    await vault.lock();
+    native.hasSecret.mockResolvedValueOnce(false);
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_KEY_INVALIDATED',
+    });
+
+    // The persisted biometric state must flip to invalidated so the
+    // agent-store / UI can route to RecoveryRestore on this session
+    // AND survive an app restart.
+    expect(api.set).toHaveBeenCalledWith(BIOMETRIC_STATE_STORAGE_KEY, 'invalidated');
+    expect(store.get(BIOMETRIC_STATE_STORAGE_KEY)).toBe('invalidated');
+
+    // The vault is left locked — the JS-layer disambiguation MUST NOT
+    // call ``getSecret()``, so no biometric prompt fires.
+    expect(vault.isLocked()).toBe(true);
+    expect(native.getSecret).not.toHaveBeenCalled();
+  });
+
+  it('F1: hasSecret=false + biometricState="ready" (without INITIALIZED) routes to VAULT_ERROR_KEY_INVALIDATED (defensive — captures partial-init succeed cases)', async () => {
+    // Simulate the partial-init edge case: biometricState was
+    // persisted but INITIALIZED was not (e.g. a race or two-write
+    // sequence where only the first write landed). The disambiguator
+    // still needs to detect "previously had a vault" from EITHER
+    // signal, not just ``INITIALIZED='true'``.
+    const { api, store } = makeSecureStorage();
+    store.set(BIOMETRIC_STATE_STORAGE_KEY, 'ready');
+    // INITIALIZED deliberately absent.
+
+    const vault = new BiometricVault({ secureStorage: api });
+    native.hasSecret.mockResolvedValueOnce(false);
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_KEY_INVALIDATED',
+    });
+    expect(store.get(BIOMETRIC_STATE_STORAGE_KEY)).toBe('invalidated');
+  });
+
+  it('F1: hasSecret=false + biometricState="invalidated" remains VAULT_ERROR_KEY_INVALIDATED (idempotent across app launches)', async () => {
+    // Second-launch case: prior session already persisted
+    // ``invalidated``. A re-unlock attempt MUST keep routing as
+    // ``KEY_INVALIDATED`` so the UI continues to show
+    // RecoveryRestore — not silently re-route to setup.
+    const { api, store } = makeSecureStorage();
+    store.set(BIOMETRIC_STATE_STORAGE_KEY, 'invalidated');
+
+    const vault = new BiometricVault({ secureStorage: api });
+    native.hasSecret.mockResolvedValueOnce(false);
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_KEY_INVALIDATED',
+    });
+    expect(store.get(BIOMETRIC_STATE_STORAGE_KEY)).toBe('invalidated');
+  });
+
+  it('F1: hasSecret=false WITHOUT any prior-init signal still routes to VAULT_ERROR_NOT_INITIALIZED (true fresh install — disambiguator must NOT over-fire)', async () => {
+    // Fresh install: SecureStorage is empty. The disambiguator must
+    // route to NOT_INITIALIZED so the user sees the setup flow, not
+    // RecoveryRestore. This is the negative-parity test that pins
+    // the F1 fix isn't over-broad.
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    native.hasSecret.mockResolvedValueOnce(false);
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_NOT_INITIALIZED',
+    });
+    // No invalidated-state side-effect on a fresh install.
+    expect(api.set).not.toHaveBeenCalledWith(
+      BIOMETRIC_STATE_STORAGE_KEY,
+      'invalidated',
+    );
+  });
+
+  it('F1: hasSecret=false WITHOUT a SecureStorage adapter still routes to VAULT_ERROR_NOT_INITIALIZED (no-storage callers must be safe)', async () => {
+    // The constructor accepts an optional SecureStorage; callers in
+    // older code paths may construct the vault without one. The
+    // disambiguator must default to NOT_INITIALIZED in that case.
+    const vault = new BiometricVault();
+    native.hasSecret.mockResolvedValueOnce(false);
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_NOT_INITIALIZED',
+    });
+  });
+
+  it('F2: KEY_INVALIDATED on an UNLOCKED vault clears in-memory state — getDid / getMnemonic / encryptData / decryptData all VAULT_ERROR_LOCKED afterwards', async () => {
+    // Provision and unlock so the vault holds in-memory key material.
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+
+    // Sanity: pre-conditions for the regression — vault is unlocked
+    // and serving derived state.
+    expect(vault.isLocked()).toBe(false);
+    await expect(vault.getDid()).resolves.toBeDefined();
+    await expect(vault.getMnemonic()).resolves.toBeDefined();
+    await expect(
+      vault.encryptData({ plaintext: new Uint8Array([1, 2, 3]) }),
+    ).resolves.toBeDefined();
+
+    // Now: a refresh-unlock attempt observes KEY_INVALIDATED. The
+    // pre-fix code would persist the invalidated flag but leave
+    // _secretBytes / _bearerDid / _contentEncryptionKey resident in
+    // memory, so isLocked() would remain false and the four methods
+    // above would keep working on stale material.
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockRejectedValueOnce(withErrorCode('KEY_INVALIDATED'));
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_KEY_INVALIDATED',
+    });
+
+    // Post-fix: vault must be locked, and the four accessors must
+    // reject with VAULT_ERROR_LOCKED. We pin all four to make the
+    // test regression-loud no matter which accessor a future change
+    // might leave dangling.
+    expect(vault.isLocked()).toBe(true);
+    await expect(vault.getDid()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
+    await expect(vault.getMnemonic()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
+    await expect(
+      vault.encryptData({ plaintext: new Uint8Array([1, 2, 3]) }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_LOCKED' });
+    await expect(vault.decryptData({ jwe: 'irrelevant.compact.jwe.text.tag' }))
+      .rejects.toMatchObject({ code: 'VAULT_ERROR_LOCKED' });
+
+    // The persisted biometric state MUST also flip to invalidated
+    // (the F2 fix preserves the existing F8 contract; we re-pin it
+    // here so a future refactor cannot accidentally drop one of the
+    // two side-effects).
+    expect((await vault.getStatus()).biometricState).toBe('invalidated');
+  });
+
+  it('F2: KEY_INVALIDATED while LOCKED still persists invalidated and stays locked (existing VAL-VAULT-008 behaviour preserved)', async () => {
+    // Negative-parity: the F2 fix must not REGRESS the locked-vault
+    // path covered by the existing VAL-VAULT-008 test. We re-run a
+    // similar scenario (provision → lock → KEY_INVALIDATED unlock)
+    // and assert the same observable contract.
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+    await vault.lock();
+
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockRejectedValueOnce(withErrorCode('KEY_INVALIDATED'));
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR_KEY_INVALIDATED',
+    });
+
+    expect(vault.isLocked()).toBe(true);
+    expect((await vault.getStatus()).biometricState).toBe('invalidated');
+  });
+
+  it('F3: hasSecret() rejection during unlock surfaces a transient VAULT_ERROR — does NOT collapse to VAULT_ERROR_NOT_INITIALIZED', async () => {
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+    await vault.lock();
+
+    // Simulate a native rejection (Keystore probe failure on Android,
+    // non-NotFound OSStatus on iOS). The pre-fix swallowed this and
+    // routed the user to "set up new wallet", which would silently
+    // destroy any recoverable wallet on retry.
+    const transient = withErrorCode('VAULT_ERROR', 'keystore probe boom');
+    native.hasSecret.mockRejectedValueOnce(transient);
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      // Mapped via mapNativeErrorToVaultError → 'VAULT_ERROR' (the
+      // input ``code`` happens to be the canonical VAULT_ERROR
+      // surface; either branch is acceptable as long as it is NOT
+      // NOT_INITIALIZED).
+      code: 'VAULT_ERROR',
+    });
+    // No invalidated-state side-effect on a transient native failure.
+    expect(api.set).not.toHaveBeenCalledWith(
+      BIOMETRIC_STATE_STORAGE_KEY,
+      'invalidated',
+    );
+    // No biometric prompt fires when hasSecret itself fails.
+    expect(native.getSecret).not.toHaveBeenCalled();
+  });
+
+  it('F3: hasSecret() rejection with a code-less Error surfaces a generic VAULT_ERROR (not NOT_INITIALIZED)', async () => {
+    const vault = new BiometricVault();
+    await vault.initialize({});
+    await vault.lock();
+
+    // No `.code` property — the mapper returns null and the catch
+    // path must fall back to VAULT_ERROR.
+    native.hasSecret.mockRejectedValueOnce(new Error('opaque native boom'));
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR',
+    });
+  });
+
+  it('F3: hasSecret() rejection during initialize surfaces a transient VAULT_ERROR — does NOT proceed to provisioning over a possibly-existing alias', async () => {
+    // Symmetric F3 fix on the _doInitialize side: the pre-fix
+    // collapsed hasSecret rejection to false and proceeded to
+    // generateAndStoreSecret. With the Round-2 native non-destructive
+    // guard, the native side would then reject with
+    // VAULT_ERROR_ALREADY_INITIALIZED if the alias really did exist —
+    // but the JS layer's surfaced error would be misleading (the
+    // native module rejects but the root cause is the swallowed
+    // hasSecret failure on the JS side). Surfacing the rejection
+    // verbatim makes the failure mode auditable.
+    const vault = new BiometricVault();
+    const transient = withErrorCode('VAULT_ERROR', 'keystore probe boom');
+    native.hasSecret.mockRejectedValueOnce(transient);
+
+    await expect(vault.initialize({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR',
+    });
+    // generateAndStoreSecret must NOT have been called.
+    expect(native.generateAndStoreSecret).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
 // Additional coverage — mapNativeErrorToVaultError helper
 // ===========================================================================
 describe('mapNativeErrorToVaultError', () => {
