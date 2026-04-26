@@ -389,6 +389,84 @@ describe('useSessionStore', () => {
         ]),
       );
     });
+
+    it('Round-8 F5: ALSO clears the vault INITIALIZED sentinel (enbox.vault.initialized) so a subsequent hydrate does not see a stale orphan-detection signal', async () => {
+      // Round-7 F2 added ``enbox:enbox.vault.initialized`` as an
+      // orphan-detection signal in ``hydrate()``. Round-8 F5
+      // surfaces the matching cleanup gap: the pre-fix ``reset()``
+      // only deleted ``session:state`` and the biometric-state key,
+      // leaving ``enbox.vault.initialized='true'`` resident on disk.
+      // The post-fix code symmetrically clears the same key
+      // ``hydrate()`` reads, so a session-store reset → next
+      // hydrate cycle cannot misroute a fresh-install user via
+      // a stale orphan-promotion signal.
+      useSessionStore.getState().completeOnboarding();
+      useSessionStore.getState().setBiometricStatus('ready');
+
+      await useSessionStore.getState().reset();
+
+      const deletedKeys = mockedDeleteSecureItem.mock.calls.map(([k]) => k);
+      expect(deletedKeys).toEqual(
+        expect.arrayContaining([
+          'session:state',
+          'enbox:enbox.vault.biometric-state',
+          // The new key. Without this, Round-7 F2's hydrate orphan
+          // detection could trigger on a stale signal after a
+          // direct session reset.
+          'enbox:enbox.vault.initialized',
+        ]),
+      );
+    });
+
+    it('Round-8 F5: subsequent hydrate after reset does NOT promote orphan when a stale INITIALIZED key WOULD have been left behind (end-to-end regression)', async () => {
+      // Round-7 F2 + Round-8 F5 end-to-end: pre-Round-8, the order
+      // (initialize → reset → hydrate) on a SecureStorage backend
+      // that keeps the deleted ``session:state`` and biometric-state
+      // keys cleanly cleared but happens to retain the
+      // INITIALIZED key would mis-promote the user as an orphan.
+      // We simulate the post-fix behaviour: the test mock observes
+      // the reset call's delete of all three keys, and the next
+      // hydrate (with all three keys absent) routes as fresh-install.
+      const persistedKeys = new Map<string, string>();
+      mockedGetSecureItem.mockImplementation(async (key) => persistedKeys.get(key) ?? null);
+      mockedSetSecureItem.mockImplementation(async (key, value) => {
+        persistedKeys.set(key, value);
+      });
+      mockedDeleteSecureItem.mockImplementation(async (key) => {
+        persistedKeys.delete(key);
+      });
+      // Pre-condition: persisted state simulating a previously-
+      // initialized vault.
+      persistedKeys.set('session:state', JSON.stringify({
+        hasCompletedOnboarding: true,
+        hasIdentity: true,
+        isPendingFirstBackup: false,
+      }));
+      persistedKeys.set('enbox:enbox.vault.biometric-state', 'ready');
+      persistedKeys.set('enbox:enbox.vault.initialized', 'true');
+
+      // Reset must clear ALL three keys.
+      await useSessionStore.getState().reset();
+      expect(persistedKeys.has('session:state')).toBe(false);
+      expect(persistedKeys.has('enbox:enbox.vault.biometric-state')).toBe(false);
+      expect(persistedKeys.has('enbox:enbox.vault.initialized')).toBe(false);
+
+      // hasSecret stays false (no native secret) — even if it were
+      // ``true``, the orphan-promotion predicate now needs
+      // ``vaultPriorInitialized=true`` which is gone.
+      const native = require('@specs/NativeBiometricVault').default as {
+        hasSecret: jest.Mock;
+      };
+      native.hasSecret.mockResolvedValue(false);
+
+      // Next hydrate: must NOT promote orphan, must NOT carry
+      // hasIdentity from the stale state.
+      await useSessionStore.getState().hydrate();
+      const state = useSessionStore.getState();
+      expect(state.hasCompletedOnboarding).toBe(false);
+      expect(state.hasIdentity).toBe(false);
+      expect(state.isPendingFirstBackup).toBe(false);
+    });
   });
 
   // ===================================================================

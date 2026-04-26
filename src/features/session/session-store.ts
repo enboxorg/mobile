@@ -554,6 +554,30 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Always clear the biometric-state flag so a post-reset install
       // does not resurrect an old `'invalidated'` signal.
       deleteSecureItem(BIOMETRIC_STATE_RAW_KEY).catch(() => undefined),
+      // Round-8 Finding 5: also clear the vault's
+      // `INITIALIZED_STORAGE_KEY` sentinel. Round-7 F2 added this
+      // key as an orphan-detection signal in `hydrate()` (the
+      // ``vaultPriorInitialized`` predicate), but the pre-fix
+      // ``reset()`` only deleted the session and biometric-state
+      // keys — leaving ``enbox.vault.initialized='true'`` resident
+      // on disk. ``agentStore.reset()`` calls ``vault.reset()``
+      // which does delete this key, but the session-store's
+      // ``reset()`` is also called directly by tests and by
+      // selected error-recovery paths. After such a direct reset,
+      // a subsequent ``hydrate()`` would observe
+      // ``vaultPriorInitialized=true`` AND no native secret (we
+      // just reset) and fall through to the regular fresh-install
+      // path — but only because ``hasSecret=false`` short-
+      // circuits the orphan check first. The day a future change
+      // makes ``hasSecret`` return ``true`` after a session reset
+      // (e.g. orphaned native secret recovery interacts oddly
+      // with a pending reset), the stale INITIALIZED would
+      // trigger orphan promotion against a vault that should be
+      // treated as fresh — silently re-routing the user to
+      // RecoveryPhrase backup of a wallet they've not provisioned
+      // in this lifecycle. Symmetric cleanup is the right
+      // posture: anything ``hydrate()`` reads, ``reset()`` clears.
+      deleteSecureItem(VAULT_INITIALIZED_RAW_KEY).catch(() => undefined),
     ]);
     set({
       isHydrated: true,

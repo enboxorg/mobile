@@ -809,6 +809,52 @@ describe('NativeBiometricVault — requireBiometrics flag semantics', () => {
     });
   });
 
+  it('Round-8 F4: DEFAULT mock (no mockRejectedValueOnce) ALSO rejects on requireBiometrics=false — parity with native, no test override needed', async () => {
+    // Round-8 Finding 4: the pre-fix Jest mock accepted
+    // ``requireBiometrics: false`` silently. Tests that want the
+    // rejection had to install a one-off ``mockRejectedValueOnce``
+    // (see the test above this one). That meant a JS test exercising
+    // a caller bug (e.g. forgetting to spread default options and
+    // accidentally passing ``requireBiometrics: false``) would PASS in
+    // CI but FAIL on a real device. The post-fix mock now mirrors the
+    // native behaviour by default — no mock override needed.
+    //
+    // We deliberately do NOT install ``mockRejectedValueOnce`` here:
+    // the rejection must come from the DEFAULT mock implementation
+    // (``mockBiometricVaultDefaultGenerate`` in jest.setup.js).
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret('enbox.wallet.root', {
+        requireBiometrics: false,
+        invalidateOnEnrollmentChange: true,
+      }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+  });
+
+  it('Round-8 F4: DEFAULT mock accepts requireBiometrics=true (no false-positive rejection that would block every other test)', async () => {
+    // Negative-parity: the F4 fix must NOT over-reject on the
+    // canonical ``requireBiometrics: true`` payload that every
+    // production caller uses.
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret('enbox.wallet.root', {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('Round-8 F4: DEFAULT mock accepts requireBiometrics OMITTED (treated as default-true on native; mock matches)', async () => {
+    // The native modules treat the omitted flag as ``true``
+    // (``options.hasKey("requireBiometrics") ? ... : true`` on
+    // Android; ``isKindOfClass:NSNumber ? ... : YES`` on iOS). The
+    // mock must match: omitting the flag is acceptable, NOT a
+    // VAULT_ERROR.
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret('enbox.wallet.root', {
+        invalidateOnEnrollmentChange: true,
+      } as any),
+    ).resolves.toBeUndefined();
+  });
+
   it('generateAndStoreSecret with requireBiometrics=true resolves (biometric-gated happy path)', async () => {
     await expect(
       NativeBiometricVault.generateAndStoreSecret('enbox.wallet.root', {

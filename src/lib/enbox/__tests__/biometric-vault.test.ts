@@ -1292,6 +1292,275 @@ describe('BiometricVault — Round-7 regressions (F1: NOT_FOUND-from-getSecret r
 // ===========================================================================
 // Additional coverage — mapNativeErrorToVaultError helper
 // ===========================================================================
+// ===========================================================================
+// Round-8 review regressions — see the BiometricVault round-8 review for
+// motivation. Findings addressed here:
+//   F2 (Medium): cross-method serialization — `initialize()` and `unlock()`
+//                must not race the native sequence against each other.
+//   F3 (Medium): `hexToBytes()` strict validation — non-hex input must fail
+//                closed instead of silently coercing NaN to 0.
+// (F1 of round 8 lives in the emulator driver self-test — see
+//  ``scripts/emulator-debug-flow.ts``.)
+// (F4 of round 8 lives in the native-biometric-vault Jest mock — see
+//  ``jest.setup.js``; the regression coverage is in
+//  ``src/lib/enbox/__tests__/native-biometric-vault.test.ts`` below.)
+// (F5 of round 8 lives in the session-store reset path — see
+//  ``src/features/session/session-store.test.ts`` for the regression test.)
+// ===========================================================================
+describe('BiometricVault — Round-8 regressions (F2: initialize/unlock cross-method serialization, F3: hexToBytes strict validation)', () => {
+  // -------------------------------------------------------------------------
+  // F2: cross-method mutex
+  // -------------------------------------------------------------------------
+  it('F2: concurrent initialize() while unlock() is pending — initialize awaits unlock before its native sequence', async () => {
+    // Setup: a native ``hasSecret``/``getSecret`` pair that takes
+    // a measurable time. Our concurrent ``initialize()`` must NOT
+    // invoke ``hasSecret`` before unlock's getSecret has resolved
+    // — otherwise the two native sequences interleave and
+    // generateAndStoreSecret could see the alias mid-getSecret.
+    const { api, store } = makeSecureStorage();
+    // Pre-provision so unlock() actually has work to do.
+    const seedVault = new BiometricVault({ secureStorage: api });
+    await seedVault.initialize({});
+    expect(store.get(INITIALIZED_STORAGE_KEY)).toBe('true');
+
+    // Build a second vault for the actual race (sharing the native store
+    // via the global jest mock).
+    const vault = new BiometricVault({ secureStorage: api });
+
+    // Stretch unlock's getSecret so the race window is observable.
+    const callOrder: string[] = [];
+    let releaseGetSecret: () => void = () => undefined;
+    const getSecretGate = new Promise<void>((resolve) => {
+      releaseGetSecret = resolve;
+    });
+    const realGetSecret = native.getSecret.getMockImplementation();
+    native.getSecret.mockImplementation(async (alias: string, prompt: any) => {
+      callOrder.push('getSecret:start');
+      await getSecretGate;
+      callOrder.push('getSecret:end');
+      return realGetSecret!(alias, prompt);
+    });
+    // Wrap hasSecret so we can see if the second initialize() jumps the gun.
+    const realHasSecret = native.hasSecret.getMockImplementation();
+    native.hasSecret.mockImplementation(async (alias: string) => {
+      callOrder.push('hasSecret');
+      return realHasSecret!(alias);
+    });
+
+    const unlockPromise = vault.unlock({});
+    // Allow the unlock task body to enqueue and start its native sequence.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Now fire a concurrent initialize(). Because Round-8 F2 wires
+    // the cross-method mutex, this must wait until ``unlockPromise``
+    // settles before its own ``hasSecret`` runs.
+    const initPromise = vault.initialize({}).catch((e) => e);
+
+    // Verify hasSecret was called exactly once so far (by unlock).
+    // If the F2 mutex is missing, initialize would call hasSecret here
+    // and we'd see TWO entries.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(callOrder.filter((s) => s === 'hasSecret').length).toBe(1);
+
+    // Release unlock's getSecret and let it complete.
+    releaseGetSecret();
+    await unlockPromise;
+    const initResult = await initPromise;
+
+    // initialize() ran its hasSecret AFTER unlock's getSecret completed,
+    // so the call order shows hasSecret -> getSecret -> hasSecret (init's).
+    const hasSecretIndices = callOrder
+      .map((s, i) => (s === 'hasSecret' ? i : -1))
+      .filter((i) => i >= 0);
+    const getSecretEndIndex = callOrder.indexOf('getSecret:end');
+    expect(hasSecretIndices.length).toBe(2);
+    expect(hasSecretIndices[1]).toBeGreaterThan(getSecretEndIndex);
+
+    // initialize() rejects with ALREADY_INITIALIZED (the alias still
+    // exists post-unlock), which is the correct serialized outcome.
+    expect(initResult).toMatchObject({ code: 'VAULT_ERROR_ALREADY_INITIALIZED' });
+
+    // Restore mock implementations.
+    native.getSecret.mockImplementation(realGetSecret!);
+    native.hasSecret.mockImplementation(realHasSecret!);
+  });
+
+  it('F2: concurrent unlock() while initialize() is pending — unlock awaits initialize before its native sequence', async () => {
+    // Symmetric counterpart of the above. A user kicks off
+    // first-launch setup; before initialize finishes, an event-driven
+    // resume tries to unlock. Without F2, unlock's hasSecret races
+    // initialize's generateAndStoreSecret. With F2, unlock waits.
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+
+    const callOrder: string[] = [];
+    let releaseGenerate: () => void = () => undefined;
+    const generateGate = new Promise<void>((resolve) => {
+      releaseGenerate = resolve;
+    });
+    const realGenerate = native.generateAndStoreSecret.getMockImplementation();
+    native.generateAndStoreSecret.mockImplementation(
+      async (alias: string, opts: any) => {
+        callOrder.push('generate:start');
+        await generateGate;
+        callOrder.push('generate:end');
+        return realGenerate!(alias, opts);
+      },
+    );
+    const realHasSecret = native.hasSecret.getMockImplementation();
+    native.hasSecret.mockImplementation(async (alias: string) => {
+      callOrder.push('hasSecret');
+      return realHasSecret!(alias);
+    });
+
+    const initPromise = vault.initialize({});
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Concurrent unlock; must NOT call hasSecret until initialize completes.
+    const unlockPromise = vault.unlock({}).catch((e) => e);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    // Only initialize's hasSecret should have run.
+    expect(callOrder.filter((s) => s === 'hasSecret').length).toBe(1);
+
+    // Release generate, let initialize finish.
+    releaseGenerate();
+    await initPromise;
+    await unlockPromise;
+
+    const hasSecretIndices = callOrder
+      .map((s, i) => (s === 'hasSecret' ? i : -1))
+      .filter((i) => i >= 0);
+    const generateEndIndex = callOrder.indexOf('generate:end');
+    expect(hasSecretIndices.length).toBe(2);
+    expect(hasSecretIndices[1]).toBeGreaterThan(generateEndIndex);
+
+    // Restore mock implementations.
+    native.generateAndStoreSecret.mockImplementation(realGenerate!);
+    native.hasSecret.mockImplementation(realHasSecret!);
+  });
+
+  it('F2: same-method memoization is preserved (concurrent initialize() x 2 -> single native generateAndStoreSecret)', async () => {
+    // Negative-parity for F2: the cross-method mutex must NOT break
+    // same-method memoization (concurrent initialize() returning the
+    // same in-flight promise). This regression target keeps the
+    // VAL-VAULT-028 mutex contract intact.
+    const vault = new BiometricVault();
+    native.generateAndStoreSecret.mockClear();
+    const [a, b] = await Promise.all([vault.initialize({}), vault.initialize({})]);
+    expect(a).toBe(b);
+    expect(native.generateAndStoreSecret).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // F3: hexToBytes strict validation
+  // -------------------------------------------------------------------------
+  it('F3: getSecret returning a 64-char NON-hex payload (zz...) fails CLOSED with VAULT_ERROR — must not unlock to a deterministic all-zero seed', async () => {
+    // The exact regression the reviewer flagged: parseInt('zz', 16)
+    // returns NaN, which Uint8Array coerces to 0. A 64-char non-hex
+    // payload from a corrupt or malicious native module would
+    // silently decode to a 32-byte all-zero buffer (a perfectly
+    // valid BIP-39 entropy that maps to a deterministic but wrong
+    // wallet — a privacy / correctness disaster). The post-fix
+    // hexToBytes throws on the regex check.
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+    await vault.lock();
+
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockResolvedValueOnce('zz'.repeat(32));
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR',
+      message: expect.stringMatching(/non-hexadecimal/i),
+    });
+    // Vault is left locked.
+    expect(vault.isLocked()).toBe(true);
+    // No persisted DID side-effect. Nothing was unlocked, so getDid rejects.
+    await expect(vault.getDid()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
+  });
+
+  it('F3: getSecret returning a 64-char mixed hex+non-hex payload (e.g. "0g".repeat(32)) fails CLOSED', async () => {
+    // Single-character non-hex digit (``g``) interspersed with a
+    // valid digit. The pre-fix code would silently decode this to
+    // bytes whose high nibble was correct and low nibble was 0 —
+    // again a deterministic-but-wrong entropy.
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+    await vault.lock();
+
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockResolvedValueOnce('0g'.repeat(32));
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR',
+      message: expect.stringMatching(/non-hexadecimal/i),
+    });
+    expect(vault.isLocked()).toBe(true);
+  });
+
+  it('F3: getSecret returning a valid 64-char hex (canonical lower-case) still succeeds — strict validation does not over-reject', async () => {
+    // Negative-parity: the strict validation must NOT reject the
+    // canonical lower-case hex output the native modules promise.
+    // This pins the happy path so the F3 fix doesn't ship as
+    // "lock everything out".
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+    expect(vault.isLocked()).toBe(false);
+  });
+
+  it('F3: getSecret returning UPPER-case hex still succeeds — regex is case-insensitive (the native lower-case contract is enforced separately by the native modules)', async () => {
+    // The JS hex parser must accept upper-case so a future native
+    // emitting ``ABCD...`` (or a mock emitting it for test purposes)
+    // still works. The lower-case contract is enforced one layer
+    // down (in the native modules themselves) — Round-5 covered that.
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+    await vault.lock();
+
+    // Use the actual hex this vault was provisioned with but uppercased.
+    const provisionCall = native.generateAndStoreSecret.mock.calls.find(
+      (c) => c[0] === WALLET_ROOT_KEY_ALIAS,
+    );
+    const lowerHex: string = provisionCall![1].secretHex;
+    const upperHex = lowerHex.toUpperCase();
+    expect(upperHex).toMatch(/^[0-9A-F]{64}$/);
+
+    native.hasSecret.mockResolvedValueOnce(true);
+    native.getSecret.mockResolvedValueOnce(upperHex);
+
+    await expect(vault.unlock({})).resolves.toBeUndefined();
+    expect(vault.isLocked()).toBe(false);
+  });
+
+  it('F3: getSecret returning ODD-length hex fails CLOSED (existing odd-length guard preserved)', async () => {
+    const { api } = makeSecureStorage();
+    const vault = new BiometricVault({ secureStorage: api });
+    await vault.initialize({});
+    await vault.lock();
+
+    native.hasSecret.mockResolvedValueOnce(true);
+    // 63 chars — odd length.
+    native.getSecret.mockResolvedValueOnce('a'.repeat(63));
+
+    await expect(vault.unlock({})).rejects.toMatchObject({
+      code: 'VAULT_ERROR',
+      message: expect.stringMatching(/odd-length/i),
+    });
+    expect(vault.isLocked()).toBe(true);
+  });
+});
+
 describe('mapNativeErrorToVaultError', () => {
   it.each([
     ['USER_CANCELED', 'VAULT_ERROR_USER_CANCELED'],

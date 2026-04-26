@@ -313,14 +313,58 @@ async function defaultDidFactory({
   return (await DidDht.create({ keyManager: keyManager as any, options })) as BearerDid;
 }
 
-/** Decode a lower-case hex string into a Uint8Array; throws on odd length. */
+/**
+ * Decode a hex string into a Uint8Array. Throws on odd length OR any
+ * non-hex character.
+ *
+ * Round-8 Finding 3: the pre-fix implementation used a bare
+ * ``parseInt(slice, 16)`` which silently coerces ``NaN`` (the result
+ * for non-hex digits like ``'zz'``) to ``0`` when assigned into a
+ * ``Uint8Array``. That meant a 64-character non-hex payload from a
+ * corrupt or buggy native module — say ``'zz'.repeat(32)`` — would
+ * decode to a 32-byte all-zero buffer, which is a perfectly valid
+ * BIP-39 entropy and would unlock to a deterministic but completely
+ * wrong wallet. The post-fix code:
+ *   (1) regex-validates the entire input as ``[0-9a-fA-F]*`` BEFORE
+ *       any per-byte parsing, so we fail loud on the cheapest signal;
+ *   (2) belt-and-braces: also checks ``Number.isNaN(byte)`` per byte
+ *       in case the regex is somehow bypassed (e.g. via a future
+ *       caller that mutates the input string between validation and
+ *       parsing). The duplication is intentional — non-hex input is
+ *       a security-critical failure-closed condition and we want
+ *       both gates active.
+ *
+ * The regex accepts both upper- and lower-case hex because the
+ * native modules' contract is "lower-case" but the JS layer must
+ * still parse a payload that might come from a Mock / future native
+ * version emitting either case. The strict-lowercase contract is
+ * enforced separately in ``RCTNativeBiometricVault`` /
+ * ``NativeBiometricVaultModule``.
+ */
+const HEX_PATTERN = /^[0-9a-fA-F]*$/;
 function hexToBytes(hex: string): Uint8Array {
   if (hex.length % 2 !== 0) {
     throw new VaultError('VAULT_ERROR', 'Odd-length hex string');
   }
+  if (!HEX_PATTERN.test(hex)) {
+    throw new VaultError(
+      'VAULT_ERROR',
+      'Hex string contains non-hexadecimal characters',
+    );
+  }
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    const byte = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    if (Number.isNaN(byte)) {
+      // Defensive: HEX_PATTERN should have already caught this. If
+      // we ever reach here, fail closed with the same diagnostic so
+      // the caller can't accidentally consume an all-zero buffer.
+      throw new VaultError(
+        'VAULT_ERROR',
+        `Non-hex byte at offset ${i} (got ${JSON.stringify(hex.slice(i * 2, i * 2 + 2))})`,
+      );
+    }
+    out[i] = byte;
   }
   return out;
 }
@@ -545,6 +589,30 @@ export class BiometricVault
 
   // Memoized in-flight promises so concurrent initialize()/unlock() calls
   // serialize through a single native invocation.
+  //
+  // Round-8 Finding 2: ``_pendingInitialize`` and ``_pendingUnlock`` are
+  // ALSO used for cross-method serialization. The pre-fix code only
+  // memoized same-method calls (concurrent ``initialize()`` shared a
+  // promise; concurrent ``unlock()`` shared a promise) but
+  // ``initialize() + unlock()`` running concurrently could race the
+  // native ``hasSecret`` / ``generateAndStoreSecret`` / ``getSecret``
+  // calls. Cocurrent setup/unlock typically can't happen in
+  // production (the agent-store decides between "first launch ⇒
+  // initialize" and "subsequent launch ⇒ unlock" before either is
+  // called), but a tab/window resume race or test teardown could
+  // observe both at the same time. The post-fix protocol:
+  //   * each method awaits the OTHER pending promise inside its
+  //     async task body (NOT before installing its own pending
+  //     promise — that would let a follow-up call see the empty
+  //     slot during the await, defeating same-method memoization);
+  //   * after the prior op finishes, the method proceeds to its
+  //     own native sequence;
+  //   * a thrown error from the prior op is swallowed (the prior
+  //     op's caller handles it; we only care that the slot is
+  //     cleared so we can run our op next).
+  // The memoization invariant is preserved: concurrent identical
+  // calls still see the in-flight promise immediately at method
+  // entry and return it verbatim.
   private _pendingInitialize: Promise<string> | undefined;
   private _pendingUnlock: Promise<void> | undefined;
 
@@ -599,7 +667,24 @@ export class BiometricVault
     if (this._pendingInitialize) {
       return this._pendingInitialize;
     }
-    const task = this._doInitialize(params);
+    // Round-8 F2: install pending slot SYNCHRONOUSLY (so a
+    // concurrent ``initialize()`` call sees the in-flight promise
+    // immediately) and inside the task body, await any pending
+    // ``unlock()`` BEFORE doing any native work. This serializes
+    // initialize/unlock against each other while preserving the
+    // same-method memoization invariant.
+    const task = (async () => {
+      const priorUnlock = this._pendingUnlock;
+      if (priorUnlock) {
+        try {
+          await priorUnlock;
+        } catch {
+          // The prior unlock's caller owns the error; we only need
+          // to know the slot is free so we can continue.
+        }
+      }
+      return this._doInitialize(params);
+    })();
     this._pendingInitialize = task;
     try {
       return await task;
@@ -778,7 +863,25 @@ export class BiometricVault
     if (this._pendingUnlock) {
       return this._pendingUnlock;
     }
-    const task = this._doUnlock();
+    // Round-8 F2: symmetric counterpart of the initialize() guard
+    // above. Install pending slot synchronously, then await any
+    // pending ``initialize()`` inside the task body before doing
+    // any native work. This prevents an unlock-while-initializing
+    // race that would otherwise see ``hasSecret=false`` mid-
+    // provision and route the user to "set up" — destroying the
+    // wallet that was about to be provisioned.
+    const task = (async () => {
+      const priorInitialize = this._pendingInitialize;
+      if (priorInitialize) {
+        try {
+          await priorInitialize;
+        } catch {
+          // The prior initialize's caller owns the error; we only
+          // need to know the slot is free so we can continue.
+        }
+      }
+      return this._doUnlock();
+    })();
     this._pendingUnlock = task;
     try {
       return await task;

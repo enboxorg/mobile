@@ -91,6 +91,31 @@ function mockBiometricVaultDeterministicHex(seed, byteLength) {
 /* eslint-enable no-bitwise */
 
 function mockBiometricVaultDefaultGenerate(alias, options) {
+  // Round-8 Finding 4: enforce ``requireBiometrics`` parity with the
+  // native modules. Both Android (``NativeBiometricVaultModule.kt``)
+  // and iOS (``RCTNativeBiometricVault.mm``) reject when the caller
+  // supplies ``requireBiometrics: false`` because the biometric
+  // vault MUST gate with class-3 biometrics / BiometryCurrentSet —
+  // there is no unauthenticated fallback path. The pre-fix mock
+  // accepted the flag silently, so a JS test could pass for a
+  // caller bug that real devices reject. The mock now mirrors the
+  // native behaviour: undefined / true ⇒ pass; explicit ``false`` ⇒
+  // reject with the same VAULT_ERROR diagnostic the native modules
+  // emit. We accept ``true`` and ``undefined`` as "biometric-gated"
+  // because both natives default to "biometric required" when the
+  // flag is omitted.
+  const hasRequireBiometricsKey =
+    options !== null &&
+    typeof options === 'object' &&
+    Object.prototype.hasOwnProperty.call(options, 'requireBiometrics');
+  if (hasRequireBiometricsKey && options.requireBiometrics === false) {
+    return Promise.reject(
+      mockBiometricVaultMakeError(
+        'VAULT_ERROR',
+        'requireBiometrics=false is not supported by the biometric vault',
+      ),
+    );
+  }
   // Non-destructive contract (VAL-VAULT-030): the native API rejects
   // when the alias already exists. Mirror that here so JS-only tests
   // exercise the same surface as the Android / iOS implementations.

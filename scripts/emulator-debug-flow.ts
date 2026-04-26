@@ -797,32 +797,75 @@ interface AdbLike {
 }
 
 /**
- * Round-7 Finding 5: extract the focused window descriptor from
- * ``dumpsys window windows`` output. Returns the contents inside
- * ``Window{...}`` from the first ``mCurrentFocus=`` line, falling back
- * to ``mFocusedWindow=`` if ``mCurrentFocus`` is missing (older API
- * levels emit only the latter). Returns ``null`` when neither line is
- * present or neither line has a parseable ``Window{...}`` segment.
+ * Round-7 Finding 5 + Round-8 Finding 1: extract the focused window
+ * descriptor from a dumpsys output. Returns the contents inside
+ * ``Window{...}`` (for ``mCurrentFocus`` / ``mFocusedWindow``) or
+ * inside ``ActivityRecord{...}`` (for ``mFocusedApp`` / ``mResumedActivity``)
+ * — whichever is present first.
+ *
+ * Round-8 F1 widened the parser surface because Round-7's narrow
+ * ``mCurrentFocus`` / ``mFocusedWindow`` regex broke the CI debug
+ * workflow on the API-31+ Pixel emulator: ``dumpsys window windows``
+ * on those API levels does NOT reliably emit ``mCurrentFocus`` (it
+ * was moved into ``dumpsys window`` / ``dumpsys window displays``,
+ * see e.g. https://stackoverflow.com/q/59397543). The result was a
+ * RecoveryPhrase capture that threw "dumpsys reported NO foreground
+ * window" before ``screencap('recovery-phrase')`` /
+ * ``dumpUi('recovery-phrase')`` could capture the privacy-gate
+ * audit trail — exactly the regression Round-6 F5 was supposed to
+ * prevent. The fixes are layered:
+ *   (1) the IO wrapper now calls ``dumpsys window`` (no ``windows``
+ *       arg) which always emits focus info on every Android version
+ *       we care about;
+ *   (2) this parser also recognises ``mFocusedApp=`` (an
+ *       ActivityRecord, not a Window) so a dump that contains the
+ *       activity-level focus marker but lacks the window-level
+ *       marker still resolves to a descriptor;
+ *   (3) recovery-phrase artifacts are now captured BEFORE the
+ *       assertion so a parser regression cannot silently zero out
+ *       the audit trail (see ``mainFlow``).
  *
  * Examples of what we parse out:
- *   ``mCurrentFocus=Window{def456 u0 org.enbox.mobile/...MainActivity}``
- *     → ``"def456 u0 org.enbox.mobile/...MainActivity"``
- *   ``mCurrentFocus=null``
- *     → ``null`` (no window currently has focus)
+ *   ``mCurrentFocus=Window{def456 u0 org.enbox.mobile/.MainActivity}``
+ *     → ``"def456 u0 org.enbox.mobile/.MainActivity"``
+ *   ``mFocusedApp=ActivityRecord{def456 u0 org.enbox.mobile/.MainActivity t12}``
+ *     → ``"def456 u0 org.enbox.mobile/.MainActivity t12"``
+ *   ``mResumedActivity=ActivityRecord{... org.enbox.mobile/.MainActivity ...}``
+ *     → the full descriptor
+ *   ``mCurrentFocus=null`` / no marker at all
+ *     → ``null``
+ *
+ * The wrapper {Window,ActivityRecord} type is not part of the
+ * returned descriptor — callers only care about whether the
+ * package boundary ``<package>/`` appears inside the descriptor and
+ * (for FLAG_SECURE search) the matching window block.
  */
 function parseFocusedWindowDescriptor(
   dumpsysOutput: string,
 ): string | null {
   if (!dumpsysOutput) return null;
-  // Prefer ``mCurrentFocus=`` (post-API 30 canonical name); fall back
-  // to ``mFocusedWindow=`` for older devices. Match the FIRST
-  // occurrence of either — system_server emits one per display, and
-  // the default display is always first.
-  const focusRegex = /m(?:CurrentFocus|FocusedWindow)=Window\{([^}]+)\}/;
-  const match = dumpsysOutput.match(focusRegex);
-  if (!match) return null;
-  const desc = (match[1] ?? '').trim();
-  return desc.length === 0 ? null : desc;
+  // Try focus markers in order of preference. The first match wins.
+  // ``mCurrentFocus`` (Window) is the most canonical — it is the
+  // exact window that owns input focus. ``mFocusedWindow`` is the
+  // older API-level alias for the same concept. ``mFocusedApp`` /
+  // ``mResumedActivity`` are activity-level fallbacks that cover the
+  // post-API-31 case where the per-window marker has been moved out
+  // of ``dumpsys window windows`` — both still uniquely identify the
+  // app whose UI is on top, which is sufficient for the privacy-gate
+  // assertion.
+  const patterns: ReadonlyArray<RegExp> = [
+    /mCurrentFocus=Window\{([^}]+)\}/,
+    /mFocusedWindow=Window\{([^}]+)\}/,
+    /mFocusedApp=ActivityRecord\{([^}]+)\}/,
+    /mResumedActivity=ActivityRecord\{([^}]+)\}/,
+  ];
+  for (const re of patterns) {
+    const m = dumpsysOutput.match(re);
+    if (!m) continue;
+    const desc = (m[1] ?? '').trim();
+    if (desc.length > 0) return desc;
+  }
+  return null;
 }
 
 /**
@@ -839,13 +882,28 @@ function extractWindowBlockByDescriptor(
   descriptor: string,
 ): string | null {
   if (!dumpsysOutput || !descriptor) return null;
-  const escaped = descriptor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Anchor on the literal ``Window{<descriptor>}`` then greedy-consume
-  // until the next ``Window{`` or end of input. The cutoff on
-  // ``Window{`` (with the brace) avoids false truncation on attribute
-  // lines that happen to start with the bare word "Window".
+  // Round-8 F1: match by the leading id token, NOT the full
+  // descriptor. The four focus-marker variants emit different
+  // descriptor shapes:
+  //   ``mCurrentFocus=Window{<id> u<n> <pkg>/<cmp>}``
+  //   ``mFocusedWindow=Window{<id> u<n> <pkg>/<cmp>}``
+  //   ``mFocusedApp=ActivityRecord{<id> u<n> <pkg>/<cmp> t<task>}``
+  //     ↑ trailing ``t<taskId>`` is NOT present in the Window{...}
+  //     block we want to look up.
+  //   ``mResumedActivity=ActivityRecord{<id> u<n> <pkg>/<cmp> t<task>}``
+  // The first whitespace-separated token (``<id>``) is a unique
+  // handle that appears in BOTH the focus marker and the matching
+  // ``Window{<id> ...}`` block, so we anchor on that.
+  const id = descriptor.split(/\s+/)[0] ?? '';
+  if (!id) return null;
+  const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Anchor on ``Window{<id>`` (no closing brace yet — the rest of
+  // the descriptor follows) then greedy-consume until the next
+  // ``Window{`` or end of input. The cutoff on ``Window{`` (with
+  // the brace) avoids false truncation on attribute lines that
+  // happen to start with the bare word "Window".
   const blockRegex = new RegExp(
-    `Window\\{${escaped}\\}([\\s\\S]*?)(?=Window\\{|$)`,
+    `Window\\{${escapedId}[^}]*\\}([\\s\\S]*?)(?=Window\\{|$)`,
   );
   const m = dumpsysOutput.match(blockRegex);
   return m ? (m[1] ?? '') : null;
@@ -895,8 +953,9 @@ function flagSecureOnFocusedPackageWindow(
 }
 
 /**
- * IO wrapper: run ``adb shell dumpsys window windows`` and assert
- * that the FOCUSED window (per ``mCurrentFocus``) belongs to
+ * IO wrapper: run ``adb shell dumpsys window`` (NOT
+ * ``dumpsys window windows`` — see Round-8 F1 below) and assert that
+ * the FOCUSED window (per ``mCurrentFocus``) belongs to
  * ``APP_PACKAGE`` and carries ``FLAG_SECURE``. Throw a descriptive
  * ``Error`` on any negative outcome.
  *
@@ -908,41 +967,126 @@ function flagSecureOnFocusedPackageWindow(
  * window did not — exactly the regression mode the assertion is
  * supposed to detect.
  *
+ * Round-8 Finding 1 fixes a CI-blocking regression introduced by
+ * Round-7 F5 itself: on the API-31+ Pixel emulator we use,
+ * ``dumpsys window windows`` does not reliably emit any
+ * ``mCurrentFocus`` / ``mFocusedWindow`` line — the focus markers
+ * were moved into the broader ``dumpsys window`` (no ``windows``
+ * arg) and ``dumpsys window displays`` outputs. Both Round-7 CI
+ * runs failed at this assertion with "dumpsys reported NO
+ * foreground window" BEFORE the recovery-phrase
+ * ``screencap`` / ``dumpUi`` calls could capture the privacy-gate
+ * audit trail. Three layered fixes:
+ *   (1) we now run ``dumpsys window`` (no args) which always emits
+ *       focus info on every Android version we target;
+ *   (2) ``parseFocusedWindowDescriptor`` accepts ``mFocusedApp`` /
+ *       ``mResumedActivity`` as fallbacks so even an oddly-shaped
+ *       ``dumpsys window`` (e.g. mid-transition) still resolves;
+ *   (3) we retry up to a few times with a short sleep between each
+ *       attempt — Android transitions briefly emit
+ *       ``mCurrentFocus=null`` while the new window is being
+ *       installed, and the dumpsys we capture before the next
+ *       frame has settled would otherwise hard-fail.
+ * ``mainFlow`` separately captures the recovery-phrase artifacts
+ * BEFORE this assertion so even if (1)-(3) collectively still fail,
+ * the audit trail is preserved (the placeholder PNG and sanitized
+ * XML are written by name, regardless of FLAG_SECURE state).
+ *
  * The default ``adbRunner`` is the production ``adb`` binary; the
  * ``adbRunner`` parameter is for the no-device self-test, which feeds
  * synthetic dumpsys fixtures so the parser branches stay covered in
  * CI even without an emulator in scope.
+ *
+ * ``stabilizeAttempts`` controls how many dumpsys calls we make
+ * while waiting for the focus marker to appear. Each retry is
+ * separated by ``stabilizeIntervalSeconds``. The default of 6 calls
+ * × 0.5s ≈ 3 seconds total wait is enough to cover the typical
+ * window-install transition while staying well under a frame budget
+ * for the normal happy path (dumpsys returns focus on attempt 1).
  */
-function assertFlagSecureOnForeground(
+async function assertFlagSecureOnForeground(
   context: string,
   adbRunner: AdbLike = adb,
-): void {
-  const result = adbRunner(['shell', 'dumpsys', 'window', 'windows'], {
-    check: false,
-  });
-  if (result.returncode !== 0) {
-    throw new Error(
-      `${context}: 'adb shell dumpsys window windows' failed (rc=${result.returncode}); ` +
-        'cannot positively assert FLAG_SECURE on foreground window. ' +
-        `stderr: ${JSON.stringify((result.stderr ?? '').slice(0, 200))}`,
-    );
-  }
-  const out = result.stdout ?? '';
+  stabilizeAttempts = 6,
+  stabilizeIntervalSeconds = 0.5,
+): Promise<void> {
+  let lastResult: {
+    stdout: string;
+    stderr: string;
+    returncode: number;
+  } | null = null;
+  let lastFocusLine = '(mCurrentFocus / mFocusedWindow / mFocusedApp line not found)';
+  let lastDescriptor: string | null = null;
 
-  // Surface focus-line details on every failure so the operator can
-  // tell *why* the assertion failed: missing focus, focus on a
-  // different package, or focus on our package but no FLAG_SECURE.
-  const focusLine =
-    out
-      .split('\n')
-      .find((l) => l.includes('mCurrentFocus=') || l.includes('mFocusedWindow=')) ??
-    '(mCurrentFocus / mFocusedWindow line not found)';
-  const focusedDescriptor = parseFocusedWindowDescriptor(out);
+  for (let attempt = 0; attempt < Math.max(1, stabilizeAttempts); attempt += 1) {
+    // Round-8 F1: ``dumpsys window`` (NOT ``windows``) reliably
+    // emits ``mCurrentFocus`` / ``mFocusedApp`` on API 31+ where
+    // ``dumpsys window windows`` does not. The output is a superset
+    // — it includes the same per-window blocks ``dumpsys window
+    // windows`` emits (under the "WINDOW MANAGER WINDOWS" section)
+    // PLUS the policy/animator/displays/focus sections that contain
+    // the focus markers. ``flagSecureOnFocusedPackageWindow`` works
+    // unchanged on the larger output because
+    // ``extractWindowBlockByDescriptor`` only needs the ``Window{...}``
+    // block for the focused descriptor.
+    lastResult = adbRunner(['shell', 'dumpsys', 'window'], {check: false});
+    if (lastResult.returncode !== 0) {
+      // Don't retry on transport failures — they aren't transient
+      // and the operator needs to see the real adb error fast.
+      throw new Error(
+        `${context}: 'adb shell dumpsys window' failed (rc=${lastResult.returncode}); ` +
+          'cannot positively assert FLAG_SECURE on foreground window. ' +
+          `stderr: ${JSON.stringify((lastResult.stderr ?? '').slice(0, 200))}`,
+      );
+    }
+    const out = lastResult.stdout ?? '';
+
+    // Surface focus-line details on every failure so the operator
+    // can tell *why* the assertion failed: missing focus, focus on a
+    // different package, or focus on our package but no FLAG_SECURE.
+    // We probe four field names because they appear in different
+    // places across Android versions (see
+    // ``parseFocusedWindowDescriptor``).
+    lastFocusLine =
+      out
+        .split('\n')
+        .find(
+          (l) =>
+            l.includes('mCurrentFocus=') ||
+            l.includes('mFocusedWindow=') ||
+            l.includes('mFocusedApp=') ||
+            l.includes('mResumedActivity='),
+        ) ?? lastFocusLine;
+    lastDescriptor = parseFocusedWindowDescriptor(out);
+
+    // Happy path: focus is on our package — break out of the
+    // stabilize loop and proceed to the FLAG_SECURE check.
+    if (lastDescriptor && lastDescriptor.includes(`${APP_PACKAGE}/`)) {
+      break;
+    }
+
+    // Soft retry: focus may be transiently null (between
+    // ``onPause`` and the new window's ``onResume``) or on another
+    // package (e.g. systemui briefly during a navigation
+    // transition). We do NOT short-circuit on "focus on different
+    // package" because the post-fix happy path may genuinely
+    // observe systemui mid-transition for a frame or two; we only
+    // commit to that diagnosis after exhausting the retry budget.
+    if (attempt + 1 < stabilizeAttempts) {
+      await sleep(stabilizeIntervalSeconds);
+    }
+  }
+
+  const out = lastResult?.stdout ?? '';
+  const focusLine = lastFocusLine;
+  const focusedDescriptor = lastDescriptor;
 
   if (!focusedDescriptor) {
     throw new Error(
-      `${context}: dumpsys reported NO foreground window (mCurrentFocus is null/missing). ` +
-        'Cannot positively assert FLAG_SECURE on the recovery-phrase window. Focus line: ' +
+      `${context}: dumpsys reported NO foreground window after ${stabilizeAttempts} attempts ` +
+        `(every ${stabilizeIntervalSeconds}s) — neither mCurrentFocus, mFocusedWindow, mFocusedApp, ` +
+        'nor mResumedActivity yielded a parseable descriptor. Cannot positively assert ' +
+        'FLAG_SECURE on the recovery-phrase window. Focus line: ' +
         JSON.stringify(focusLine.trim()),
     );
   }
@@ -1916,21 +2060,33 @@ async function mainFlow(): Promise<number> {
   // First wait for the RecoveryPhrase screen to mount — any anchor that is
   // always at the top of the screen works.
   await waitForText('Back up your recovery phrase', 45.0);
-  // Round-6 Finding 4: positive assertion on the OS-level FLAG_SECURE
-  // guarantee BEFORE we issue the placeholder screencap. The placeholder
-  // path (SENSITIVE_SCREEN_NAMES short-circuit + foregroundIsSensitive
-  // gate) keeps the emulator suite itself from leaking the mnemonic, but
-  // it cannot prove that MainActivity actually set the secure window
-  // flag. Without this assertion a regression that removed
-  // `window.setFlags(FLAG_SECURE, FLAG_SECURE)` would slip through the
-  // suite green even though Recents thumbnails / screen-mirroring /
-  // accessibility ScreenshotProvider would leak the mnemonic on a real
-  // device. The assertion runs while the recovery-phrase screen is
-  // demonstrably foregrounded (we just anchored on the title) so it
-  // exercises the exact window the user sees during mnemonic display.
-  assertFlagSecureOnForeground('recovery-phrase');
+  // Round-8 Finding 1: capture artifacts BEFORE the FLAG_SECURE
+  // assertion, not after. Round-7 F5 ordered them
+  // assert→screencap→dumpUi, which meant a parser regression
+  // (Round-7 F5 itself caused one — see
+  // ``parseFocusedWindowDescriptor`` — by missing the API-31+
+  // ``dumpsys`` shape) zeroed the privacy-gate audit trail BEFORE
+  // the placeholder PNG and sanitized XML had a chance to land on
+  // disk. Both ``screencap('recovery-phrase')`` and
+  // ``dumpUi('recovery-phrase')`` are SAFE to run unconditionally
+  // here:
+  //   * ``screencap`` short-circuits via SENSITIVE_SCREEN_NAMES and
+  //     writes a 96-byte placeholder PNG (no framebuffer read,
+  //     therefore no mnemonic leak even if FLAG_SECURE is OFF — the
+  //     placeholder is the audit trail).
+  //   * ``dumpUi`` runs the BIP-39 / title-redaction sanitizer
+  //     before any bytes leave the device, so the resulting XML
+  //     never contains a mnemonic word.
+  // After they land, ``assertFlagSecureOnForeground`` runs as the
+  // OS-level positive gate (Round-6 F4): a regression that removed
+  // ``window.setFlags(FLAG_SECURE, FLAG_SECURE)`` from MainActivity
+  // would still leak the mnemonic via Recents thumbnails /
+  // screen-mirroring / accessibility ScreenshotProvider on a real
+  // device, so the assertion still hard-fails the run on FLAG_SECURE
+  // regression — but it does so with the audit trail intact.
   screencap('recovery-phrase');
   await dumpUi('recovery-phrase');
+  await assertFlagSecureOnForeground('recovery-phrase');
   // The 24-word grid pushes the "I've saved it" confirm button below the
   // initial viewport on a standard Pixel 5 emulator; scroll it into view.
   const confirmNode = await scrollIntoView(RECOVERY_PHRASE_CONFIRM, 45.0);
@@ -2098,7 +2254,7 @@ const STRAY_FIXTURE_XML =
  * Returns 0 on success, non-zero on failure. Designed to be runnable
  * without any device or emulator.
  */
-function selfTestSanitizer(): number {
+async function selfTestSanitizer(): Promise<number> {
   const failures: string[] = [];
 
   // ---------- (a) positive: direct RecoveryPhrase dump ----------
@@ -2493,6 +2649,26 @@ function selfTestSanitizer(): number {
     'Window #0 Window{abc123 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
     '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION flags=FLAG_SECURE}\n' +
     'mFocusedWindow=Window{abc123 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  // Round-8 F1 fixture: API-31+ ``dumpsys window`` shape where the
+  // window-level focus marker has been moved out of
+  // ``dumpsys window windows`` but the activity-level
+  // ``mFocusedApp=`` is still emitted. The parser must accept this
+  // as a valid focused-app indicator. The Window block is still
+  // present (it's emitted by every "dumpsys window" run) so the
+  // FLAG_SECURE block lookup still works.
+  const dumpsysOnlyFocusedApp =
+    'Window #0 Window{eee555 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION flags=FLAG_SECURE}\n' +
+    'mFocusedApp=ActivityRecord{eee555 u0 org.enbox.mobile/org.enbox.mobile.MainActivity t12}\n';
+  // Round-8 F1 fixture: ``mResumedActivity=`` as a final fallback
+  // (emitted by ``dumpsys activity activities`` and sometimes by
+  // ``dumpsys window`` on certain OEM builds). Parser must accept it
+  // so the assertion remains usable on devices where the other three
+  // markers are absent or empty.
+  const dumpsysOnlyResumedActivity =
+    'Window #0 Window{fff666 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION flags=FLAG_SECURE}\n' +
+    'mResumedActivity=ActivityRecord{fff666 u0 org.enbox.mobile/org.enbox.mobile.MainActivity t12}\n';
 
   // (h.1) Positive case: org.enbox.mobile FOCUSED window with FLAG_SECURE.
   if (!flagSecureOnFocusedPackageWindow(dumpsysWithFlag, APP_PACKAGE)) {
@@ -2520,11 +2696,16 @@ function selfTestSanitizer(): number {
   // exercised without standing up an emulator.
   let h4Threw = false;
   try {
-    assertFlagSecureOnForeground('selftest', () => ({
-      stdout: '',
-      stderr: 'dumpsys not available',
-      returncode: 1,
-    }));
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => ({
+        stdout: '',
+        stderr: 'dumpsys not available',
+        returncode: 1,
+      }),
+      1,
+      0,
+    );
   } catch {
     h4Threw = true;
   }
@@ -2539,11 +2720,16 @@ function selfTestSanitizer(): number {
   let h5Threw = false;
   let h5Msg = '';
   try {
-    assertFlagSecureOnForeground('selftest', () => ({
-      stdout: dumpsysWithoutFlag,
-      stderr: '',
-      returncode: 0,
-    }));
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => ({
+        stdout: dumpsysWithoutFlag,
+        stderr: '',
+        returncode: 0,
+      }),
+      1,
+      0,
+    );
   } catch (e) {
     h5Threw = true;
     h5Msg = (e as Error).message;
@@ -2561,11 +2747,16 @@ function selfTestSanitizer(): number {
   // must NOT throw — the fast path that lets a healthy run continue.
   let h6Threw = false;
   try {
-    assertFlagSecureOnForeground('selftest', () => ({
-      stdout: dumpsysWithFlag,
-      stderr: '',
-      returncode: 0,
-    }));
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => ({
+        stdout: dumpsysWithFlag,
+        stderr: '',
+        returncode: 0,
+      }),
+      1,
+      0,
+    );
   } catch {
     h6Threw = true;
   }
@@ -2595,11 +2786,16 @@ function selfTestSanitizer(): number {
   let h7IoThrew = false;
   let h7IoMsg = '';
   try {
-    assertFlagSecureOnForeground('selftest', () => ({
-      stdout: dumpsysFocusOnInsecureAppWindow,
-      stderr: '',
-      returncode: 0,
-    }));
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => ({
+        stdout: dumpsysFocusOnInsecureAppWindow,
+        stderr: '',
+        returncode: 0,
+      }),
+      1,
+      0,
+    );
   } catch (e) {
     h7IoThrew = true;
     h7IoMsg = (e as Error).message;
@@ -2621,11 +2817,16 @@ function selfTestSanitizer(): number {
   let h8Threw = false;
   let h8Msg = '';
   try {
-    assertFlagSecureOnForeground('selftest', () => ({
-      stdout: dumpsysFocusOnSystemWindow,
-      stderr: '',
-      returncode: 0,
-    }));
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => ({
+        stdout: dumpsysFocusOnSystemWindow,
+        stderr: '',
+        returncode: 0,
+      }),
+      1,
+      0,
+    );
   } catch (e) {
     h8Threw = true;
     h8Msg = (e as Error).message;
@@ -2644,11 +2845,16 @@ function selfTestSanitizer(): number {
   let h9Threw = false;
   let h9Msg = '';
   try {
-    assertFlagSecureOnForeground('selftest', () => ({
-      stdout: dumpsysFocusNull,
-      stderr: '',
-      returncode: 0,
-    }));
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => ({
+        stdout: dumpsysFocusNull,
+        stderr: '',
+        returncode: 0,
+      }),
+      1,
+      0,
+    );
   } catch (e) {
     h9Threw = true;
     h9Msg = (e as Error).message;
@@ -2672,6 +2878,102 @@ function selfTestSanitizer(): number {
   ) {
     failures.push(
       'case (h.10): false negative — flagSecureOnFocusedPackageWindow returned false on dumpsys that uses mFocusedWindow= (older API) instead of mCurrentFocus=',
+    );
+  }
+  // (h.11) Round-8 F1: API-31+ dumpsys variant where
+  // ``mCurrentFocus`` / ``mFocusedWindow`` have been moved out of
+  // the ``dumpsys window windows`` output and only the
+  // activity-level ``mFocusedApp=`` is present. The parser must
+  // resolve to the ActivityRecord descriptor, and the
+  // FLAG_SECURE check must still succeed because the window block
+  // matching that descriptor is still emitted.
+  if (
+    !flagSecureOnFocusedPackageWindow(dumpsysOnlyFocusedApp, APP_PACKAGE)
+  ) {
+    failures.push(
+      'case (h.11): false negative — flagSecureOnFocusedPackageWindow returned false on a Round-8 F1 fixture using mFocusedApp= (API 31+ dumpsys window). This is the exact regression that blocked the round-7 CI run.',
+    );
+  }
+  // (h.12) Round-8 F1: ``mResumedActivity=`` fallback. Pin the
+  // final-fallback parser branch so a future cleanup that drops
+  // the ActivityRecord patterns breaks the test instead of
+  // silently passing a deviceless run while breaking real CI.
+  if (
+    !flagSecureOnFocusedPackageWindow(
+      dumpsysOnlyResumedActivity,
+      APP_PACKAGE,
+    )
+  ) {
+    failures.push(
+      'case (h.12): false negative — flagSecureOnFocusedPackageWindow returned false on a Round-8 F1 fixture using mResumedActivity= as the only focus marker',
+    );
+  }
+  // (h.13) Round-8 F1: focus-stabilization retry. The first dumpsys
+  // call returns transient ``mCurrentFocus=null`` (a brief window
+  // during a navigation transition), the second call returns the
+  // real focus. The IO wrapper must NOT throw — this is the exact
+  // CI condition that Round-8 F1 fixes. We use a 0s interval to
+  // keep the test fast.
+  let h13Threw = false;
+  let h13Attempts = 0;
+  try {
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => {
+        h13Attempts += 1;
+        if (h13Attempts === 1) {
+          return {stdout: dumpsysFocusNull, stderr: '', returncode: 0};
+        }
+        return {stdout: dumpsysWithFlag, stderr: '', returncode: 0};
+      },
+      6,
+      0,
+    );
+  } catch {
+    h13Threw = true;
+  }
+  if (h13Threw) {
+    failures.push(
+      `case (h.13): assertFlagSecureOnForeground threw on a transient mCurrentFocus=null that resolved on the next dumpsys call (after ${h13Attempts} attempts) — focus-stabilization retry is dead and the assertion would hard-fail any navigation-transition race`,
+    );
+  } else if (h13Attempts < 2) {
+    failures.push(
+      `case (h.13): retry budget unused — assertion succeeded after ${h13Attempts} attempt(s) but the fixture only resolves on attempt 2; the IO wrapper is not actually retrying`,
+    );
+  }
+  // (h.14) Round-8 F1: focus-stabilization retry exhaustion. If
+  // every retry returns ``mCurrentFocus=null``, the wrapper must
+  // eventually throw with the "after N attempts" diagnostic so
+  // the operator can tell the failure was a sustained no-focus
+  // condition, not a one-off blip.
+  let h14Threw = false;
+  let h14Msg = '';
+  let h14Attempts = 0;
+  try {
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => {
+        h14Attempts += 1;
+        return {stdout: dumpsysFocusNull, stderr: '', returncode: 0};
+      },
+      3,
+      0,
+    );
+  } catch (e) {
+    h14Threw = true;
+    h14Msg = (e as Error).message;
+  }
+  if (!h14Threw) {
+    failures.push(
+      'case (h.14): assertFlagSecureOnForeground did not throw when every retry returned mCurrentFocus=null — retry exhaustion branch is dead',
+    );
+  } else if (!h14Msg.includes('attempts')) {
+    failures.push(
+      `case (h.14): retry-exhaustion error message missing 'attempts' diagnostic — got ${JSON.stringify(h14Msg.slice(0, 160))}`,
+    );
+  } else if (h14Attempts !== 3) {
+    failures.push(
+      `case (h.14): retry budget mismatch — expected 3 dumpsys calls, observed ${h14Attempts}`,
     );
   }
 
@@ -2699,7 +3001,7 @@ function selfTestSanitizer(): number {
     '  (g) classifyForegroundDumpFromReader: fail-CLOSED on thrown reader, parity with classifier on successful reads',
   );
   logInfo(
-    '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only)',
+    '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only, mFocusedApp-only [Round-8 F1], mResumedActivity-only [Round-8 F1], focus-stabilization-retry-success [Round-8 F1], focus-stabilization-retry-exhaustion [Round-8 F1])',
   );
   return 0;
 }
