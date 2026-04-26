@@ -107,14 +107,30 @@ function mockBiometricVaultDefaultGenerate(alias, options) {
   // Caller may pre-seed the wallet secret by passing a 64-char lower-case
   // hex string under `options.secretHex`. When supplied, store those exact
   // bytes so the JS layer's local derivation matches the native store.
+  //
+  // Round-5 Finding 1: parity with native on the empty-string edge case.
+  // The pre-fix predicate was `if (providedHex)`, which is falsy for
+  // `""` — so a caller that passed `secretHex: ""` would silently fall
+  // through to the deterministic-CSPRNG branch in the mock, even though
+  // both Android (`if (providedHex != null)` + LOWER_HEX_64_REGEX) and
+  // iOS (`if (secretHex != nil)` + length-64 check) treat `""` as
+  // supplied-but-invalid and reject with VAULT_ERROR. That divergence
+  // could let a JS test pass for a caller bug that real devices reject
+  // (e.g. `Buffer.from(emptyArray).toString("hex") === ""` followed by
+  // `generateAndStoreSecret(..., { secretHex })`). We now use
+  // `providedHex !== null` so any string the caller supplied — including
+  // `""` — is funnelled through the same regex check the native parsers
+  // use. The deterministic-CSPRNG fallback is reached ONLY when the
+  // caller did not pass a string (omitted, undefined, null, non-string).
   let secret;
   const providedHex = options && typeof options.secretHex === 'string' ? options.secretHex : null;
-  if (providedHex) {
+  if (providedHex !== null) {
     if (!/^[0-9a-f]{64}$/.test(providedHex)) {
       return Promise.reject(
         mockBiometricVaultMakeError(
           'VAULT_ERROR',
-          'secretHex must be 64 lower-case hex characters',
+          'secretHex must be exactly 64 lower-case hex characters ' +
+            '(^[0-9a-f]{64}$)',
         ),
       );
     }

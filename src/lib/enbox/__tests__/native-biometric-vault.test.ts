@@ -528,6 +528,69 @@ describe('NativeBiometricVault — Round-4 regressions (Finding 3: strict lower-
   });
 });
 
+describe('NativeBiometricVault — Round-5 regressions (Finding 1: secretHex empty-string parity)', () => {
+  // The pre-fix Jest mock used `if (providedHex)`, which is JS-falsy
+  // for the empty string. So a caller that passed `secretHex: ""`
+  // silently fell through to the deterministic-CSPRNG branch in the
+  // mock, even though Android (`if (providedHex != null)` +
+  // LOWER_HEX_64_REGEX) and iOS (`if (secretHex != nil)` + length-64
+  // check) BOTH treat `""` as supplied-but-invalid and reject with
+  // VAULT_ERROR. That divergence could let a JS test pass for a caller
+  // bug that real devices reject — e.g.
+  // `Buffer.from(emptyArray).toString("hex") === ""` followed by
+  // `generateAndStoreSecret(..., { secretHex })`. The Round-5 fix
+  // changes the mock predicate to `providedHex !== null` so any
+  // string the caller supplies — including `""` — is funnelled
+  // through the same regex check the native parsers use.
+
+  it('Finding 1: secretHex: "" rejects with VAULT_ERROR (parity with Android/iOS empty-string rejection)', async () => {
+    const alias = 'enbox.wallet.root';
+
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: '',
+      }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+    // The alias MUST NOT exist after the rejected provision —
+    // mid-failure must never persist anything (and definitely not the
+    // pre-fix CSPRNG-derived bytes that the JS layer never asked for).
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(false);
+  });
+
+  it('Finding 1: omitting secretHex still falls through to deterministic CSPRNG (negative parity — the "" rejection is not over-broad)', async () => {
+    const alias = 'enbox.wallet.root';
+    // No `secretHex` key at all → Android sees `hasKey === false` →
+    // providedHex == null → CSPRNG branch. iOS sees no key → secretHex
+    // == nil → CSPRNG branch. The Jest mock must mirror that path.
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+  });
+
+  it('Finding 1: secretHex: undefined falls through to deterministic CSPRNG (parity with omitted-key path)', async () => {
+    const alias = 'enbox.wallet.root';
+    // The `as` casts here are deliberate: the spec types `secretHex?:
+    // string`, but we want to exercise the runtime contract for a
+    // caller that explicitly sets the property to `undefined` (e.g.
+    // a destructure with a missing field). The mock's typeof-string
+    // gate must skip it the same way native does for an absent key.
+    await expect(
+      NativeBiometricVault.generateAndStoreSecret(alias, {
+        requireBiometrics: true,
+        invalidateOnEnrollmentChange: true,
+        secretHex: undefined as unknown as string,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(NativeBiometricVault.hasSecret(alias)).resolves.toBe(true);
+  });
+});
+
 describe('NativeBiometricVault — getSecret success path', () => {
   const prompt = {
     promptTitle: 'Unlock Enbox',
