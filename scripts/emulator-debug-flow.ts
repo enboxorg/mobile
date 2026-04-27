@@ -897,16 +897,68 @@ function extractWindowBlockByDescriptor(
   const id = descriptor.split(/\s+/)[0] ?? '';
   if (!id) return null;
   const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Anchor on ``Window{<id>`` (no closing brace yet — the rest of
-  // the descriptor follows) then greedy-consume until the next
-  // ``Window{`` or end of input. The cutoff on ``Window{`` (with
-  // the brace) avoids false truncation on attribute lines that
-  // happen to start with the bare word "Window".
-  const blockRegex = new RegExp(
-    `Window\\{${escapedId}[^}]*\\}([\\s\\S]*?)(?=Window\\{|$)`,
-  );
-  const m = dumpsysOutput.match(blockRegex);
-  return m ? (m[1] ?? '') : null;
+  // Round-9 follow-up bug: ``Window{<id>...}`` appears in MANY
+  // places throughout the canonical ``dumpsys window`` output, NOT
+  // just the per-window block. The dump emits cross-references in:
+  //   - ``mCurrentFocus=Window{<id>...}``
+  //   - ``mInputFocus=Window{<id>...}``
+  //   - ``mLastFocus=Window{<id>...}``
+  //   - ``mImeLayeringTarget=Window{<id>...}``
+  //   - ``mTopFullscreenOpaqueWindowState=Window{<id>...}``
+  //   - per-window block headers ``Window #N Window{<id>...}:``
+  //   - parent/sibling refs inside other window blocks
+  // Pre-fix, ``String.prototype.match`` returned the FIRST match
+  // (typically a focus-marker reference at the top of the dump),
+  // and the capture group ``[\s\S]*?`` then grabbed only the few
+  // bytes between that marker and the NEXT ``Window{`` (often
+  // another focus marker referencing a different window id).
+  // The result was a tiny, mAttrs-free block — and
+  // ``windowBlockHasFlagSecure`` correctly returned ``false`` on
+  // an empty block, so the assertion always fired in CI even
+  // though MainActivity correctly sets ``FLAG_SECURE``.
+  //
+  // Fix: enumerate ALL ``Window{<id>...}`` occurrences with the
+  // ``g`` flag, score each candidate slice on whether it actually
+  // looks like a window-state block (``mAttrs=`` and friends), and
+  // return the BEST match. The "best" heuristic is:
+  //   1. Prefer slices that contain ``mAttrs=`` — only the actual
+  //      per-window block emits that key.
+  //   2. Among ``mAttrs=`` candidates, take the LONGEST one (the
+  //      per-window block is hundreds-to-thousands of bytes; focus
+  //      markers and cross-refs are tens of bytes between
+  //      consecutive ``Window{`` tokens).
+  //   3. If NO candidate has ``mAttrs=``, fall back to the longest
+  //      candidate so the diagnostic dump still surfaces something
+  //      useful.
+  const headerRegex = new RegExp(`Window\\{${escapedId}[^}]*\\}`, 'g');
+  const slices: Array<{slice: string; hasAttrs: boolean}> = [];
+  let headerMatch: RegExpExecArray | null;
+  while ((headerMatch = headerRegex.exec(dumpsysOutput)) !== null) {
+    const sliceStart = headerMatch.index + headerMatch[0].length;
+    // Find the NEXT Window{ occurrence after this header. We accept
+    // ANY id here (not just the same id) because the per-window
+    // block ends when the next window's block starts.
+    const nextWindow = dumpsysOutput.indexOf('Window{', sliceStart);
+    const sliceEnd = nextWindow === -1 ? dumpsysOutput.length : nextWindow;
+    const slice = dumpsysOutput.slice(sliceStart, sliceEnd);
+    slices.push({slice, hasAttrs: slice.includes('mAttrs=')});
+    // Avoid an infinite loop if the regex matches a zero-width
+    // position (defensive — the regex above has a non-empty
+    // literal so this shouldn't happen in practice).
+    if (headerMatch.index === headerRegex.lastIndex) {
+      headerRegex.lastIndex += 1;
+    }
+  }
+  if (slices.length === 0) return null;
+  const attrsSlices = slices.filter((s) => s.hasAttrs);
+  const pool = attrsSlices.length > 0 ? attrsSlices : slices;
+  // Take the longest in the chosen pool — the per-window block is
+  // always meaningfully larger than a focus-marker cross-reference.
+  let best = pool[0]!;
+  for (const candidate of pool) {
+    if (candidate.slice.length > best.slice.length) best = candidate;
+  }
+  return best.slice;
 }
 
 /**
@@ -1183,6 +1235,41 @@ async function assertFlagSecureOnForeground(
     );
   }
   if (!flagSecureOnFocusedPackageWindow(out, APP_PACKAGE)) {
+    // Dump the matched window block + a chunk of raw dumpsys to the
+    // artifact directory so we can post-mortem WHY the parser
+    // rejected. Pre-fix, the only error trail was the synthesized
+    // message; in CI that meant we couldn't tell whether the window
+    // genuinely lacked FLAG_SECURE, the parser was looking at the
+    // wrong block, or the dumpsys output had drifted into a new
+    // format we don't yet handle. Capturing both the raw block and
+    // a slice of the full dumpsys closes that gap.
+    const matchedBlock = extractWindowBlockByDescriptor(out, focusedDescriptor);
+    const blockSlice = (matchedBlock ?? '(no block matched)').slice(0, 4096);
+    const fullSlice = out.slice(0, 65536);
+    const diagPath = join(ROOT, `flag-secure-diag-${context}.txt`);
+    try {
+      writeFileSync(
+        diagPath,
+        `context: ${context}\n` +
+          `focusLine: ${focusLine.trim()}\n` +
+          `focusedDescriptor: ${JSON.stringify(focusedDescriptor)}\n` +
+          `matchedBlockBytes: ${matchedBlock ? matchedBlock.length : 0}\n` +
+          '\n=== matched window block ===\n' +
+          `${blockSlice}\n` +
+          '\n=== first 64KB of dumpsys window ===\n' +
+          `${fullSlice}\n`,
+      );
+      logInfo(
+        `[assertFlagSecureOnForeground] wrote diagnostic dump to ${diagPath} ` +
+          `(matched-block-bytes=${matchedBlock ? matchedBlock.length : 0}, ` +
+          `dumpsys-bytes=${out.length})`,
+      );
+    } catch (writeErr) {
+      logInfo(
+        `[assertFlagSecureOnForeground] failed to persist diagnostic dump: ` +
+          `${(writeErr as Error).message}`,
+      );
+    }
     throw new Error(
       `${context}: focused ${APP_PACKAGE} window does NOT carry FLAG_SECURE — ` +
         'OS-level mnemonic-capture protection has regressed. The emulator suite ' +
@@ -1193,7 +1280,9 @@ async function assertFlagSecureOnForeground(
         'the FlagSecureModule reference counting. Note that this assertion is ' +
         'now FOCUS-AWARE (Round-7 Finding 5): a non-focused org.enbox.mobile ' +
         'window with FLAG_SECURE no longer satisfies the gate. Focus line: ' +
-        JSON.stringify(focusLine.trim()),
+        `${JSON.stringify(focusLine.trim())}. Diagnostic dump (focused-window ` +
+        `block + first 64KB of dumpsys window) written to ${diagPath} for ` +
+        'post-mortem.',
     );
   }
 }
@@ -3270,6 +3359,96 @@ async function selfTestSanitizer(): Promise<number> {
   }
 
   // -------------------------------------------------------------------
+  // (h.21)-(h.23) Round-9 follow-up bug part 2 — extractWindowBlockByDescriptor
+  // with focus markers AHEAD of the per-window block.
+  //
+  // The CI run that survived the (h.15)-(h.20) hex-parser fix STILL
+  // failed because the canonical ``dumpsys window`` output emits
+  // focus-marker cross-references like ``mInputFocus=Window{<id>...}``,
+  // ``mLastFocus=Window{<id>...}``, etc. BEFORE the per-window block.
+  // ``String.match`` (no ``g`` flag) returned the FIRST occurrence of
+  // ``Window{<id>...}`` (the focus marker), and the capture group
+  // ``[\s\S]*?(?=Window\{|$)`` then grabbed only the few bytes between
+  // that marker and the NEXT ``Window{``. The captured slice never
+  // contained ``mAttrs=...fl=#<hex>...``, so the parser correctly
+  // detected "no FLAG_SECURE" — on an empty fragment.
+  //
+  // Fix: enumerate ALL ``Window{<id>...}`` occurrences, prefer
+  // candidates whose slice contains ``mAttrs=`` (only the actual
+  // per-window block emits that key), and pick the longest among
+  // them. These three cases pin the new logic:
+  //
+  //   (h.21) Production-shape: focus markers BEFORE the per-window
+  //          block. Pre-fix returned the few bytes after the focus
+  //          marker (no mAttrs) and falsely reported "no
+  //          FLAG_SECURE". Post-fix MUST return true.
+  //   (h.22) Same as (h.21) but the per-window block has FLAG_SECURE
+  //          CLEAR. Post-fix MUST return false (regression branch:
+  //          if the parser were now matching by length alone it
+  //          would still pick the right block but a weak hex check
+  //          would slip).
+  //   (h.23) Multiple windows owned by org.enbox.mobile (e.g. main
+  //          activity + a transient overlay), focus on the main
+  //          activity which DOES carry FLAG_SECURE. Verifies that
+  //          enumeration picks the correct window block by id, not
+  //          just by package.
+  const dumpsysFocusBeforeBlock =
+    'WINDOW MANAGER POLICY STATE\n' +
+    '  mTopFullscreenOpaqueWindowState=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n' +
+    '  mInputFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n' +
+    '  mLastFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n' +
+    'WINDOW MANAGER WINDOWS\n' +
+    '  Window #0 Window{abc123 u0 com.android.systemui/.StatusBar}:\n' +
+    '    mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=STATUS_BAR fl=#85810100}\n' +
+    '    mViewVisibility=0x0 mHaveFrame=true\n' +
+    '  Window #1 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '    mAttrs={(0,0)(fillxfill) sim=#20 ty=BASE_APPLICATION fl=#85812100 pfl=0x20000 wanim=0x103046a}\n' +
+    '    mViewVisibility=0x0 mHaveFrame=true mPolicyVisibility=true\n' +
+    '    mFullConfiguration={1.0 ?mcc?mnc en_US ldltr sw411dp w411dp h683dp ...}\n' +
+    'WINDOW MANAGER GLOBAL STATE\n' +
+    '  mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n' +
+    '  mFocusedApp=ActivityRecord{def456 u0 org.enbox.mobile/.MainActivity t12}\n';
+  if (!flagSecureOnFocusedPackageWindow(dumpsysFocusBeforeBlock, APP_PACKAGE)) {
+    failures.push(
+      'case (h.21): false negative — flagSecureOnFocusedPackageWindow returned false on a production-shape dumpsys where focus markers (mTopFullscreenOpaqueWindowState/mInputFocus/mLastFocus) appear AHEAD of the per-window block. Pre-fix the regex captured the few bytes between the FIRST Window{<id>...} (the focus marker) and the NEXT Window{, missing mAttrs=. This is the EXACT shape that blocked the round-9 follow-up CI run.',
+    );
+  }
+  const dumpsysFocusBeforeBlockNoFlag =
+    'WINDOW MANAGER POLICY STATE\n' +
+    '  mTopFullscreenOpaqueWindowState=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n' +
+    '  mInputFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n' +
+    '  mLastFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n' +
+    'WINDOW MANAGER WINDOWS\n' +
+    '  Window #1 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '    mAttrs={(0,0)(fillxfill) sim=#20 ty=BASE_APPLICATION fl=#85810100 pfl=0x20000}\n' +
+    '    mViewVisibility=0x0 mHaveFrame=true mPolicyVisibility=true\n' +
+    'WINDOW MANAGER GLOBAL STATE\n' +
+    '  mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  if (flagSecureOnFocusedPackageWindow(dumpsysFocusBeforeBlockNoFlag, APP_PACKAGE)) {
+    failures.push(
+      'case (h.22): false positive — flagSecureOnFocusedPackageWindow returned true on a production-shape dumpsys where the per-window block has FLAG_SECURE CLEAR (fl=#85810100, no 0x2000 bit). The new "best mAttrs slice" extractor must still respect the bit value once it picks the right block.',
+    );
+  }
+  // (h.23) Two windows owned by our app — focus on a transient overlay
+  // that LACKS FLAG_SECURE while the underlying main activity has it.
+  // The focus-aware assertion correctly fails (regression coverage:
+  // Round-7 F5 semantics still hold under the new extractor).
+  const dumpsysTwoOwnedFocusOnInsecure =
+    'WINDOW MANAGER WINDOWS\n' +
+    '  Window #0 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '    mAttrs={(0,0)(fillxfill) sim=#20 ty=BASE_APPLICATION fl=#85812100 pfl=0x20000}\n' +
+    '    mViewVisibility=0x0\n' +
+    '  Window #1 Window{ghi789 u0 org.enbox.mobile/org.enbox.mobile.OverlayActivity}:\n' +
+    '    mAttrs={(0,0)(fillxfill) sim=#20 ty=BASE_APPLICATION fl=#85810100 pfl=0x20000}\n' +
+    '    mViewVisibility=0x0\n' +
+    'mCurrentFocus=Window{ghi789 u0 org.enbox.mobile/org.enbox.mobile.OverlayActivity}\n';
+  if (flagSecureOnFocusedPackageWindow(dumpsysTwoOwnedFocusOnInsecure, APP_PACKAGE)) {
+    failures.push(
+      'case (h.23): false positive — flagSecureOnFocusedPackageWindow returned true when focus is on an INSECURE app-owned overlay (ghi789, fl without 0x2000) despite the underlying MainActivity (def456) carrying FLAG_SECURE. The new multi-occurrence extractor must still pick the FOCUSED id, not just any mAttrs slice owned by the package.',
+    );
+  }
+
+  // -------------------------------------------------------------------
   // (i) Round-9 F1: enrollFingerprint credential-screen matcher.
   //
   // Pre-Round-9 the matcher only recognized the ConfirmLock* family
@@ -3396,7 +3575,7 @@ async function selfTestSanitizer(): Promise<number> {
     '  (g) classifyForegroundDumpFromReader: fail-CLOSED on thrown reader, parity with classifier on successful reads',
   );
   logInfo(
-    '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only, mFocusedApp-only [Round-8 F1], mResumedActivity-only [Round-8 F1], focus-stabilization-retry-success [Round-8 F1], focus-stabilization-retry-exhaustion [Round-8 F1], real-shape hex fl=#<hex> with/without FLAG_SECURE bit 0x2000 [Round-9 follow-up], symbolic |SECURE| variant, ``flags=#<hex>`` OEM token, end-to-end IO wrapper on production hex shape — both throw and fast-path)',
+    '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only, mFocusedApp-only [Round-8 F1], mResumedActivity-only [Round-8 F1], focus-stabilization-retry-success [Round-8 F1], focus-stabilization-retry-exhaustion [Round-8 F1], real-shape hex fl=#<hex> with/without FLAG_SECURE bit 0x2000 [Round-9 follow-up], symbolic |SECURE| variant, ``flags=#<hex>`` OEM token, end-to-end IO wrapper on production hex shape — both throw and fast-path, focus-markers-AHEAD-of-block [Round-9 follow-up #2], two-app-windows-pick-focused-id [Round-9 follow-up #2])',
   );
   logInfo(
     '  (i) ENROLL_FOCUS_CREDENTIAL [Round-9 F1]: ConfirmLockPassword/Pin/Pattern + ChooseLockPassword/Pin/Pattern/Generic positive matches; FingerprintEnrollIntroduction/Enrolling, Launcher, our app are correctly REJECTED; ENROLL_FOCUS_CONFIRM back-compat alias preserved',

@@ -177,6 +177,26 @@ if [ ! -s "${LOGCAT_FULL}" ]; then
     echo "warning: ${LOGCAT_FULL} is empty (adb may be unreachable)" >&2
 fi
 
+# Round-9 follow-up #2: also snapshot ``adb shell dumpsys window`` so
+# any post-mortem of a FLAG_SECURE assertion failure has the actual
+# source-of-truth window-manager dump (window block layout, focus
+# markers, mAttrs flag-bit format) rather than relying on whatever
+# the in-driver diagnostic was able to persist before crashing.
+# This is the artifact that would have unblocked the round-9
+# follow-up investigation in 30 seconds instead of 30 minutes.
+echo ""
+echo "=== [capture] Snapshotting 'adb shell dumpsys window' ==="
+DUMPSYS_WINDOW="${ARTIFACT_DIR}/dumpsys-window.txt"
+{
+    adb shell dumpsys window 2>&1 || true
+} | tail -c "${MAX_LOGCAT_BYTES}" > "${DUMPSYS_WINDOW}" || true
+if [ -s "${DUMPSYS_WINDOW}" ]; then
+    DUMPSYS_BYTES=$(wc -c < "${DUMPSYS_WINDOW}" 2>/dev/null || echo 0)
+    echo "[capture] dumpsys window snapshot: ${DUMPSYS_WINDOW} (${DUMPSYS_BYTES} bytes)"
+else
+    echo "warning: ${DUMPSYS_WINDOW} is empty (adb may be unreachable)" >&2
+fi
+
 # Round-9 F5: bound the driver transcript to the same 10 MiB ceiling
 # so a runaway loop can't blow GitHub's 500 MiB artifact limit. The
 # ``tee`` invocation above does NOT cap the file, so we trim it
