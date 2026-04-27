@@ -949,7 +949,90 @@ function flagSecureOnFocusedPackageWindow(
   if (!focusedDescriptor.includes(`${packageName}/`)) return false;
   const block = extractWindowBlockByDescriptor(dumpsysOutput, focusedDescriptor);
   if (block === null) return false;
-  return block.includes('FLAG_SECURE');
+  return windowBlockHasFlagSecure(block);
+}
+
+/**
+ * Round-9 follow-up bug — real ``dumpsys window`` output format:
+ *
+ * Android's ``WindowState.dump`` writes the window's
+ * ``WindowManager.LayoutParams.flags`` field through one of TWO
+ * formats depending on API level / OEM build:
+ *
+ *   1. **Hex** (the canonical AOSP format on API 28+):
+ *      ``mAttrs={(0,0)(fillxfill) sim=#20 ty=BASE_APPLICATION
+ *      fl=#85812100 pfl=0x20000 ...}``
+ *      The ``fl=#<hex>`` token holds ``LayoutParams.flags`` packed
+ *      as an 8-char unsigned hex literal. ``FLAG_SECURE`` is bit
+ *      ``0x2000`` (8192). The literal string "FLAG_SECURE" /
+ *      "SECURE" does NOT appear anywhere in the block — it lives
+ *      only inside the encoded hex value.
+ *
+ *   2. **Symbolic** (rare; some emulator builds and verbose-flag
+ *      dumps): ``mAttrs={... fl=LAYOUT_INSET_DECOR|SECURE|... ...}``
+ *      Note the leading ``FLAG_`` is dropped — the symbolic form
+ *      is just ``SECURE`` (see AOSP's
+ *      ``WindowManager.LayoutParams.flagToString``). Some
+ *      historical builds also emit ``flags=FLAG_SECURE``.
+ *
+ * Pre-fix the parser only accepted the literal ``"FLAG_SECURE"``
+ * string. That was a tautology in the self-test fixtures (which
+ * embedded that exact literal) but a fail-OPEN bug in real CI:
+ * the API-31 emulator emits the hex format, so every real
+ * ``dumpsys window`` lookup against a window block — even one
+ * with the FLAG_SECURE bit definitely set — returned ``false``.
+ * The privacy assertion fired on every run despite
+ * ``MainActivity.onCreate`` correctly setting the flag, blocking
+ * debug-android. (Cross-checked via the round-9 CI run
+ * ``25017591397``: focus IS on
+ * ``org.enbox.mobile/.MainActivity`` and the assertion still
+ * threw with the "does NOT carry FLAG_SECURE" message.)
+ *
+ * The fix accepts BOTH shapes:
+ *
+ *   1. Find every ``fl=#<hex>`` and ``flags=#<hex>`` token in the
+ *      block (the ``flags=`` spelling is used by some OEM builds);
+ *      parse the hex and bit-test against ``FLAG_SECURE_BIT``.
+ *   2. As a belt-and-suspenders fallback, accept the symbolic
+ *      forms ``|SECURE|``, ``=SECURE|``, ``=SECURE}``, and the
+ *      legacy ``FLAG_SECURE`` literal so any future emulator that
+ *      switches representation does not regress us.
+ */
+const FLAG_SECURE_BIT = 0x2000;
+
+function windowBlockHasFlagSecure(block: string): boolean {
+  if (!block) return false;
+  // Hex form: ``fl=#<hex>`` (canonical AOSP) and ``flags=#<hex>``
+  // (OEM variant). Find every match and bit-test. The hex literal
+  // is unsigned-32-bit so we use the unsigned-right-shift trick
+  // to keep ``parseInt(...) >>> 0`` in the safe-int range before
+  // the AND.
+  const hexMatches = block.matchAll(/\b(?:fl|flags)=#([0-9a-fA-F]+)\b/g);
+  for (const m of hexMatches) {
+    const hex = m[1] ?? '';
+    if (!hex) continue;
+    const value = Number.parseInt(hex, 16);
+    if (Number.isFinite(value)) {
+      // Bitwise unsigned-right-shift + AND are the natural primitives
+      // for parsing a packed flag bitfield. The ESLint
+      // `no-bitwise` rule guards against accidental use in business
+      // logic; here the entire purpose of the helper is bit-testing
+      // ``LayoutParams.flags`` against ``FLAG_SECURE`` (0x2000).
+      // eslint-disable-next-line no-bitwise
+      const u32 = value >>> 0;
+      // eslint-disable-next-line no-bitwise
+      if ((u32 & FLAG_SECURE_BIT) !== 0) return true;
+    }
+  }
+  // Symbolic forms: ``|SECURE|``, ``=SECURE|``, ``=SECURE }`` and
+  // the legacy ``FLAG_SECURE`` (some historical AOSP builds, plus
+  // the previous self-test fixtures). The bare-word ``SECURE``
+  // could collide with other identifiers so we anchor on the
+  // delimiter on at least one side; the ``FLAG_SECURE`` literal
+  // is unique enough to accept anywhere.
+  if (block.includes('FLAG_SECURE')) return true;
+  if (/[|=]SECURE(?:[|}\s])/.test(block)) return true;
+  return false;
 }
 
 /**
@@ -3046,6 +3129,147 @@ async function selfTestSanitizer(): Promise<number> {
   }
 
   // -------------------------------------------------------------------
+  // (h.15)-(h.20) Round-9 follow-up bug — REAL ``dumpsys window`` flag
+  // format on API 28+ emulators.
+  //
+  // Background: pre-fix the parser only matched the literal string
+  // ``"FLAG_SECURE"``. AOSP ``dumpsys window`` actually emits the
+  // window flags as a packed 32-bit hex value via ``fl=#<hex>``
+  // (sometimes ``flags=#<hex>`` on OEM forks); the literal
+  // ``FLAG_SECURE`` / ``SECURE`` string is NEVER printed in the
+  // canonical output. The pre-Round-9 self-test fixtures embedded
+  // ``flags=FLAG_SECURE`` so the test was a tautology — the real
+  // emulator path always returned ``false`` regardless of whether
+  // FLAG_SECURE was set, blocking debug-android with a spurious
+  // ``focused window does NOT carry FLAG_SECURE`` error
+  // (CI run https://github.com/enboxorg/mobile/actions/runs/25017591397).
+  //
+  // These cases pin the actual hex parser:
+  //   (h.15) hex form ``fl=#85812100`` with FLAG_SECURE bit set
+  //          (0x2000) MUST match — this is the production format.
+  //   (h.16) hex form ``fl=#80810100`` WITHOUT FLAG_SECURE bit MUST
+  //          NOT match — primary regression branch. A weak parser
+  //          that matched any ``fl=`` prefix would falsely pass.
+  //   (h.17) symbolic ``|SECURE|`` (some emulator builds and the
+  //          AOSP ``flagToString`` verbose dump variant) MUST match.
+  //          Anchored on the pipe delimiter so a future "SECURE"
+  //          enum value cannot collide.
+  //   (h.18) ``flags=#<hex>`` (alternate OEM token) MUST match when
+  //          the FLAG_SECURE bit is set.
+  //   (h.19) End-to-end IO wrapper: dumpsys with hex ``fl=#<no-secure-bit>``
+  //          on the focused org.enbox.mobile window MUST throw — this
+  //          is the EXACT shape that blocked CI on round 9.
+  //   (h.20) End-to-end IO wrapper: dumpsys with hex ``fl=#<with-secure-bit>``
+  //          on the focused window MUST NOT throw — the happy path.
+  // FLAG_SECURE = 0x2000. Pin canonical hex literals so the test is
+  // independent of any constant rename in the parser module.
+  const dumpsysWithFlagHex =
+    'Window #0 Window{abc123 u0 com.android.systemui/.StatusBar}:\n' +
+    '  mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=STATUS_BAR ' +
+    'fl=#85810100}\n' +
+    '\n' +
+    'Window #1 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) sim=#20 ty=BASE_APPLICATION ' +
+    'fl=#85812100 pfl=0x20000 wanim=0x103046a}\n' +
+    '  mViewVisibility=0x0 mHaveFrame=true\n' +
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  const dumpsysWithoutFlagHex =
+    'Window #0 Window{abc123 u0 com.android.systemui/.StatusBar}:\n' +
+    '  mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=STATUS_BAR ' +
+    'fl=#85810100}\n' +
+    '\n' +
+    'Window #1 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) sim=#20 ty=BASE_APPLICATION ' +
+    'fl=#85810100 pfl=0x20000 wanim=0x103046a}\n' +
+    '  mViewVisibility=0x0 mHaveFrame=true\n' +
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  const dumpsysSymbolicSecure =
+    'Window #0 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION ' +
+    'fl=LAYOUT_INSET_DECOR|SECURE|HARDWARE_ACCELERATED}\n' +
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  const dumpsysFlagsHexAlternate =
+    'Window #0 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '  mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION ' +
+    'flags=#00002000}\n' +
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+
+  // (h.15) Hex with FLAG_SECURE bit MUST match — production CI shape.
+  if (!flagSecureOnFocusedPackageWindow(dumpsysWithFlagHex, APP_PACKAGE)) {
+    failures.push(
+      'case (h.15): false negative — flagSecureOnFocusedPackageWindow returned false on real-shape dumpsys (fl=#85812100, FLAG_SECURE bit 0x2000 set). This is the EXACT format AOSP API 28+ emulators emit; a regression here re-creates the round-9 CI hang.',
+    );
+  }
+  // (h.16) Hex WITHOUT FLAG_SECURE bit MUST NOT match — primary
+  // regression branch. The fl= value matches the bit pattern of a
+  // typical non-secure activity window.
+  if (flagSecureOnFocusedPackageWindow(dumpsysWithoutFlagHex, APP_PACKAGE)) {
+    failures.push(
+      'case (h.16): false positive — flagSecureOnFocusedPackageWindow returned true on real-shape dumpsys (fl=#85810100, FLAG_SECURE bit clear). Parser is matching ``fl=`` non-selectively; an actual MainActivity FLAG_SECURE regression would slip through.',
+    );
+  }
+  // (h.17) Symbolic ``|SECURE|`` form (verbose flagToString output).
+  if (!flagSecureOnFocusedPackageWindow(dumpsysSymbolicSecure, APP_PACKAGE)) {
+    failures.push(
+      'case (h.17): false negative — flagSecureOnFocusedPackageWindow returned false on symbolic ``fl=...|SECURE|...`` form. Some emulator builds emit verbose flag names; we must accept both.',
+    );
+  }
+  // (h.18) ``flags=#<hex>`` token MUST be accepted on top of ``fl=#<hex>``.
+  if (!flagSecureOnFocusedPackageWindow(dumpsysFlagsHexAlternate, APP_PACKAGE)) {
+    failures.push(
+      'case (h.18): false negative — flagSecureOnFocusedPackageWindow returned false on alternate OEM token ``flags=#00002000``. Must accept both ``fl=`` and ``flags=`` hex prefixes.',
+    );
+  }
+  // (h.19) End-to-end IO wrapper on a real-shape no-FLAG_SECURE
+  // dumpsys MUST throw — this is the exact CI failure mode round-9
+  // produced (focus on our app, hex flags without 0x2000 bit).
+  let h19Threw = false;
+  let h19Msg = '';
+  try {
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => ({stdout: dumpsysWithoutFlagHex, stderr: '', returncode: 0}),
+      1,
+      0,
+    );
+  } catch (e) {
+    h19Threw = true;
+    h19Msg = (e as Error).message;
+  }
+  if (!h19Threw) {
+    failures.push(
+      'case (h.19): assertFlagSecureOnForeground did not throw on a real-shape dumpsys whose focused org.enbox.mobile window has hex flags without the FLAG_SECURE bit. This is the exact production failure mode the round-9 fix targets — the assertion is fail-OPEN.',
+    );
+  } else if (!h19Msg.includes(APP_PACKAGE) || !h19Msg.includes('FLAG_SECURE')) {
+    failures.push(
+      `case (h.19): assertFlagSecureOnForeground error message missing diagnostic content — got ${JSON.stringify(h19Msg.slice(0, 120))}`,
+    );
+  }
+  // (h.20) End-to-end IO wrapper on a real-shape WITH-FLAG_SECURE
+  // dumpsys MUST NOT throw — the new fast-path that lets a healthy
+  // production CI run continue. Pre-Round-9 this path was BROKEN:
+  // every healthy run threw the same "does NOT carry FLAG_SECURE"
+  // error because the parser only looked for the literal string.
+  let h20Threw = false;
+  let h20Msg = '';
+  try {
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => ({stdout: dumpsysWithFlagHex, stderr: '', returncode: 0}),
+      1,
+      0,
+    );
+  } catch (e) {
+    h20Threw = true;
+    h20Msg = (e as Error).message;
+  }
+  if (h20Threw) {
+    failures.push(
+      `case (h.20): assertFlagSecureOnForeground threw on a real-shape healthy dumpsys (fl=#85812100, FLAG_SECURE bit set) — the production happy path is broken. Error: ${JSON.stringify(h20Msg.slice(0, 200))}`,
+    );
+  }
+
+  // -------------------------------------------------------------------
   // (i) Round-9 F1: enrollFingerprint credential-screen matcher.
   //
   // Pre-Round-9 the matcher only recognized the ConfirmLock* family
@@ -3172,7 +3396,7 @@ async function selfTestSanitizer(): Promise<number> {
     '  (g) classifyForegroundDumpFromReader: fail-CLOSED on thrown reader, parity with classifier on successful reads',
   );
   logInfo(
-    '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only, mFocusedApp-only [Round-8 F1], mResumedActivity-only [Round-8 F1], focus-stabilization-retry-success [Round-8 F1], focus-stabilization-retry-exhaustion [Round-8 F1])',
+    '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only, mFocusedApp-only [Round-8 F1], mResumedActivity-only [Round-8 F1], focus-stabilization-retry-success [Round-8 F1], focus-stabilization-retry-exhaustion [Round-8 F1], real-shape hex fl=#<hex> with/without FLAG_SECURE bit 0x2000 [Round-9 follow-up], symbolic |SECURE| variant, ``flags=#<hex>`` OEM token, end-to-end IO wrapper on production hex shape — both throw and fast-path)',
   );
   logInfo(
     '  (i) ENROLL_FOCUS_CREDENTIAL [Round-9 F1]: ConfirmLockPassword/Pin/Pattern + ChooseLockPassword/Pin/Pattern/Generic positive matches; FingerprintEnrollIntroduction/Enrolling, Launcher, our app are correctly REJECTED; ENROLL_FOCUS_CONFIRM back-compat alias preserved',
