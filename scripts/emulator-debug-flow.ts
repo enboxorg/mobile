@@ -1076,14 +1076,30 @@ function windowBlockHasFlagSecure(block: string): boolean {
       if ((u32 & FLAG_SECURE_BIT) !== 0) return true;
     }
   }
-  // Symbolic forms: ``|SECURE|``, ``=SECURE|``, ``=SECURE }`` and
-  // the legacy ``FLAG_SECURE`` (some historical AOSP builds, plus
-  // the previous self-test fixtures). The bare-word ``SECURE``
-  // could collide with other identifiers so we anchor on the
-  // delimiter on at least one side; the ``FLAG_SECURE`` literal
-  // is unique enough to accept anywhere.
+  // Symbolic forms come in three flavours observed in the wild:
+  //
+  //   1. Pipe-delimited: ``fl=LAYOUT_INSET_DECOR|SECURE|HARDWARE_ACCELERATED``
+  //      (some emulator builds, AOSP ``ViewDebug.flagsToString``
+  //      with default delimiter).
+  //   2. Space-delimited: ``fl=LAYOUT_IN_SCREEN FORCE_NOT_FULLSCREEN
+  //      SECURE LAYOUT_INSET_DECOR SPLIT_TOUCH HARDWARE_ACCELERATED ...``
+  //      This is what the API 31+ google_apis Pixel emulator (the one
+  //      CI uses) actually emits — discovered via the round-9 follow-up
+  //      #2 diagnostic dump after the per-window block extractor was
+  //      already correct (see CI run 25020408460,
+  //      flag-secure-diag-recovery-phrase.txt line 11).
+  //   3. Legacy literal ``FLAG_SECURE`` (some historical AOSP builds
+  //      and the pre-Round-9 self-test fixtures).
+  //
+  // We must accept a leading delimiter of ``|``, ``=``, or whitespace
+  // (covers all three flavours) and a trailing delimiter of ``|``,
+  // ``}``, or whitespace (covers end-of-flags-line, end-of-mAttrs,
+  // and inter-flag separators). Case-sensitive uppercase ``SECURE``
+  // — never lowercase ``secure`` — so we don't false-match on
+  // ``KeyguardServiceDelegate.secure=true`` or similar
+  // window-manager state lines that share the block.
   if (block.includes('FLAG_SECURE')) return true;
-  if (/[|=]SECURE(?:[|}\s])/.test(block)) return true;
+  if (/[\s|=]SECURE(?:[\s|}])/.test(block)) return true;
   return false;
 }
 
@@ -3449,6 +3465,111 @@ async function selfTestSanitizer(): Promise<number> {
   }
 
   // -------------------------------------------------------------------
+  // (h.24)-(h.27) Round-9 follow-up bug part 3 — REAL google_apis API 31+
+  // emulator format: SPACE-delimited symbolic flag names.
+  //
+  // Discovered after rounds #1 (hex parser) and #2 (block extractor)
+  // landed and CI was STILL failing
+  // (https://github.com/enboxorg/mobile/actions/runs/25020408460).
+  // The diagnostic dump introduced in round-#2 captured the actual
+  // window block:
+  //
+  //   mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=BASE_APPLICATION
+  //     wanim=0x10302fe
+  //     fl=LAYOUT_IN_SCREEN FORCE_NOT_FULLSCREEN SECURE LAYOUT_INSET_DECOR
+  //        SPLIT_TOUCH HARDWARE_ACCELERATED DRAWS_SYSTEM_BAR_BACKGROUNDS
+  //     pfl=NO_MOVE_ANIMATION ...}
+  //
+  // — neither hex (``fl=#<hex>``) nor pipe-delimited
+  // (``fl=...|SECURE|...``). The CI google_apis API 31 image emits a
+  // SPACE-separated list with NO ``FLAG_`` prefix. The pre-fix regex
+  // ``[|=]SECURE(?:[|}\s])`` required a ``|`` or ``=`` BEFORE ``SECURE``
+  // and missed the space-prefix flavour, so every CI run threw the
+  // "does NOT carry FLAG_SECURE" assertion despite MainActivity
+  // correctly setting the flag.
+  //
+  //   (h.24) Production-shape space-delimited mAttrs fl= with SECURE
+  //          MUST match. This is the EXACT shape from CI run
+  //          25020408460. Pre-fix returned false; post-fix MUST
+  //          return true.
+  //   (h.25) Same shape WITHOUT the SECURE token MUST NOT match.
+  //          Regression branch — a weak parser that matched any
+  //          ``\bSECURE\b`` or whitespace-prefixed substring would
+  //          slip through.
+  //   (h.26) Lowercase ``secure=true`` (KeyguardServiceDelegate state
+  //          which appears INSIDE the same window block on some
+  //          dumps) MUST NOT trigger a match — case-sensitivity is
+  //          structural, not cosmetic.
+  //   (h.27) End-to-end IO wrapper on the production space-delimited
+  //          shape MUST NOT throw — the production happy path that
+  //          this fix unblocks.
+  const dumpsysSpaceFlagsWithSecure =
+    'WINDOW MANAGER WINDOWS\n' +
+    '  Window #1 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '    mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=BASE_APPLICATION\n' +
+    '      wanim=0x10302fe\n' +
+    '      fl=LAYOUT_IN_SCREEN FORCE_NOT_FULLSCREEN SECURE LAYOUT_INSET_DECOR SPLIT_TOUCH HARDWARE_ACCELERATED DRAWS_SYSTEM_BAR_BACKGROUNDS\n' +
+    '      pfl=NO_MOVE_ANIMATION FORCE_DRAW_STATUS_BAR_BACKGROUND USE_BLAST APPEARANCE_CONTROLLED FIT_INSETS_CONTROLLED\n' +
+    '      apr=LIGHT_STATUS_BARS\n' +
+    '      bhv=DEFAULT\n' +
+    '      fitSides=}\n' +
+    '    KeyguardServiceDelegate\n' +
+    '      secure=true\n' +
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  const dumpsysSpaceFlagsNoSecure =
+    'WINDOW MANAGER WINDOWS\n' +
+    '  Window #1 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '    mAttrs={(0,0)(fillxfill) sim={adjust=resize} ty=BASE_APPLICATION\n' +
+    '      wanim=0x10302fe\n' +
+    '      fl=LAYOUT_IN_SCREEN FORCE_NOT_FULLSCREEN LAYOUT_INSET_DECOR SPLIT_TOUCH HARDWARE_ACCELERATED DRAWS_SYSTEM_BAR_BACKGROUNDS\n' +
+    '      pfl=NO_MOVE_ANIMATION FORCE_DRAW_STATUS_BAR_BACKGROUND USE_BLAST\n' +
+    '      bhv=DEFAULT\n' +
+    '      fitSides=}\n' +
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  const dumpsysSpaceFlagsLowercaseSecureOnly =
+    'WINDOW MANAGER WINDOWS\n' +
+    '  Window #1 Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}:\n' +
+    '    mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION\n' +
+    '      fl=LAYOUT_IN_SCREEN FORCE_NOT_FULLSCREEN LAYOUT_INSET_DECOR SPLIT_TOUCH HARDWARE_ACCELERATED}\n' +
+    '    KeyguardServiceDelegate\n' +
+    '      secure=true\n' +
+    '      mSimSecure=false\n' +
+    'mCurrentFocus=Window{def456 u0 org.enbox.mobile/org.enbox.mobile.MainActivity}\n';
+  if (!flagSecureOnFocusedPackageWindow(dumpsysSpaceFlagsWithSecure, APP_PACKAGE)) {
+    failures.push(
+      'case (h.24): false negative — flagSecureOnFocusedPackageWindow returned false on a production-shape space-delimited mAttrs ``fl=LAYOUT_IN_SCREEN FORCE_NOT_FULLSCREEN SECURE LAYOUT_INSET_DECOR ...``. This is the EXACT format the CI google_apis API 31 emulator emits (captured via flag-secure-diag in round-9 follow-up #2). A regression here re-creates the round-9 follow-up #3 CI failure.',
+    );
+  }
+  if (flagSecureOnFocusedPackageWindow(dumpsysSpaceFlagsNoSecure, APP_PACKAGE)) {
+    failures.push(
+      'case (h.25): false positive — flagSecureOnFocusedPackageWindow returned true on a space-delimited mAttrs ``fl=`` line that lacks the SECURE token. An overly-permissive matcher (e.g. plain ``includes("SECURE")``) would slip through.',
+    );
+  }
+  if (flagSecureOnFocusedPackageWindow(dumpsysSpaceFlagsLowercaseSecureOnly, APP_PACKAGE)) {
+    failures.push(
+      'case (h.26): false positive — flagSecureOnFocusedPackageWindow returned true on a window block that contains ONLY lowercase ``secure=true`` (KeyguardServiceDelegate / SimSecure state) and NO SECURE in fl=. Case-insensitive matching here would silently pass MainActivity FLAG_SECURE regressions on devices where Keyguard exposes its own ``secure=`` state inside the dumpsys window block.',
+    );
+  }
+  let h27Threw = false;
+  let h27Msg = '';
+  try {
+    await assertFlagSecureOnForeground(
+      'selftest',
+      () => ({stdout: dumpsysSpaceFlagsWithSecure, stderr: '', returncode: 0}),
+      1,
+      0,
+    );
+  } catch (e) {
+    h27Threw = true;
+    h27Msg = (e as Error).message;
+  }
+  if (h27Threw) {
+    failures.push(
+      `case (h.27): assertFlagSecureOnForeground threw on a real-shape healthy dumpsys (space-delimited fl= with SECURE token) — the production google_apis API 31+ happy path is broken. Error: ${JSON.stringify(h27Msg.slice(0, 200))}`,
+    );
+  }
+
+  // -------------------------------------------------------------------
   // (i) Round-9 F1: enrollFingerprint credential-screen matcher.
   //
   // Pre-Round-9 the matcher only recognized the ConfirmLock* family
@@ -3575,7 +3696,7 @@ async function selfTestSanitizer(): Promise<number> {
     '  (g) classifyForegroundDumpFromReader: fail-CLOSED on thrown reader, parity with classifier on successful reads',
   );
   logInfo(
-    '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only, mFocusedApp-only [Round-8 F1], mResumedActivity-only [Round-8 F1], focus-stabilization-retry-success [Round-8 F1], focus-stabilization-retry-exhaustion [Round-8 F1], real-shape hex fl=#<hex> with/without FLAG_SECURE bit 0x2000 [Round-9 follow-up], symbolic |SECURE| variant, ``flags=#<hex>`` OEM token, end-to-end IO wrapper on production hex shape — both throw and fast-path, focus-markers-AHEAD-of-block [Round-9 follow-up #2], two-app-windows-pick-focused-id [Round-9 follow-up #2])',
+    '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only, mFocusedApp-only [Round-8 F1], mResumedActivity-only [Round-8 F1], focus-stabilization-retry-success [Round-8 F1], focus-stabilization-retry-exhaustion [Round-8 F1], real-shape hex fl=#<hex> with/without FLAG_SECURE bit 0x2000 [Round-9 follow-up], symbolic |SECURE| variant, ``flags=#<hex>`` OEM token, end-to-end IO wrapper on production hex shape — both throw and fast-path, focus-markers-AHEAD-of-block [Round-9 follow-up #2], two-app-windows-pick-focused-id [Round-9 follow-up #2], REAL google_apis API 31 space-delimited fl=SECURE format [Round-9 follow-up #3], lowercase ``secure=true`` Keyguard state MUST NOT match)',
   );
   logInfo(
     '  (i) ENROLL_FOCUS_CREDENTIAL [Round-9 F1]: ConfirmLockPassword/Pin/Pattern + ChooseLockPassword/Pin/Pattern/Generic positive matches; FingerprintEnrollIntroduction/Enrolling, Launcher, our app are correctly REJECTED; ENROLL_FOCUS_CONFIRM back-compat alias preserved',
