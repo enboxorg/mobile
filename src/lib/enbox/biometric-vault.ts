@@ -763,11 +763,28 @@ export class BiometricVault
     //    we derived above. If this call fails (the native side was
     //    unable to create the keystore/keychain entry) there is nothing
     //    to roll back — no secret ever landed on disk.
+    //
+    //    Round-9 F3: pass `_provisionPrompt` (title/message/cancel)
+    //    through to the native layer. Android's `BiometricPrompt`
+    //    consumes these to render the provisioning prompt. iOS's
+    //    `LAContext.evaluatePolicy(...)` consumes them to render an
+    //    explicit "Confirm biometrics to finish setup" prompt
+    //    BEFORE `SecItemAdd`, since `SecItemAdd` with a
+    //    `BiometryCurrentSet` ACL does not prompt on its own —
+    //    pre-fix iOS setup completed without ever asking the user
+    //    for biometrics, which contradicted the BiometricSetup
+    //    screen copy and let an attacker who could trigger
+    //    provisioning programmatically (e.g. via a hijacked URL
+    //    scheme or test harness) seal a wallet with no human
+    //    presence check.
     try {
       await this._native.generateAndStoreSecret(WALLET_ROOT_KEY_ALIAS, {
         requireBiometrics: true,
         invalidateOnEnrollmentChange: true,
         secretHex: bytesToHex(entropy),
+        promptTitle: this._provisionPrompt.promptTitle,
+        promptMessage: this._provisionPrompt.promptMessage,
+        promptCancel: this._provisionPrompt.promptCancel,
       });
     } catch (err) {
       const mapped = mapNativeErrorToVaultError(err);

@@ -1508,7 +1508,32 @@ const WIZARD_ADVANCE_LABELS: readonly string[] = [
   'Fingerprint added',
 ];
 
-const ENROLL_FOCUS_CONFIRM = ['confirmlockpassword', 'confirmlockpin', 'confirmlockpattern'];
+// ENROLL_FOCUS_CREDENTIAL covers BOTH the ConfirmLock* family (re-
+// authenticate an existing screen lock) AND the ChooseLock* family
+// (set a brand-new screen lock from inside the FINGERPRINT_ENROLL
+// flow). Round-9 F1: on some API 31 ``google_apis`` images the
+// FINGERPRINT_ENROLL intent ignores the ``locksettings set-pin``
+// path applied by ``ensureDeviceCredential()`` and instead routes
+// through ChooseLockPassword (set new PIN → "Re-enter your PIN" →
+// confirm). The pre-fix matcher only recognized the Confirm*
+// variants, so the wizard's PIN-entry screen fell through to the
+// "unhandled" branch, the loop kept relaunching the intent (which
+// just bounced back to ChooseLockPassword), exhausted the
+// 8-relaunch budget, and then span the finger-touch / wizard-tap
+// fallback for the remaining ~9 minutes until the 600 s timeout.
+// The same ``inputText(DEVICE_PIN) + pressEnter()`` body advances
+// both Confirm and Choose flows (each ChooseLockPassword screen
+// has a focused ``password_entry`` that consumes IME input), so
+// merging the two sets is safe.
+const ENROLL_FOCUS_CREDENTIAL = [
+  'confirmlockpassword', 'confirmlockpin', 'confirmlockpattern',
+  'chooselockpassword', 'chooselockpin', 'chooselockpattern',
+  'chooselockgeneric',
+];
+// Back-compat alias for any future caller / external test that
+// imports the old name. Kept ``readonly`` so an accidental write
+// fails type-check.
+const ENROLL_FOCUS_CONFIRM: readonly string[] = ENROLL_FOCUS_CREDENTIAL;
 const ENROLL_FOCUS_INTRO = ['fingerprintenrollintroduction'];
 const ENROLL_FOCUS_FIND_SENSOR = ['fingerprintenrollfindsensor'];
 const ENROLL_FOCUS_ENROLLING = ['fingerprintenrollenrolling', 'fingerprintenrollsidecar'];
@@ -1670,13 +1695,26 @@ async function enrollFingerprint(timeout = 600.0): Promise<void> {
 
     let handled = false;
 
-    // 1) Credential confirmation — type the device PIN + ENTER.
-    if (focusMatches(focus, ENROLL_FOCUS_CONFIRM)) {
+    // 1) Credential entry — type the device PIN + ENTER.
+    //    Round-9 F1: this branch now ALSO handles the ChooseLock*
+    //    family (set new screen lock + "Re-enter your PIN"
+    //    confirmation) in addition to the original ConfirmLock*
+    //    family. Both surfaces share the same focused
+    //    ``password_entry`` EditText that consumes IME input, so the
+    //    same body advances both flows. After PIN+ENTER the wizard
+    //    moves to either FingerprintEnrollIntroduction (Confirm
+    //    path) or another ChooseLock screen (Choose path, e.g.
+    //    "Re-enter your PIN" → "Confirm your PIN"); either way the
+    //    next loop iteration picks it up.
+    if (focusMatches(focus, ENROLL_FOCUS_CREDENTIAL)) {
       inputText(DEVICE_PIN);
       await sleep(0.5);
       pressEnter();
       pins += 1;
-      logInfo(`[enrollFingerprint] typed device PIN on ConfirmLock* (${pins} total)`);
+      logInfo(
+        `[enrollFingerprint] typed device PIN on credential screen ` +
+          `(${pins} total, focus=${JSON.stringify(focus)})`,
+      );
       await sleep(2.0);
       handled = true;
     }
@@ -1796,6 +1834,36 @@ async function enrollFingerprint(timeout = 600.0): Promise<void> {
           stuckAtNonWizardSince = null;
           await sleep(3.0);
           continue;
+        } else if (
+          relaunches >= 8 &&
+          now - stuckAtNonWizardSince > 60_000
+        ) {
+          // Round-9 F1: hard-bail when the relaunch budget is
+          // exhausted AND we have been stuck on a non-wizard
+          // surface for >1 min. The pre-fix code kept tapping
+          // wizard-advance labels / sending finger touches for the
+          // remaining ~9 min until the 600 s timeout, masking the
+          // true root cause (the wizard had abandoned us back to a
+          // non-Settings surface, e.g. Launcher / ChooseLock loop)
+          // behind a generic ``hasEnrollments stayed false``
+          // message. Failing fast surfaces the actual focus +
+          // dumpsys excerpt to the operator within ~1 min instead
+          // of ~10 min and frees the rest of the CI budget for
+          // real diagnostics.
+          const dumpsysExcerpt = (
+            adb(['shell', 'dumpsys', 'fingerprint'], {check: false}).stdout ?? ''
+          )
+            .slice(0, 500)
+            .replace(/\n/g, ' | ');
+          throw new Error(
+            `enrollFingerprint: relaunch budget exhausted (relaunches=${relaunches}) ` +
+              `and stuck on a non-wizard surface for ` +
+              `${((now - stuckAtNonWizardSince) / 1000).toFixed(0)}s ` +
+              `(focus=${JSON.stringify(focus)}); ` +
+              `samples=${sampleCount} touches=${touches} taps=${taps} pins=${pins} ` +
+              `enrolling_touches=${enrollingTouches} finish_seen=${seenEnrollFinish} ` +
+              `dumpsys_excerpt=${JSON.stringify(dumpsysExcerpt)}`,
+          );
         }
       }
       // Fallback: try a text-based wizard advance + finger touch. NEVER tap
@@ -2977,6 +3045,109 @@ async function selfTestSanitizer(): Promise<number> {
     );
   }
 
+  // -------------------------------------------------------------------
+  // (i) Round-9 F1: enrollFingerprint credential-screen matcher.
+  //
+  // Pre-Round-9 the matcher only recognized the ConfirmLock* family
+  // (re-authenticate an existing screen lock). The
+  // FINGERPRINT_ENROLL intent on some API 31 google_apis images
+  // routes through the ChooseLock* family instead (set NEW screen
+  // lock → "Re-enter your PIN" confirmation), bouncing every
+  // re-launch attempt back to ChooseLockPassword and exhausting
+  // the relaunch budget. This cluster pins:
+  //   (i.1) every Confirm* focus descriptor matches the credential
+  //         set (back-compat regression guard).
+  //   (i.2) every Choose* focus descriptor matches the credential
+  //         set (the new branch — proves the ChooseLockPassword
+  //         "Re-enter your PIN" focus this round's CI artifacts
+  //         observed would now type the PIN instead of bouncing).
+  //   (i.3) ChooseLockGeneric matches (the umbrella activity that
+  //         the wizard launches first when no lock is set; some
+  //         Android 31 builds stop here without descending into a
+  //         specific Choose* subclass).
+  //   (i.4) non-credential foci (FingerprintEnrollIntroduction,
+  //         Launcher, app's own MainActivity) MUST NOT match —
+  //         a permissive matcher would silently type the PIN into
+  //         our own UI fields.
+  //   (i.5) ENROLL_FOCUS_CONFIRM is preserved as a back-compat
+  //         alias of ENROLL_FOCUS_CREDENTIAL so any external
+  //         test importer keeps working.
+  const credentialMatchPositive: ReadonlyArray<readonly [string, string]> = [
+    [
+      'mFocusedApp=Token{... ActivityRecord{u0 com.android.settings/.password.ConfirmLockPassword}}',
+      'i.1.a ConfirmLockPassword',
+    ],
+    [
+      'mCurrentFocus=Window{abc u0 com.android.settings/com.android.settings.password.ConfirmLockPin}',
+      'i.1.b ConfirmLockPin',
+    ],
+    [
+      'mFocusedApp=ActivityRecord{u0 com.android.settings/com.android.settings.password.ConfirmLockPattern t12}',
+      'i.1.c ConfirmLockPattern',
+    ],
+    [
+      'mFocusedApp=ActivityRecord{u0 com.android.settings/com.android.settings.password.ChooseLockPassword t12}',
+      'i.2.a ChooseLockPassword (CI repro)',
+    ],
+    [
+      'mFocusedApp=ActivityRecord{u0 com.android.settings/com.android.settings.password.ChooseLockPin}',
+      'i.2.b ChooseLockPin',
+    ],
+    [
+      'mFocusedApp=ActivityRecord{u0 com.android.settings/com.android.settings.password.ChooseLockPattern}',
+      'i.2.c ChooseLockPattern',
+    ],
+    [
+      'mFocusedApp=ActivityRecord{u0 com.android.settings/com.android.settings.password.ChooseLockGeneric}',
+      'i.3 ChooseLockGeneric umbrella',
+    ],
+  ];
+  for (const [fixture, label] of credentialMatchPositive) {
+    if (!focusMatches(fixture, ENROLL_FOCUS_CREDENTIAL)) {
+      failures.push(
+        `case (${label}): focus did not match ENROLL_FOCUS_CREDENTIAL — ` +
+          `enrollFingerprint would NOT type the device PIN on this screen ` +
+          `(focus=${JSON.stringify(fixture.slice(0, 160))})`,
+      );
+    }
+  }
+
+  const credentialMatchNegative: ReadonlyArray<readonly [string, string]> = [
+    [
+      'mFocusedApp=ActivityRecord{u0 com.android.settings/com.android.settings.biometrics.fingerprint.FingerprintEnrollIntroduction}',
+      'i.4.a FingerprintEnrollIntroduction',
+    ],
+    [
+      'mFocusedApp=ActivityRecord{u0 com.android.settings/com.android.settings.biometrics.fingerprint.FingerprintEnrollEnrolling}',
+      'i.4.b FingerprintEnrollEnrolling',
+    ],
+    [
+      'mFocusedApp=ActivityRecord{u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity}',
+      'i.4.c Launcher',
+    ],
+    [
+      'mFocusedApp=ActivityRecord{u0 org.enbox.mobile/org.enbox.mobile.MainActivity}',
+      'i.4.d our app — must NEVER receive the PIN keystrokes',
+    ],
+  ];
+  for (const [fixture, label] of credentialMatchNegative) {
+    if (focusMatches(fixture, ENROLL_FOCUS_CREDENTIAL)) {
+      failures.push(
+        `case (${label}): focus matched ENROLL_FOCUS_CREDENTIAL — ` +
+          `enrollFingerprint would incorrectly type the device PIN on this surface ` +
+          `(focus=${JSON.stringify(fixture.slice(0, 160))})`,
+      );
+    }
+  }
+
+  // (i.5) Back-compat alias.
+  if (ENROLL_FOCUS_CONFIRM !== (ENROLL_FOCUS_CREDENTIAL as readonly string[])) {
+    failures.push(
+      'case (i.5): ENROLL_FOCUS_CONFIRM is no longer aliased to ENROLL_FOCUS_CREDENTIAL — ' +
+        'external importers (tests, validation scripts) of the legacy name will see a stale matcher set',
+    );
+  }
+
   if (failures.length > 0) {
     logErr('== sanitizer self-test FAILED ==');
     for (const line of failures) {
@@ -3002,6 +3173,9 @@ async function selfTestSanitizer(): Promise<number> {
   );
   logInfo(
     '  (h) flagSecureOnFocusedPackageWindow + assertFlagSecureOnForeground: focus-aware parser & IO-wrapper contracts pinned (positive, negative, no-package, dumpsys-failure, throw-message, FOCUS-on-insecure-app-window, focus-on-system-overlay, focus=null, mFocusedWindow-only, mFocusedApp-only [Round-8 F1], mResumedActivity-only [Round-8 F1], focus-stabilization-retry-success [Round-8 F1], focus-stabilization-retry-exhaustion [Round-8 F1])',
+  );
+  logInfo(
+    '  (i) ENROLL_FOCUS_CREDENTIAL [Round-9 F1]: ConfirmLockPassword/Pin/Pattern + ChooseLockPassword/Pin/Pattern/Generic positive matches; FingerprintEnrollIntroduction/Enrolling, Launcher, our app are correctly REJECTED; ENROLL_FOCUS_CONFIRM back-compat alias preserved',
   );
   return 0;
 }

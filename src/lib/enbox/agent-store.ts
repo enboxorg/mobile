@@ -42,10 +42,76 @@ import {
  */
 const AGENT_DATA_PATH = 'ENBOX_AGENT';
 
+/**
+ * SecureStorage sentinel that records "the last reset() failed to wipe
+ * the on-disk LevelDB; the next agent initialization MUST retry the
+ * wipe before opening any database handle". Round-9 F4: pre-fix
+ * `reset()` silently swallowed `destroyAgentLevelDatabases()`
+ * rejections, leaving stale identities / DWN records / sync cursors
+ * on disk that a subsequent `initializeFirstLaunch()` would resurrect.
+ *
+ * The sentinel is written with `'true'` BEFORE `reset()` rethrows so a
+ * caller that crashes between the throw and a UI surface still gets
+ * the cleanup retried on the next cold launch. It is cleared by
+ * `runPendingLevelDbCleanup()` once a retry succeeds — that helper
+ * runs at the top of every `initializeFirstLaunch()` /
+ * `restoreFromMnemonic()` / `unlockAgent()` flow before the agent is
+ * created, so the wipe is guaranteed to land before any LevelDB
+ * handle is opened.
+ *
+ * The key namespace mirrors the other vault sentinels
+ * (``enbox.vault.initialized``, ``enbox.vault.biometric-state``) so
+ * existing SecureStorage cleanup patterns automatically pick it up.
+ */
+export const LEVELDB_CLEANUP_PENDING_KEY = 'enbox.agent.leveldb-cleanup-pending';
+
 /** Error code emitted by the biometric vault when the OS cannot satisfy a biometric prompt. */
 const BIOMETRICS_UNAVAILABLE_CODE = 'VAULT_ERROR_BIOMETRICS_UNAVAILABLE';
 /** Error code emitted by the biometric vault when the key was invalidated by the OS. */
 const KEY_INVALIDATED_CODE = 'VAULT_ERROR_KEY_INVALIDATED';
+
+/**
+ * Run a verified retry of `destroyAgentLevelDatabases()` if a previous
+ * `reset()` left the cleanup-pending sentinel on disk. Resolves with
+ * `true` on a successful (or vacuous) cleanup, throws with the
+ * underlying LevelDB error if the retry STILL fails — callers should
+ * treat that as a fatal "refuse to open agent over stale data"
+ * condition.
+ *
+ * Round-9 F4: the helper is exported so that `__tests__` can pin the
+ * retry contract directly without going through a full reset cycle.
+ */
+export async function runPendingLevelDbCleanup(
+  storage: { get: (key: string) => Promise<string | null>; remove: (key: string) => Promise<void> } = new SecureStorageAdapter(),
+): Promise<boolean> {
+  let pending: string | null;
+  try {
+    pending = await storage.get(LEVELDB_CLEANUP_PENDING_KEY);
+  } catch (err) {
+    console.warn(
+      '[agent-store] runPendingLevelDbCleanup: storage.get failed (treating as no-pending):',
+      err,
+    );
+    return true;
+  }
+  if (pending !== 'true') return true;
+  await destroyAgentLevelDatabases(AGENT_DATA_PATH);
+  // Wipe the sentinel ONLY after the retry succeeded. A crash between
+  // here and the storage.remove call leaves the sentinel set, which
+  // forces the next launch through this code path again — that's
+  // safe (`destroyAgentLevelDatabases` is idempotent on already-empty
+  // directories) and strictly preferable to clearing the flag before
+  // we know the wipe stuck.
+  try {
+    await storage.remove(LEVELDB_CLEANUP_PENDING_KEY);
+  } catch (err) {
+    console.warn(
+      '[agent-store] runPendingLevelDbCleanup: failed to clear sentinel after successful retry (next launch will re-run the cleanup):',
+      err,
+    );
+  }
+  return true;
+}
 
 export interface AgentStore {
   agent: EnboxUserAgent | null;
@@ -337,6 +403,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // applies to first-launch as to unlock.
     let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
+      // Round-9 F4: retry any pending LevelDB wipe from a previous
+      // `reset()` BEFORE creating the agent. `runPendingLevelDbCleanup`
+      // is fail-CLOSED — if the retry rejects we throw before opening
+      // the LevelDB handle so a stale identity / DWN record can never
+      // resurrect into a fresh wallet.
+      await runPendingLevelDbCleanup();
       console.log('[agent-store] initializeFirstLaunch: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       vaultRef = vault;
@@ -445,6 +517,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // review Finding 5.)
     let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
+      // Round-9 F4: see `initializeFirstLaunch()` for the rationale.
+      await runPendingLevelDbCleanup();
       console.log('[agent-store] unlockAgent: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       vaultRef = vault;
@@ -627,7 +701,28 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
     // ---- Phase 2: destructive restore ----
     set({ isInitializing: true, error: null });
+    // Local vault reference for the catch path's defensive lock — same
+    // pattern unlockAgent() / resumePendingBackup() use (VAL-VAULT-031
+    // / Round-2 Finding 5). Inside the destructive phase
+    // `agent.initialize({recoveryPhrase})` calls
+    // `BiometricVault.initialize({recoveryPhrase})` which lands the
+    // 32-byte root entropy + derived HD seed + CEK into the vault's
+    // private fields BEFORE returning. If a LATER step throws (e.g.
+    // `vault.getDid()` or the success-path `set(...)`), nulling the
+    // store reference alone leaves the unlocked vault in heap memory
+    // until GC. An explicit `lock()` zeroes those buffers
+    // synchronously so a heap snapshot taken between the throw and
+    // the next `restoreFromMnemonic()` retry cannot leak the
+    // restored entropy.
+    let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
+      // Round-9 F4: retry any pending LevelDB wipe from a previous
+      // `reset()` BEFORE creating the agent. Restore is the most
+      // important place to enforce this — a user typing a recovery
+      // phrase MUST land on a clean DWN/identity store, not one that
+      // still contains residue from the wallet they're recovering away
+      // from.
+      await runPendingLevelDbCleanup();
       // Wipe any prior biometric-gated secret so the vault's
       // `initialize({ recoveryPhrase })` path won't fast-fail with
       // `VAULT_ERROR_ALREADY_INITIALIZED`. Best-effort — a missing
@@ -648,6 +743,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // vault whose BearerDid matches the restored entropy.
       console.log('[agent-store] restoreFromMnemonic: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
+      vaultRef = vault;
 
       // Re-seal the biometric vault with the caller-provided
       //    mnemonic. `agent.initialize` forwards `recoveryPhrase`
@@ -707,6 +803,26 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         console.warn('[agent-store] restore blocked: biometric key invalidated');
       } else {
         console.error('[agent-store] restoreFromMnemonic failed:', message);
+      }
+      // Defensive zeroization parallels `unlockAgent()` /
+      // `resumePendingBackup()`. If `agent.initialize({recoveryPhrase})`
+      // already ran (so the vault holds restored 32-byte entropy / HD
+      // seed / CEK in private fields) and a later step inside the
+      // try block threw, the store-reference null below is the only
+      // cleanup, and Hermes GC can take many seconds before the
+      // buffers are reclaimed. Calling `lock()` zeroes those buffers
+      // synchronously so the residency window between rejection and
+      // the next retry / app close is closed. A `lock()` rejection
+      // is logged but never re-throws so the original restore error
+      // remains the one the caller observes.
+      if (vaultRef !== null) {
+        // eslint-disable-next-line no-void
+        void vaultRef.lock().catch((lockErr) => {
+          console.warn(
+            '[agent-store] restoreFromMnemonic: defensive vault.lock() failed (ignored):',
+            lockErr,
+          );
+        });
       }
       let nextBiometricState = get().biometricState;
       if (code === BIOMETRICS_UNAVAILABLE_CODE) {
@@ -895,11 +1011,50 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    resurrecting identities / DWN records / sync cursors from the
     //    previous wallet. The helper closes any open handle first and
     //    resolves idempotently when nothing is on disk.
+    //
+    //    Round-9 F4: pre-fix code SILENTLY SWALLOWED a
+    //    `destroyAgentLevelDatabases()` rejection (the catch block
+    //    only logged a warning). That conflicts with the reset
+    //    contract — "erase identities, DWN records, sync cursors,
+    //    biometric secret" — because a swallowed wipe leaves stale
+    //    identity material on disk that the very next
+    //    `initializeFirstLaunch()` resurrects via the LevelDB handle
+    //    `EnboxUserAgent.create()` opens against `dataPath`. The
+    //    user's "Reset wallet" tap reports success, but the
+    //    next launch quietly re-loads the previous wallet's
+    //    identities / DWN records.
+    //
+    //    The fix is two-pronged:
+    //      a) Persist a `LEVELDB_CLEANUP_PENDING_KEY` sentinel BEFORE
+    //         rethrowing so the next cold launch retries the wipe
+    //         (`runPendingLevelDbCleanup()`) before opening any
+    //         agent LevelDB handle. The retry is fail-CLOSED — if it
+    //         still throws, agent initialization refuses to proceed.
+    //      b) Rethrow the LevelDB error from `reset()` so the
+    //         immediate caller (Settings, recovery-restore-screen)
+    //         can surface the failure to the user and offer a retry.
+    //
+    //    Steps 1, 3 and 4 still execute on the failure path so the
+    //    in-memory state and biometric secret cleanup land BEFORE
+    //    the rethrow — only the LevelDB wipe is left pending.
+    let levelDbError: unknown = null;
     try {
       await destroyAgentLevelDatabases(AGENT_DATA_PATH);
     } catch (err) {
+      levelDbError = err;
+      try {
+        await new SecureStorageAdapter().set(
+          LEVELDB_CLEANUP_PENDING_KEY,
+          'true',
+        );
+      } catch (storageErr) {
+        console.warn(
+          '[agent-store] reset: failed to persist LevelDB cleanup-pending sentinel (next launch will not retry the wipe):',
+          storageErr,
+        );
+      }
       console.warn(
-        '[agent-store] reset: LevelDB wipe failed (ignored):',
+        '[agent-store] reset: LevelDB wipe failed; sentinel persisted for retry:',
         err,
       );
     }
@@ -917,6 +1072,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       await useSessionStore.getState().reset();
     } catch (err) {
       console.warn('[agent-store] reset: session-store reset failed:', err);
+    }
+
+    // 5. Round-9 F4: rethrow the LevelDB wipe failure now that the
+    //    in-memory state has been torn down and the session-store
+    //    has been reset. The sentinel persisted above guarantees the
+    //    next agent-init flow retries the wipe before opening the
+    //    LevelDB handle, so even a caller that swallows the throw
+    //    cannot resurrect stale identities. We rethrow the ORIGINAL
+    //    error (not a wrapped one) so callers using `instanceof Error`
+    //    / `.code` predicates still work.
+    if (levelDbError !== null) {
+      throw levelDbError;
     }
   },
 }));

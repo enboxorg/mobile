@@ -316,6 +316,137 @@ describe('useAgentStore.initializeFirstLaunch() — defensive vault.lock() in ca
   });
 });
 
+// Round-9 self-audit: parity for `restoreFromMnemonic()`.
+//
+// `unlockAgent()` and `resumePendingBackup()` already had the
+// `vaultRef`-then-defensive-lock pattern; `restoreFromMnemonic()`
+// did not. That left a documented residency window: if
+// `agent.initialize({recoveryPhrase})` had already populated the
+// vault's `_secretBytes` / `_rootSeed` / CEK and a LATER step (e.g.
+// `vault.getDid()` or the success-path `set(...)`) threw, the
+// catch block would null the store reference but the vault
+// instance — still holding the just-restored 32-byte entropy in
+// memory — would survive in heap until GC. A heap snapshot taken
+// between the throw and the next retry could leak the user's
+// freshly-restored seed.
+//
+// The fix mirrors the other two paths: capture `vaultRef` after
+// `initializeAgent()` returns, and call `vaultRef.lock()`
+// defensively in the catch block. This test pins that behavior
+// against regressions that drop the local reference.
+describe('useAgentStore.restoreFromMnemonic() — defensive vault.lock() in catch path (Round-9 self-audit)', () => {
+  // BIP-39 24-word fixture that passes `@scure/bip39` validation
+  // so `restoreFromMnemonic()`'s Phase-1 guard does not short-circuit
+  // before reaching the vault-lock catch path under test.
+  const VALID_24_WORD_MNEMONIC =
+    'abandon abandon abandon abandon abandon abandon ' +
+    'abandon abandon abandon abandon abandon abandon ' +
+    'abandon abandon abandon abandon abandon abandon ' +
+    'abandon abandon abandon abandon abandon art';
+
+  it('calls vault.lock() when agent.initialize({recoveryPhrase}) rejects post-vault-creation', async () => {
+    // `initialize()` rejecting AFTER `initializeAgent()` returned
+    // simulates the realistic failure mode: the BiometricVault has
+    // already been instantiated and may have begun unlocking, then
+    // a downstream step (e.g. native rejection mid-flow, an
+    // upstream regression that mutates a property post-unlock)
+    // throws.
+    const initError = Object.assign(new Error('initialize threw post-unlock'), {
+      code: 'VAULT_ERROR',
+    });
+    const { agent, vault } = makeFakes({ initializeError: initError });
+    jest.doMock('@/lib/enbox/agent-init', () => ({
+      __esModule: true,
+      initializeAgent: jest.fn(async () => ({
+        agent,
+        authManager: { id: 'auth' },
+        vault,
+      })),
+      createBiometricVault: jest.fn(),
+    }));
+
+    const { useAgentStore: freshStore } = require('@/lib/enbox/agent-store');
+
+    await expect(
+      freshStore.getState().restoreFromMnemonic(VALID_24_WORD_MNEMONIC),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+
+    // The defensive lock fired exactly once on the vault returned
+    // by `initializeAgent()` — scrubbing any restored secret bytes
+    // / CEK / HD seed that may have landed before the throw.
+    expect(vault.lock).toHaveBeenCalledTimes(1);
+
+    // Store references are still cleared for the success-path
+    // teardown semantics; the defensive lock is additive.
+    expect(freshStore.getState().vault).toBeNull();
+    expect(freshStore.getState().agent).toBeNull();
+    expect(freshStore.getState().recoveryPhrase).toBeNull();
+  });
+
+  it('does NOT call vault.lock() when initializeAgent() itself rejects (no vault to lock)', async () => {
+    // Pre-`initializeAgent()` failure modes (e.g. a corrupt
+    // `runPendingLevelDbCleanup()` retry, or `initializeAgent()`
+    // crashing in its construction phase) MUST NOT touch the
+    // never-materialised vault.
+    const initError = Object.assign(new Error('initializeAgent crashed'), {
+      code: 'VAULT_ERROR',
+    });
+    const sentinelLock = jest.fn(async () => undefined);
+    jest.doMock('@/lib/enbox/agent-init', () => ({
+      __esModule: true,
+      initializeAgent: jest.fn(async () => {
+        throw initError;
+      }),
+      createBiometricVault: jest.fn(),
+    }));
+
+    const { useAgentStore: freshStore } = require('@/lib/enbox/agent-store');
+
+    await expect(
+      freshStore.getState().restoreFromMnemonic(VALID_24_WORD_MNEMONIC),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+
+    expect(sentinelLock).not.toHaveBeenCalled();
+    expect(freshStore.getState().vault).toBeNull();
+  });
+
+  it('surfaces the ORIGINAL error even when the defensive vault.lock() also rejects', async () => {
+    // Symmetric with the `unlockAgent()` / `resumePendingBackup()`
+    // tests above: a `lock()` rejection inside the cleanup path is
+    // logged via `console.warn` but MUST NOT be re-thrown — the
+    // caller has to see the original restore failure.
+    const initError = Object.assign(new Error('original restore failure'), {
+      code: 'VAULT_ERROR_USER_CANCEL',
+    });
+    const lockError = new Error('lock crashed during cleanup');
+    const { agent, vault } = makeFakes({
+      initializeError: initError,
+      lockError,
+    });
+    jest.doMock('@/lib/enbox/agent-init', () => ({
+      __esModule: true,
+      initializeAgent: jest.fn(async () => ({
+        agent,
+        authManager: { id: 'auth' },
+        vault,
+      })),
+      createBiometricVault: jest.fn(),
+    }));
+
+    const { useAgentStore: freshStore } = require('@/lib/enbox/agent-store');
+
+    await expect(
+      freshStore.getState().restoreFromMnemonic(VALID_24_WORD_MNEMONIC),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR_USER_CANCEL' });
+
+    expect(vault.lock).toHaveBeenCalledTimes(1);
+    // Flush the catch handler chained to vault.lock so the rejection
+    // does not leak as an unhandledRejection in the test process.
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+});
+
 describe('useAgentStore.resumePendingBackup() — defensive vault.lock() in catch path (VAL-VAULT-031)', () => {
   it('calls vault.lock() when vault.getMnemonic() rejects post-unlock', async () => {
     const getMnemonicError = Object.assign(new Error('mnemonic re-derive failed'), {

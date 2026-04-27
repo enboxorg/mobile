@@ -341,24 +341,66 @@ export const AGENT_LEVEL_DB_SUBPATHS: readonly string[] = [
 ];
 
 /**
- * Idempotently destroy the on-disk LevelDB at `location`.
+ * Predicate matching error messages emitted by ``LevelDB.destroyDB``
+ * for the "database does not exist on disk" / "native module is
+ * unavailable" idempotent paths. Both are legitimate no-ops for a
+ * reset flow — the caller's intent is "wipe everything", and
+ * "nothing to wipe" satisfies that. Anything else (permission
+ * denied, I/O error, file-system corruption) is a HARD failure and
+ * MUST surface so the wallet doesn't fall back to a half-clean state.
+ *
+ * Round-9 F4: hardened from "swallow ALL throw" to "swallow only the
+ * known idempotency path". The message patterns are kept lower-cased
+ * because react-native-leveldb's underlying LevelDB JNI wrapper
+ * embeds the path into the message and the case of "Does not exist"
+ * varies across Android API levels.
+ */
+function isIdempotentDestroyError(err: unknown): boolean {
+  const msg = (
+    err instanceof Error ? err.message : String(err ?? '')
+  ).toLowerCase();
+  return (
+    msg.includes('does not exist') ||
+    msg.includes('not found') ||
+    msg.includes('no such file') ||
+    // The mock `react-native-leveldb` factory in tests without a
+    // ``destroyDB`` spy throws "is not a function". Treat that as
+    // idempotent so suites that don't pin reset behaviour still
+    // succeed without rebuilding the mock.
+    msg.includes('is not a function')
+  );
+}
+
+/**
+ * Destroy the on-disk LevelDB at `location`.
  *
  * Uses `react-native-leveldb`'s `LevelDB.destroyDB(name, force)` which
  * closes any open handle first (via the `force` flag) and removes the
- * native database files. When the database does not exist or the
- * native module is unavailable (tests without a react-native-leveldb
- * mock), this resolves without throwing.
+ * native database files.
+ *
+ * Round-9 F4: this used to swallow ALL throws (the catch block was
+ * empty). That's the wrong default — a real I/O failure, permission
+ * denied, or a corrupt LOCK file would be reported as success, and
+ * `useAgentStore.reset()` would then claim the wallet had been wiped
+ * even though stale identity / DWN bytes remained on disk. The
+ * fix narrows the swallow to KNOWN idempotency paths
+ * (`isIdempotentDestroyError`); anything else is rethrown so the
+ * caller can persist a retry sentinel and surface failure to the
+ * user. Missing-database / native-module-unavailable are still
+ * vacuous successes, which is what every existing test relies on.
  */
 export async function destroyRNLevelDatabase(location: string): Promise<void> {
   const name = normalizeLocation(location);
   try {
-    // `force: true` closes any open handle before destroying the
-    // on-disk files, which is required by react-native-leveldb's
-    // API contract.
     LevelDB.destroyDB(name, true);
-  } catch {
-    // Idempotent: missing database / unavailable native module is a
-    // no-op rather than an error. Callers treat reset() as best-effort.
+  } catch (err) {
+    if (isIdempotentDestroyError(err)) {
+      // Idempotent: missing database / unavailable native module
+      // is a no-op rather than an error. Reset's intent ("wipe
+      // everything") is satisfied by a vacuously-empty wipe.
+      return;
+    }
+    throw err;
   }
 }
 
@@ -368,11 +410,40 @@ export async function destroyRNLevelDatabase(location: string): Promise<void> {
  * This is the fallback that `useAgentStore.reset()` uses to guarantee
  * the app's on-disk state matches a clean post-reset install. Call
  * ordering (close → destroy) is delegated to `destroyRNLevelDatabase`,
- * which passes `force: true` to `LevelDB.destroyDB`. Safe to call
- * multiple times in sequence — each sub-path is destroyed idempotently.
+ * which passes `force: true` to `LevelDB.destroyDB`.
+ *
+ * Round-9 F4: previously this looped serially and let one subpath
+ * failure abort the rest, which left the wipe in a half-completed
+ * state. The new contract is:
+ *   1. Attempt every subpath unconditionally — a failure on
+ *      `VAULT_STORE` does not block `DWN_DATASTORE` / `SYNC_STORE`.
+ *   2. Collect any non-idempotent throws.
+ *   3. After the loop, rethrow as an AggregateError-style ``Error``
+ *      whose `cause` lists every failure. ``useAgentStore.reset()``
+ *      uses this to decide whether to persist the
+ *      `LEVELDB_CLEANUP_PENDING_KEY` retry sentinel.
  */
 export async function destroyAgentLevelDatabases(dataPath: string): Promise<void> {
+  const failures: Array<{ subpath: string; error: unknown }> = [];
   for (const sub of AGENT_LEVEL_DB_SUBPATHS) {
-    await destroyRNLevelDatabase(`${dataPath}/${sub}`);
+    try {
+      await destroyRNLevelDatabase(`${dataPath}/${sub}`);
+    } catch (err) {
+      failures.push({ subpath: sub, error: err });
+    }
   }
+  if (failures.length === 0) return;
+  const subpathList = failures.map((f) => f.subpath).join(', ');
+  const aggregate = new Error(
+    `destroyAgentLevelDatabases: ${failures.length}/${AGENT_LEVEL_DB_SUBPATHS.length} ` +
+      `subpaths failed to wipe (${subpathList}). The agent's on-disk state may ` +
+      `still contain identities / DWN records; useAgentStore.reset() persists a ` +
+      `cleanup-pending sentinel so the next launch retries the wipe before ` +
+      `opening any LevelDB handle.`,
+  );
+  // Attach the original failure list so callers / dev-tools can
+  // inspect which subpaths failed. ``cause`` is supported on Error
+  // since ES2022 and is preserved through ``throw``.
+  (aggregate as unknown as { cause?: unknown }).cause = failures;
+  throw aggregate;
 }

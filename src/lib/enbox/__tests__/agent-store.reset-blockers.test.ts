@@ -271,22 +271,99 @@ describe('useAgentStore.reset() — LevelDB wipe (scrutiny blocker 3)', () => {
     ]));
   });
 
-  it('still completes reset() even if LevelDB.destroyDB throws (idempotent)', async () => {
+  // Round-9 F4: the previous test pinned the SWALLOWED-error contract
+  // ("reset() resolves cleanly even when destroyDB throws"). That
+  // hides genuine wipe failures from the caller and leaves stale
+  // identities / DWN records on disk that the next
+  // `initializeFirstLaunch()` resurrects via the LevelDB handle the
+  // agent opens against `dataPath`. The new contract is fail-LOUD:
+  //   1. The in-memory state is torn down (agent / vault / phrase null).
+  //   2. A `LEVELDB_CLEANUP_PENDING_KEY` sentinel is persisted to
+  //      SecureStorage so the next agent-init flow retries the wipe
+  //      before opening any LevelDB handle.
+  //   3. The LevelDB error is RETHROWN so callers (Settings,
+  //      recovery-restore-screen) can surface the failure and offer a
+  //      retry, instead of reporting success on a half-completed wipe.
+  it('rethrows LevelDB.destroyDB failure AND persists a cleanup-pending sentinel (Round-9 F4)', async () => {
     await useAgentStore.getState().initializeFirstLaunch();
 
     // First destroy rejects — subsequent ones still run but reset()
-    // must swallow the error and return cleanly.
+    // must rethrow after persisting the retry sentinel.
     mockDestroyDB.mockImplementationOnce(() => {
       throw new Error('simulated on-disk wipe failure');
     });
 
-    await expect(useAgentStore.getState().reset()).resolves.toBeUndefined();
+    let thrown: unknown = null;
+    try {
+      await useAgentStore.getState().reset();
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    // ``destroyAgentLevelDatabases`` aggregates per-subpath failures
+    // into a single Error whose message lists the failed subpaths
+    // and whose ``cause`` is the original failure list. The cause
+    // must include the simulated failure so a developer reading
+    // logs can correlate to the test.
+    const errMessage = (thrown as Error).message;
+    expect(errMessage).toMatch(/destroyAgentLevelDatabases.*subpaths failed to wipe/);
+    const cause = (thrown as unknown as { cause?: unknown }).cause;
+    expect(Array.isArray(cause)).toBe(true);
+    const causes = cause as Array<{ subpath: string; error: Error }>;
+    expect(causes.length).toBeGreaterThanOrEqual(1);
+    expect(causes[0].error).toBeInstanceOf(Error);
+    expect(causes[0].error.message).toMatch(/simulated on-disk wipe failure/);
 
-    // Agent-store state is still torn down even though one wipe threw.
+    // Agent-store state IS still torn down even though the wipe threw.
+    // The throw happens AFTER teardown so a caller swallowing it still
+    // ends up in a consistent in-memory state.
     const s = useAgentStore.getState();
     expect(s.agent).toBeNull();
     expect(s.vault).toBeNull();
     expect(s.recoveryPhrase).toBeNull();
+
+    // The retry sentinel was persisted under the canonical key.
+    // The SecureStorageAdapter prefixes every key with 'enbox:' before
+    // writing through NativeSecureStorage, so the on-disk key is
+    // `enbox:` + `enbox.agent.leveldb-cleanup-pending`.
+    const sentinelWrites = nativeSecure.setItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.agent.leveldb-cleanup-pending',
+    );
+    expect(sentinelWrites.length).toBeGreaterThanOrEqual(1);
+    expect(sentinelWrites[0][1]).toBe('true');
+  });
+
+  // Round-9 F4 cont.: regression test for the recovery path. After a
+  // failed reset() persists the sentinel, the very NEXT
+  // `initializeFirstLaunch()` MUST retry the wipe before opening the
+  // LevelDB handle. We pin this here so a future refactor that drops
+  // `runPendingLevelDbCleanup()` from the init flow is caught by CI.
+  it('next initializeFirstLaunch() retries the LevelDB wipe via the sentinel', async () => {
+    // Stub SecureStorage.get to report the sentinel as set on first
+    // read (simulating the post-failed-reset state on a cold launch).
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.agent.leveldb-cleanup-pending') return 'true';
+      return null;
+    });
+    // Reset the destroyDB spy so we only count the calls made by the
+    // pending-cleanup retry (NOT a baseline reset).
+    mockDestroyDB.mockReset();
+    mockDestroyDB.mockImplementation(() => undefined);
+
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    // The retry must run the destroyDB call against the canonical
+    // sub-databases — same surface as a real reset() wipe.
+    expect(mockDestroyDB).toHaveBeenCalled();
+    const destroyedNames = mockDestroyDB.mock.calls.map((c) => c[0]);
+    expect(destroyedNames).toEqual(
+      expect.arrayContaining(['ENBOX_AGENT__VAULT_STORE']),
+    );
+    // And the sentinel was deleted after the successful retry.
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.agent.leveldb-cleanup-pending',
+    );
+    expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
   });
 
   it('also wipes LevelDB on the no-vault fallback path', async () => {

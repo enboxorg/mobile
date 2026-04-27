@@ -258,6 +258,37 @@ export function RecoveryRestoreScreen({
         onRestored();
       }
     } catch {
+      // Round-9 F2: if `hydrateRestored()` rejects, the just-
+      // committed agent/vault inside the agent-store is still
+      // unlocked in memory (the `set({agent, vault, ...})` call in
+      // `restoreFromMnemonic()` ran BEFORE `hydrateRestored()`),
+      // but `session.isLocked` stayed `true` because
+      // `hydrateRestored()` flips it ONLY after `persistSessionOrThrow`
+      // resolves. The auto-lock hook short-circuits when the
+      // session is already locked
+      // (`if (useSessionStore.getState().isLocked) return;`), so
+      // no teardown ever fires for the resident vault — the
+      // unlocked secret/DID/CEK material survives in JS memory
+      // until the process is killed (or until the user retries
+      // and re-tears-down on the next attempt).
+      //
+      // Tear down explicitly here so the rejection path matches
+      // the success-then-background path: vault.lock() zeroes the
+      // in-memory secret bytes synchronously, then the agent /
+      // authManager / vault refs are nulled out. The error UI
+      // continues to render the same inline retry alert; the
+      // user can re-type the mnemonic, which goes through
+      // `restoreFromMnemonic()` again and re-derives a fresh vault
+      // reference — there is nothing the cleared agent-store
+      // state breaks for the retry.
+      try {
+        useAgentStore.getState().teardown();
+      } catch (tearDownErr) {
+        console.warn(
+          '[recovery-restore] teardown after hydrateRestored() rejection threw (ignored):',
+          tearDownErr,
+        );
+      }
       setErrorMessage(SESSION_PERSIST_FAILURE_MESSAGE);
     } finally {
       inFlightRef.current = false;

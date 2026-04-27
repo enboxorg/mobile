@@ -347,6 +347,7 @@ jobs:
             /tmp/logcat-full.txt
             /tmp/logcat-rn.txt
             /tmp/logcat-startup.txt
+            /tmp/emulator-debug-flow.log
             /tmp/emulator-ui-artifacts/**
           # retention-days must be >= 7 per VAL-CI-030.
           retention-days: 7

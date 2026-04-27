@@ -43,12 +43,22 @@ jest.mock('@/lib/enbox/agent-store', () => {
    
   const { create } = require('zustand');
   const mockRestoreFromMnemonic = jest.fn();
+  // Round-9 F2: the recovery-restore screen MUST call
+  // `useAgentStore.getState().teardown()` from the `hydrateRestored()`
+  // rejection branch, so the just-restored agent / vault state in the
+  // store is cleared instead of lingering as an unlocked, orphaned
+  // agent (auto-lock would skip teardown because session.isLocked
+  // remains `true` until the persist resolves). The test mock has to
+  // expose `teardown` so we can assert the call.
+  const mockTeardown = jest.fn();
   const useAgentStore = create(() => ({
     restoreFromMnemonic: mockRestoreFromMnemonic,
+    teardown: mockTeardown,
   }));
   return {
     useAgentStore,
     __mockRestoreFromMnemonic: mockRestoreFromMnemonic,
+    __mockTeardown: mockTeardown,
   };
 });
 
@@ -64,9 +74,10 @@ const {
   disableFlagSecure: mockDisableFlagSecure,
 } = require('@/lib/native/flag-secure');
  
-const { __mockRestoreFromMnemonic: mockRestoreFromMnemonic } = require(
-  '@/lib/enbox/agent-store',
-);
+const {
+  __mockRestoreFromMnemonic: mockRestoreFromMnemonic,
+  __mockTeardown: mockAgentTeardown,
+} = require('@/lib/enbox/agent-store');
  
 const NativeBiometricVault = require('@specs/NativeBiometricVault').default;
 
@@ -134,6 +145,7 @@ describe('RecoveryRestoreScreen', () => {
     (mockEnableFlagSecure as jest.Mock).mockClear();
     (mockDisableFlagSecure as jest.Mock).mockClear();
     (mockRestoreFromMnemonic as jest.Mock).mockReset();
+    (mockAgentTeardown as jest.Mock).mockReset();
     (NativeBiometricVault.generateAndStoreSecret as jest.Mock).mockClear();
     (Platform as { OS: string }).OS = originalPlatformOS;
 
@@ -387,6 +399,85 @@ describe('RecoveryRestoreScreen', () => {
     expect(
       screen.getByLabelText('Recovery phrase input').props.value,
     ).toBe(VALID_MNEMONIC_24);
+  });
+
+  // ------------------------------------------------------------------
+  // Round-9 F2: orphaned-vault zeroization on persistence failure.
+  //
+  // `restoreFromMnemonic()` commits the unlocked agent / vault into the
+  // agent-store BEFORE the screen calls `hydrateRestored()`. The
+  // session-store flips `isLocked: false` only AFTER the SecureStorage
+  // write inside `hydrateRestored()` resolves — so a rejection there
+  // leaves the system in this state:
+  //   - agent-store: vault unlocked, _secretBytes / _rootSeed / DID /
+  //     CEK populated.
+  //   - session-store: `isLocked` STILL `true` (the persist-then-flip
+  //     contract).
+  //   - use-auto-lock: short-circuits when `isLocked` is true, so the
+  //     vault is never `lock()`-ed even on backgrounding.
+  // The pre-fix catch block only displayed a retry alert; the
+  // unlocked secret bytes lingered in JS memory until the process
+  // was killed. The fix makes the catch block call
+  // `useAgentStore.getState().teardown()` synchronously, which
+  // `lock()`s the vault (zeroes secret bytes / DID / CEK) and nulls
+  // out the agent / authManager / vault refs.
+  // ------------------------------------------------------------------
+  it('tears down the agent-store when hydrateRestored rejects (Round-9 F2)', async () => {
+    (mockRestoreFromMnemonic as jest.Mock).mockResolvedValue(undefined);
+
+    const persistError = new Error('secure storage unavailable');
+    jest
+      .spyOn(useSessionStore.getState(), 'hydrateRestored')
+      .mockRejectedValueOnce(persistError);
+
+    const onRestored = jest.fn();
+    const screen = render(
+      <RecoveryRestoreScreen onRestored={onRestored} />,
+    );
+
+    typeMnemonic(screen, VALID_MNEMONIC_24);
+
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Restore wallet'));
+    });
+
+    // restoreFromMnemonic ran (so the in-memory agent / vault was
+    // committed), hydrateRestored rejected, and the screen MUST have
+    // explicitly torn down the agent-store to zero the orphaned
+    // unlocked vault material before rendering the retry alert.
+    expect(mockRestoreFromMnemonic).toHaveBeenCalledTimes(1);
+    expect(mockAgentTeardown).toHaveBeenCalledTimes(1);
+    expect(onRestored).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toBeTruthy();
+  });
+
+  // Round-9 F2 cont.: teardown failures inside the catch block must
+  // not break the user-visible retry path. A teardown that throws is
+  // logged and swallowed; the inline retry alert is still rendered
+  // and the input remains populated so the user can resubmit.
+  it('renders retry alert even if teardown() also throws (Round-9 F2)', async () => {
+    (mockRestoreFromMnemonic as jest.Mock).mockResolvedValue(undefined);
+    (mockAgentTeardown as jest.Mock).mockImplementation(() => {
+      throw new Error('teardown blew up');
+    });
+    jest
+      .spyOn(useSessionStore.getState(), 'hydrateRestored')
+      .mockRejectedValueOnce(new Error('secure storage unavailable'));
+
+    const onRestored = jest.fn();
+    const screen = render(
+      <RecoveryRestoreScreen onRestored={onRestored} />,
+    );
+
+    typeMnemonic(screen, VALID_MNEMONIC_24);
+
+    await act(async () => {
+      fireEvent.press(screen.getByLabelText('Restore wallet'));
+    });
+
+    expect(mockAgentTeardown).toHaveBeenCalledTimes(1);
+    expect(onRestored).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toBeTruthy();
   });
 
   it('allows a retry after a hydrateRestored rejection (CTA not wedged)', async () => {

@@ -53,11 +53,23 @@ ARTIFACT_DIR=/tmp/emulator-ui-artifacts
 LOGCAT_FULL=/tmp/logcat-full.txt
 LOGCAT_RN=/tmp/logcat-rn.txt
 LOGCAT_STARTUP=/tmp/logcat-startup.txt
+# Round-9 F5: capture the emulator-debug-flow.ts driver's stdout +
+# stderr to a file so a 600s enrollment timeout (or any other
+# blocking failure) leaves a uploadable transcript for post-mortem
+# debugging. Without this artifact the only visible diagnostic was
+# the ``logcat`` tail, which often misses the driver's own
+# step-by-step "[flow] ..." log lines that show exactly which Wizard
+# screen the script was stuck on.
+DRIVER_LOG=/tmp/emulator-debug-flow.log
 MAX_LOGCAT_BYTES=10485760  # 10 MiB — keeps each artifact well under GH's limit (VAL-CI-032)
 APP_PACKAGE=org.enbox.mobile
 APP_ACTIVITY="${APP_PACKAGE}/.MainActivity"
 
 mkdir -p "${UI_DIR}" "${ARTIFACT_DIR}"
+# Pre-create the driver log file so the artifact-upload step's path
+# glob always resolves, even if the driver process never produced
+# any output (e.g. ``bun`` exec failed before the first println).
+: > "${DRIVER_LOG}"
 
 echo "=== Installing release APK ==="
 adb install android/app/build/outputs/apk/release/app-release.apk
@@ -71,8 +83,13 @@ adb shell am start -n "${APP_ACTIVITY}"
 echo "=== Waiting for app to start (20s) ==="
 sleep 20
 
-echo "=== Capturing initial logcat (size-bounded to 10 MiB) ==="
-adb logcat -d 2>&1 | head -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_STARTUP}"
+echo "=== Capturing initial logcat (size-bounded to 10 MiB, tail-preserving) ==="
+# Round-9 F5: use ``tail -c`` rather than ``head -c`` so the artifact
+# preserves the MOST RECENT bytes. The startup capture is taken just
+# after launch — the interesting events for this snapshot ARE near
+# the end of the buffer (process spawn, RN bootstrap, etc.) and
+# tail-c wins by a wide margin in practice.
+adb logcat -d 2>&1 | tail -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_STARTUP}"
 
 echo "=== Driving onboarding flow by UI text ==="
 # No ``|| true`` and no ``set -e``: the driver's exit code is captured
@@ -80,8 +97,17 @@ echo "=== Driving onboarding flow by UI text ==="
 # the outcome; a downstream ``if: always()`` workflow step re-exits
 # with this code so CI still fails loudly when the driver regresses.
 # See VAL-CI-013 / VAL-CI-024.
-bun run scripts/emulator-debug-flow.ts
-SCRIPT_EXIT_CODE=$?
+#
+# Round-9 F5: tee both stdout AND stderr into ``${DRIVER_LOG}`` so
+# the post-mortem artifact captures the driver's own step-by-step
+# "[flow] ..." log lines. Without ``tee`` the artifact upload would
+# only contain the logcat tail, which omits the driver's narration
+# of which Wizard screen / focus matcher it was on at failure
+# time. ``2>&1`` first so stderr is interleaved into the same
+# stream as stdout (preserves order); ``${PIPESTATUS[0]}`` then
+# captures the EXIT CODE OF ``bun`` rather than ``tee``.
+bun run scripts/emulator-debug-flow.ts 2>&1 | tee "${DRIVER_LOG}"
+SCRIPT_EXIT_CODE=${PIPESTATUS[0]}
 
 echo ""
 echo "=== [capture] Driver exit code: ${SCRIPT_EXIT_CODE} ==="
@@ -130,17 +156,43 @@ echo "========================================="
 adb logcat -d '*:E' 2>&1 | grep -i 'react\|enbox\|level\|crypto\|fatal\|exception' || true
 
 echo ""
-echo "=== [capture] Saving full logcat (size-bounded to 10 MiB) ==="
+echo "=== [capture] Saving full logcat (size-bounded to 10 MiB, tail-preserving) ==="
 # Always produce the two required artifact files even if adb is
 # unresponsive — empty files are fine; missing files are not (the
 # ``actions/upload-artifact`` step warns + uploads nothing when ALL
 # paths are missing, which is what broke the run before this
 # refactor).
-adb logcat -d 2>&1 | head -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_FULL}" || true
+#
+# Round-9 F5: switched from ``head -c`` to ``tail -c``. The pre-fix
+# variant kept the OLDEST bytes in the buffer, which is exactly the
+# wrong window when the driver hits a 10-minute enrollment timeout
+# — the failure breadcrumbs (``BiometricService.hasEnrollments
+# stayed false for 600s``) are in the LAST few hundred KB of the
+# 10MB buffer, not the first few. The artifact must preserve the
+# failure tail so the GitHub UI shows actionable diagnostics.
+adb logcat -d 2>&1 | tail -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_FULL}" || true
 adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E 2>&1 \
-    | head -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_RN}" || true
+    | tail -c "${MAX_LOGCAT_BYTES}" > "${LOGCAT_RN}" || true
 if [ ! -s "${LOGCAT_FULL}" ]; then
     echo "warning: ${LOGCAT_FULL} is empty (adb may be unreachable)" >&2
+fi
+
+# Round-9 F5: bound the driver transcript to the same 10 MiB ceiling
+# so a runaway loop can't blow GitHub's 500 MiB artifact limit. The
+# ``tee`` invocation above does NOT cap the file, so we trim it
+# in-place here. ``mv`` instead of ``cp`` to keep the sentinel
+# inode unique-named while ``tail -c`` reads the original file.
+if [ -s "${DRIVER_LOG}" ]; then
+    DRIVER_LOG_BYTES=$(wc -c < "${DRIVER_LOG}" 2>/dev/null || echo 0)
+    if [ "${DRIVER_LOG_BYTES}" -gt "${MAX_LOGCAT_BYTES}" ]; then
+        echo "[capture] driver transcript exceeds ${MAX_LOGCAT_BYTES} bytes; trimming to tail"
+        tail -c "${MAX_LOGCAT_BYTES}" "${DRIVER_LOG}" > "${DRIVER_LOG}.trim" \
+            && mv "${DRIVER_LOG}.trim" "${DRIVER_LOG}"
+    fi
+    DRIVER_LOG_LINES=$(wc -l < "${DRIVER_LOG}" 2>/dev/null || echo 0)
+    echo "[capture] driver transcript: ${DRIVER_LOG} (~${DRIVER_LOG_LINES} lines)"
+else
+    echo "warning: driver transcript ${DRIVER_LOG} is empty (driver produced no output)" >&2
 fi
 
 # Export the Python driver's exit code to ``$GITHUB_ENV`` so a

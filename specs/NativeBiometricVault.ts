@@ -42,6 +42,27 @@ export interface Spec extends TurboModule {
        * a follow-up biometric read of the stored secret.
        */
       secretHex?: string;
+      /**
+       * Optional biometric-prompt copy used during provisioning.
+       *
+       * Round-9 F3 contract parity (VAL-VAULT-033). Android's
+       * `Cipher.init(ENCRYPT_MODE)` for a biometric-bound Keystore
+       * key naturally fires a `BiometricPrompt.authenticate()` with
+       * THIS title/message/cancel as part of provisioning, but iOS's
+       * `SecItemAdd` for a Keychain item with a `BiometryCurrentSet`
+       * ACL does NOT prompt by itself — the iOS implementation
+       * therefore drives an explicit `LAContext.evaluatePolicy(...)`
+       * BEFORE the `SecItemAdd` so both platforms gate provisioning
+       * on a fresh, user-present biometric authentication using the
+       * same caller-controlled copy. Tests / dev builds that have no
+       * UI thread (`currentActivity == null` on Android, missing
+       * `LAContext` on iOS) MUST still reject deterministically
+       * rather than silently provisioning under no biometric gate.
+       */
+      promptTitle?: string;
+      promptMessage?: string;
+      promptCancel?: string;
+      promptSubtitle?: string;
     },
   ): Promise<void>;
   getSecret(

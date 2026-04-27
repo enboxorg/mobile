@@ -209,6 +209,45 @@ describe('BiometricVault.initialize() — provisioning', () => {
     });
     expect(native.generateAndStoreSecret).not.toHaveBeenCalled();
   });
+
+  // ------------------------------------------------------------------
+  // Round-9 F3: provisioning-prompt passthrough.
+  //
+  // Android's `BiometricPrompt` consumes prompt copy via the
+  // `promptTitle / promptMessage / promptCancel` keys passed alongside
+  // `secretHex / requireBiometrics / invalidateOnEnrollmentChange`.
+  // iOS implements the same surface (`LAContext.evaluatePolicy`'s
+  // `localizedReason`) for parity. The JS vault stores the provision
+  // prompt in `_provisionPrompt`; the bug was that
+  // `_doInitialize()` never actually FORWARDED it to the native call,
+  // so the native module fell back to its default copy and (on iOS)
+  // skipped the explicit biometric confirmation entirely.
+  //
+  // This test pins the contract: every prompt key the JS layer
+  // configured MUST appear in the options object handed to
+  // `NativeBiometricVault.generateAndStoreSecret`. A regression that
+  // drops the propagation will fail this assertion.
+  // ------------------------------------------------------------------
+  it('forwards the JS provision prompt copy to NativeBiometricVault.generateAndStoreSecret (Round-9 F3)', async () => {
+    const vault = new BiometricVault();
+
+    await vault.initialize({});
+
+    expect(native.generateAndStoreSecret).toHaveBeenCalledTimes(1);
+    const [, opts] = native.generateAndStoreSecret.mock.calls[0];
+    // The default JS prompt copy is exposed by `BiometricVault`
+    // through its `_provisionPrompt` private field; we don't pin
+    // exact strings here (UI copy may be retuned), but the keys
+    // MUST be present and non-empty so the native layer can drive
+    // `LAContext.evaluatePolicy` / `BiometricPrompt` with caller
+    // copy rather than its own fallback.
+    expect(typeof opts.promptTitle).toBe('string');
+    expect(opts.promptTitle.length).toBeGreaterThan(0);
+    expect(typeof opts.promptMessage).toBe('string');
+    expect(opts.promptMessage.length).toBeGreaterThan(0);
+    expect(typeof opts.promptCancel).toBe('string');
+    expect(opts.promptCancel.length).toBeGreaterThan(0);
+  });
 });
 
 // ===========================================================================
