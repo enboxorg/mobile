@@ -16,6 +16,7 @@ import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableNativeMap
 import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.security.KeyStoreException
 import java.security.SecureRandom
 import java.security.UnrecoverableKeyException
 import javax.crypto.AEADBadTagException
@@ -111,16 +112,59 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         return entry as SecretKey
     }
 
-    private fun deleteKeystoreKey(alias: String) {
-        try {
-            val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER)
-            keyStore.load(null)
+    /**
+     * Round-11 F1: CHECKED Keystore delete. Throws on Keystore failure
+     * AND verifies the alias is gone after `deleteEntry()` returns —
+     * `KeyStore.deleteEntry` is documented to throw `KeyStoreException`
+     * on failure, but some OEM Keystore implementations swallow the
+     * exception and leave the entry alive. The post-delete
+     * `containsAlias` check catches both the silent-fail case and the
+     * race where a concurrent provisioning re-added the alias after
+     * our delete.
+     *
+     * Used by the public `deleteSecret()` reset path. The
+     * best-effort variant `deleteKeystoreKeyBestEffort()` is used by
+     * `invalidateAlias()` for internal failure-cleanup paths where the
+     * caller already has a primary error to surface.
+     *
+     * @throws KeyStoreException if the underlying Keystore op fails OR
+     *         the alias still exists after the delete returned.
+     * @throws Exception if KeyStore.getInstance / load fails (e.g.
+     *         missing AndroidKeyStore provider on a corrupt build).
+     */
+    private fun deleteKeystoreKeyChecked(alias: String) {
+        val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER)
+        keyStore.load(null)
+        if (keyStore.containsAlias(alias)) {
+            keyStore.deleteEntry(alias)
+            // Verify the entry is gone. `KeyStore.deleteEntry` is
+            // declared to throw on failure but field reports across
+            // OEM forks (Samsung, Huawei) show silent-failure
+            // variants where the call returns normally yet the
+            // alias survives. The post-delete read is cheap and
+            // gives us a hard signal we can fail-CLOSED on.
             if (keyStore.containsAlias(alias)) {
-                keyStore.deleteEntry(alias)
+                throw KeyStoreException(
+                    "deleteEntry returned but alias '$alias' still present in AndroidKeyStore",
+                )
             }
+        }
+    }
+
+    /**
+     * Best-effort wrapper around `deleteKeystoreKeyChecked` for the
+     * internal failure-cleanup path (`invalidateAlias`). Used only
+     * when the caller already has a primary error to surface and
+     * doesn't want a secondary cleanup failure to mask it. The public
+     * delete/reset path MUST use the checked variant.
+     */
+    private fun deleteKeystoreKeyBestEffort(alias: String) {
+        try {
+            deleteKeystoreKeyChecked(alias)
         } catch (_: Exception) {
-            // swallow — delete is best-effort and must not surface secret
-            // material or low-level keystore state in an error path.
+            // swallow — best-effort cleanup; primary error already
+            // captured by the caller. Do NOT route to the public
+            // deleteSecret path.
         }
     }
 
@@ -148,7 +192,7 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
      * `KEY_INVALIDATED` rejection.
      */
     private fun invalidateAlias(alias: String) {
-        deleteKeystoreKey(alias)
+        deleteKeystoreKeyBestEffort(alias)
         try {
             prefs().edit().remove(ivKey(alias)).remove(ctKey(alias)).apply()
         } catch (_: Exception) {
@@ -430,25 +474,28 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         try {
             // Rotate the Keystore key on every provisioning so that an old
             // wrapped ciphertext from a previous install cannot accidentally
-            // be decryptable under a reused alias.
-            deleteKeystoreKey(keyAlias)
+            // be decryptable under a reused alias. Best-effort cleanup —
+            // `KeyGenParameterSpec.Builder(alias, ...)` overwrites any
+            // existing entry, so a silent failure here is recovered by
+            // the subsequent `createKeystoreKey`.
+            deleteKeystoreKeyBestEffort(keyAlias)
             val key = createKeystoreKey(keyAlias)
             cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, key)
             iv = cipher.iv
         } catch (e: KeyPermanentlyInvalidatedException) {
             secret.fill(0.toByte())
-            deleteKeystoreKey(keyAlias)
+            deleteKeystoreKeyBestEffort(keyAlias)
             promise.reject(ERR_KEY_INVALIDATED, "Keystore key was invalidated")
             return
         } catch (e: GeneralSecurityException) {
             secret.fill(0.toByte())
-            deleteKeystoreKey(keyAlias)
+            deleteKeystoreKeyBestEffort(keyAlias)
             promise.reject(mapKeystoreException(e), "generateAndStoreSecret failed")
             return
         } catch (e: Exception) {
             secret.fill(0.toByte())
-            deleteKeystoreKey(keyAlias)
+            deleteKeystoreKeyBestEffort(keyAlias)
             promise.reject(ERR_VAULT, "generateAndStoreSecret failed")
             return
         }
@@ -467,7 +514,7 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         val activity = currentActivity as? FragmentActivity
         if (activity == null) {
             secret.fill(0.toByte())
-            deleteKeystoreKey(keyAlias)
+            deleteKeystoreKeyBestEffort(keyAlias)
             promise.reject(ERR_VAULT, "No FragmentActivity available for biometric prompt")
             return
         }
@@ -489,7 +536,7 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                     // Keystore key so `isInitialized()` keeps returning
                     // false and the user can retry setup cleanly.
                     secret.fill(0.toByte())
-                    deleteKeystoreKey(keyAlias)
+                    deleteKeystoreKeyBestEffort(keyAlias)
                     val code = mapBiometricError(errorCode)
                     promise.reject(code, "Biometric authentication failed")
                 }
@@ -501,7 +548,7 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                     try {
                         val authedCipher = result.cryptoObject?.cipher
                         if (authedCipher == null) {
-                            deleteKeystoreKey(keyAlias)
+                            deleteKeystoreKeyBestEffort(keyAlias)
                             promise.reject(ERR_VAULT, "Authenticated cipher missing")
                             return
                         }
@@ -515,20 +562,20 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                             .commit()
 
                         if (!ok) {
-                            deleteKeystoreKey(keyAlias)
+                            deleteKeystoreKeyBestEffort(keyAlias)
                             promise.reject(ERR_VAULT, "Failed to persist wrapped secret")
                             return
                         }
 
                         promise.resolve(null)
                     } catch (e: KeyPermanentlyInvalidatedException) {
-                        deleteKeystoreKey(keyAlias)
+                        deleteKeystoreKeyBestEffort(keyAlias)
                         promise.reject(ERR_KEY_INVALIDATED, "Keystore key was invalidated")
                     } catch (e: GeneralSecurityException) {
-                        deleteKeystoreKey(keyAlias)
+                        deleteKeystoreKeyBestEffort(keyAlias)
                         promise.reject(mapKeystoreException(e), "generateAndStoreSecret failed")
                     } catch (e: Exception) {
-                        deleteKeystoreKey(keyAlias)
+                        deleteKeystoreKeyBestEffort(keyAlias)
                         promise.reject(ERR_VAULT, "generateAndStoreSecret failed")
                     } finally {
                         // Zero the in-memory secret buffer once the
@@ -562,7 +609,7 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                 if (!alreadyResolved[0]) {
                     alreadyResolved[0] = true
                     secret.fill(0.toByte())
-                    deleteKeystoreKey(keyAlias)
+                    deleteKeystoreKeyBestEffort(keyAlias)
                     promise.reject(ERR_VAULT, "Failed to start biometric prompt")
                 }
             }
@@ -760,12 +807,51 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             return
         }
         try {
-            prefs().edit().remove(ivKey(keyAlias)).remove(ctKey(keyAlias)).apply()
-            deleteKeystoreKey(keyAlias)
-            // Idempotent: missing alias resolves successfully.
+            // Round-11 F1: use `commit()` (synchronous + returns boolean)
+            // instead of `apply()` (async + fire-and-forget). The pre-fix
+            // `apply()` queued the prefs delete but returned immediately,
+            // so a subsequent throw from `deleteKeystoreKey` (also
+            // pre-fix swallowed) could leave the prefs entries in a
+            // not-yet-flushed state with the JS layer about to clear the
+            // VAULT_RESET_PENDING_KEY sentinel. `commit()` blocks until
+            // the prefs disk write succeeds AND returns false on I/O
+            // failure — both are signals we must surface to the caller.
+            val prefsRemoved = prefs()
+                .edit()
+                .remove(ivKey(keyAlias))
+                .remove(ctKey(keyAlias))
+                .commit()
+            if (!prefsRemoved) {
+                promise.reject(
+                    ERR_VAULT,
+                    "deleteSecret failed: SharedPreferences.commit() returned false; on-disk prefs write did not succeed",
+                )
+                return
+            }
+            // Round-11 F1: CHECKED Keystore delete. Any failure here
+            // (KeyStoreException, ProviderException, IOException, or
+            // the silent-OEM-fail caught by the post-delete
+            // containsAlias() guard) propagates to JS via promise.reject
+            // so `useAgentStore.reset()` can persist the
+            // VAULT_RESET_PENDING_KEY sentinel and surface the error to
+            // the user. Pre-fix `deleteKeystoreKey` swallowed every
+            // exception and `deleteSecret` resolved successfully even
+            // when the OS-gated key remained on disk.
+            deleteKeystoreKeyChecked(keyAlias)
+            // Both halves succeeded — missing alias is a vacuous
+            // success path inside `deleteKeystoreKeyChecked` (it
+            // skips the deleteEntry call when containsAlias is false).
             promise.resolve(null)
         } catch (e: Exception) {
-            promise.reject(ERR_VAULT, "deleteSecret failed")
+            // Surface the underlying message so the JS layer can
+            // distinguish prefs-IO from Keystore failures in logs /
+            // bug reports. The `e.message` payload never contains the
+            // wrapped ciphertext or the IV (we only ever reference key
+            // aliases here), so this is safe to expose.
+            promise.reject(
+                ERR_VAULT,
+                "deleteSecret failed: ${e.javaClass.simpleName}: ${e.message ?: "<no message>"}",
+            )
         }
     }
 

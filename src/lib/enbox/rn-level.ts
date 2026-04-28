@@ -342,18 +342,33 @@ export const AGENT_LEVEL_DB_SUBPATHS: readonly string[] = [
 
 /**
  * Predicate matching error messages emitted by ``LevelDB.destroyDB``
- * for the "database does not exist on disk" / "native module is
- * unavailable" idempotent paths. Both are legitimate no-ops for a
- * reset flow — the caller's intent is "wipe everything", and
- * "nothing to wipe" satisfies that. Anything else (permission
- * denied, I/O error, file-system corruption) is a HARD failure and
- * MUST surface so the wallet doesn't fall back to a half-clean state.
+ * for the "database does not exist on disk" idempotent path. This is
+ * a legitimate no-op for a reset flow — the caller's intent is "wipe
+ * everything", and "nothing to wipe" satisfies that. Anything else
+ * (permission denied, I/O error, file-system corruption, missing
+ * native bridge) is a HARD failure and MUST surface so the wallet
+ * doesn't fall back to a half-clean state.
  *
  * Round-9 F4: hardened from "swallow ALL throw" to "swallow only the
  * known idempotency path". The message patterns are kept lower-cased
  * because react-native-leveldb's underlying LevelDB JNI wrapper
  * embeds the path into the message and the case of "Does not exist"
  * varies across Android API levels.
+ *
+ * Round-11 F4: REMOVED the "is not a function" pattern. Pre-fix this
+ * was added so test mocks that omit a `destroyDB` spy still
+ * resolved cleanly, but the same predicate runs in PRODUCTION — and
+ * "LevelDB.destroyDB is not a function" in production means the
+ * native bridge was not properly linked / a turbomodule registration
+ * regressed. Treating that as a vacuous success would let a release
+ * build mark the LevelDB wipe complete while every byte of identity /
+ * DWN / sync data remained on disk. The right contract is fail-CLOSED:
+ * a missing native method is a hard error that surfaces to
+ * `useAgentStore.reset()`, which then persists the
+ * LEVELDB_CLEANUP_PENDING_KEY sentinel and rethrows so the caller
+ * (Settings UI / recovery-restore-screen) can offer a retry. Tests
+ * that genuinely need a no-op `destroyDB` must declare it explicitly
+ * in their mock.
  */
 function isIdempotentDestroyError(err: unknown): boolean {
   const msg = (
@@ -362,12 +377,7 @@ function isIdempotentDestroyError(err: unknown): boolean {
   return (
     msg.includes('does not exist') ||
     msg.includes('not found') ||
-    msg.includes('no such file') ||
-    // The mock `react-native-leveldb` factory in tests without a
-    // ``destroyDB`` spy throws "is not a function". Treat that as
-    // idempotent so suites that don't pin reset behaviour still
-    // succeed without rebuilding the mock.
-    msg.includes('is not a function')
+    msg.includes('no such file')
   );
 }
 

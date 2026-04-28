@@ -19,6 +19,27 @@ const APP_VERSION: string = require('../../../../package.json').version;
 const PRIVACY_POLICY_URL = 'https://enbox.org/privacy';
 const TERMS_OF_SERVICE_URL = 'https://enbox.org/terms';
 
+/**
+ * Round-11 F2: surface a useful one-liner from any reset / hydrate
+ * rejection. Prefers the native error `.code` (Keystore /
+ * Keychain / SecureStorage error tokens like `VAULT_ERROR_*`,
+ * `SECURE_STORAGE_*`) so the user / support team can correlate to
+ * the failure mode in logs. Falls back to `.message` and finally a
+ * generic string.
+ */
+function errorMessageFor(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as Error & { code?: unknown }).code;
+    if (typeof code === 'string' && code.length > 0) {
+      return err.message ? `${code}: ${err.message}` : code;
+    }
+    if (err.message) {
+      return err.message;
+    }
+  }
+  return 'unknown error';
+}
+
 export interface SettingsScreenProps {
   onLock: () => void;
 }
@@ -38,17 +59,76 @@ export function SettingsScreen({ onLock }: SettingsScreenProps) {
     // resets the session store. This is the same primitive surfaced
     // by the recovery-restore flow, kept as a single orchestration
     // point so Settings cannot drift from it (VAL-UX-036).
+    //
+    // Round-11 F2: pre-fix this swallowed `useAgentStore.reset()`
+    // rejections via `console.warn` and unconditionally ran
+    // `hydrate()` afterwards. That defeated the round-9/round-10
+    // fail-LOUD reset contract: a real Keystore failure / LevelDB
+    // wipe failure / session-store reset failure would surface to
+    // `useAgentStore.reset()` as a thrown error, but the user
+    // would see the alert close cleanly and the navigator would
+    // refresh to `Welcome` as if the reset succeeded — yet the
+    // OS-gated secret / on-disk identities / stale session flags
+    // would still be alive on disk. The retry sentinels persisted
+    // by `agent-store.reset()` would re-fire on the next cold
+    // launch, but the user has zero in-session signal that
+    // anything went wrong.
+    //
+    // Fix: capture the rejection, surface it via a follow-up
+    // Alert with retry/cancel buttons, and SUPPRESS the
+    // post-reset hydrate when reset throws. Hydrating after a
+    // partial reset is what creates the unlock-loop trap (the
+    // navigator routes to Unlock against a wallet whose
+    // SecureStorage flags were partially cleared but whose
+    // native secret survived). The retry sentinels guarantee
+    // the next agent-init flow re-runs the wipe, so the ONLY
+    // safe routing here is "leave the user in Settings with the
+    // error visible".
+    let resetError: unknown = null;
     try {
       await useAgentStore.getState().reset();
     } catch (err) {
-      console.warn('[settings] reset wallet failed (continuing):', err);
+      resetError = err;
+      console.warn('[settings] reset wallet failed:', err);
     }
+
+    if (resetError !== null) {
+      // Surface the error to the user. The retry sentinels
+      // persisted by `agent-store.reset()` mean the next agent
+      // init flow will retry the cleanup, but the in-session
+      // signal lets the user know to expect a re-prompt or
+      // contact support if the failure recurs.
+      const message = errorMessageFor(resetError);
+      Alert.alert(
+        'Reset failed',
+        `The wallet reset did not complete: ${message}\n\nYour data is in a partially-cleared state. The app will retry the cleanup the next time you open it. You can also try resetting again now.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Retry',
+            onPress: () => {
+              performReset().catch(() => {
+                // Already handled inside performReset.
+              });
+            },
+          },
+        ],
+      );
+      // CRITICAL: do NOT call hydrate(). Hydrating after a
+      // partial reset routes the user against a half-cleared
+      // SecureStorage view and traps them in unlock loops. The
+      // retry sentinels handle the recovery on the next cold
+      // launch; the user stays on Settings with the error
+      // visible until they tap Retry or background the app.
+      return;
+    }
+
     // sessionStore.reset() leaves biometricStatus as `'unknown'`
     // which would route the navigator to `Loading`. Re-run hydrate
     // so biometric hardware is re-probed and routing returns to
     // `Welcome` (first-launch flow) per VAL-UX-036. Best-effort —
     // any failure is logged but must not throw out of the alert
-    // confirmation handler.
+    // confirmation handler. Reached only on a SUCCESSFUL reset.
     try {
       await useSessionStore.getState().hydrate();
     } catch (err) {

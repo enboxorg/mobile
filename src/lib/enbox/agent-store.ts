@@ -1119,28 +1119,42 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   reset: async () => {
     const { vault } = get();
 
-    // 0. Round-10 F2: persist the vault-reset-pending sentinel BEFORE
-    //    we attempt the native wipe. This is intentionally pessimistic:
-    //    even if we crash mid-`vault.reset()` (SIGKILL, OS suspend
-    //    that never resumes, JS engine death) the next cold launch
-    //    sees the sentinel and re-runs `runPendingVaultResetCleanup()`
-    //    before any unlock / setup / restore flow proceeds. The
-    //    sentinel is cleared at the end of step 1 ONLY if every
-    //    delete succeeded — partial failures keep the sentinel set so
-    //    the next agent-init flow retries.
+    // 0. Round-10 F2 + Round-11 F3: persist the vault-reset-pending
+    //    sentinel BEFORE we attempt the native wipe. This is
+    //    intentionally pessimistic: even if we crash mid-`vault.reset()`
+    //    (SIGKILL, OS suspend that never resumes, JS engine death)
+    //    the next cold launch sees the sentinel and re-runs
+    //    `runPendingVaultResetCleanup()` before any unlock / setup /
+    //    restore flow proceeds. The sentinel is cleared at the end of
+    //    step 1 ONLY if every delete succeeded — partial failures
+    //    keep the sentinel set so the next agent-init flow retries.
+    //
+    //    Round-11 F3: pre-fix this swallowed `set()` failures via
+    //    `console.warn` and continued into the wipe steps. That
+    //    defeated the entire crash-resilience contract: if
+    //    SecureStorage is unwritable AND the subsequent native
+    //    delete fails (or the process dies mid-reset), the next
+    //    launch has no sentinel to force the cleanup retry. The
+    //    user lands in a half-cleaned state with no automatic
+    //    recovery.
+    //
+    //    Fix: fail-CLOSED on sentinel write failure. Throw before
+    //    touching the native vault / LevelDB / session store. The
+    //    user (via the new Settings UI alert) can retry, which
+    //    typically succeeds because SecureStorage failures are
+    //    usually transient (Keychain locked / process backgrounded
+    //    on iOS, transient SharedPreferences IO on Android). A
+    //    persistent SecureStorage failure is a system-level
+    //    problem the user must resolve before any reset can land.
     const sentinelStorage = new SecureStorageAdapter();
     try {
       await sentinelStorage.set(VAULT_RESET_PENDING_KEY, 'true');
     } catch (err) {
-      // Log but do NOT abort. The sentinel is the safety net for
-      // crash-resilience; if SecureStorage is unwritable the wipe
-      // attempt below STILL runs and reports failure synchronously
-      // to the caller. We only lose the next-launch retry, not the
-      // current attempt's correctness signal.
       console.warn(
-        '[agent-store] reset: failed to pre-persist vault-reset sentinel (next-launch retry will be skipped if this run also fails):',
+        '[agent-store] reset: refusing to start wipe — sentinel persistence failed (failing closed so a partial reset cannot leak past a non-existent retry path):',
         err,
       );
+      throw err;
     }
 
     // 1. Wipe the biometric-gated native secret + the persisted vault

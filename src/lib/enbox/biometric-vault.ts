@@ -268,49 +268,63 @@ async function defaultDidFactory({
   const signingHdKey = rootHdKey.derive(IDENTITY_DERIVATION_PATHS[1]);
   const encryptionHdKey = rootHdKey.derive(IDENTITY_DERIVATION_PATHS[2]);
 
-  const identityPrivateKey = await crypto.bytesToPrivateKey({
-    algorithm: 'Ed25519',
-    privateKeyBytes: identityHdKey.privateKey,
-  });
-  const signingPrivateKey = await crypto.bytesToPrivateKey({
-    algorithm: 'Ed25519',
-    privateKeyBytes: signingHdKey.privateKey,
-  });
-  const encryptionPrivateKey = await crypto.bytesToPrivateKey({
-    algorithm: 'X25519',
-    privateKeyBytes: encryptionHdKey.privateKey,
-  });
+  try {
+    const identityPrivateKey = await crypto.bytesToPrivateKey({
+      algorithm: 'Ed25519',
+      privateKeyBytes: identityHdKey.privateKey,
+    });
+    const signingPrivateKey = await crypto.bytesToPrivateKey({
+      algorithm: 'Ed25519',
+      privateKeyBytes: signingHdKey.privateKey,
+    });
+    const encryptionPrivateKey = await crypto.bytesToPrivateKey({
+      algorithm: 'X25519',
+      privateKeyBytes: encryptionHdKey.privateKey,
+    });
 
-  const keyManager = new DeterministicKeyGenerator();
-  await keyManager.addPredefinedKeys({
-    privateKeys: [identityPrivateKey, signingPrivateKey, encryptionPrivateKey],
-  });
+    const keyManager = new DeterministicKeyGenerator();
+    await keyManager.addPredefinedKeys({
+      privateKeys: [identityPrivateKey, signingPrivateKey, encryptionPrivateKey],
+    });
 
-  const options: any = {
-    verificationMethods: [
-      {
-        algorithm: 'Ed25519',
-        id: 'sig',
-        purposes: ['assertionMethod', 'authentication'],
-      },
-      {
-        algorithm: 'X25519',
-        id: 'enc',
-        purposes: ['keyAgreement'],
-      },
-    ],
-  };
-  if (dwnEndpoints && dwnEndpoints.length > 0) {
-    options.services = [
-      {
-        id: 'dwn',
-        type: 'DecentralizedWebNode',
-        serviceEndpoint: dwnEndpoints,
-      },
-    ];
+    const options: any = {
+      verificationMethods: [
+        {
+          algorithm: 'Ed25519',
+          id: 'sig',
+          purposes: ['assertionMethod', 'authentication'],
+        },
+        {
+          algorithm: 'X25519',
+          id: 'enc',
+          purposes: ['keyAgreement'],
+        },
+      ],
+    };
+    if (dwnEndpoints && dwnEndpoints.length > 0) {
+      options.services = [
+        {
+          id: 'dwn',
+          type: 'DecentralizedWebNode',
+          serviceEndpoint: dwnEndpoints,
+        },
+      ];
+    }
+
+    return (await DidDht.create({ keyManager: keyManager as any, options })) as BearerDid;
+  } finally {
+    // Round-11 F5: zero the per-identity HD child keys' private key
+    // and chain-code buffers. `crypto.bytesToPrivateKey` is
+    // documented to COPY `privateKeyBytes` into the JWK `d` field
+    // (see `AgentCryptoApi.bytesToPrivateKey` — it base64-url-encodes
+    // the bytes into a fresh string). The originals on the HDKey
+    // child instances are no longer referenced by any consumer
+    // after this function returns; zeroing them here closes the
+    // residency window before they become GC-eligible.
+    zeroHdKeyBuffers(identityHdKey);
+    zeroHdKeyBuffers(signingHdKey);
+    zeroHdKeyBuffers(encryptionHdKey);
   }
-
-  return (await DidDht.create({ keyManager: keyManager as any, options })) as BearerDid;
 }
 
 /**
@@ -401,6 +415,28 @@ function zeroBytes(bytes: Uint8Array | undefined) {
   if (bytes) bytes.fill(0);
 }
 
+/**
+ * Round-11 F5: explicit zero-out of an HDKey instance's sensitive
+ * buffers (`privateKey` + `chainCode`). Both are 32-byte
+ * `Uint8Array`s the HDKey constructor stores by reference (they
+ * are slices of the upstream HMAC output). Setting the host
+ * reference to `undefined` makes the `Uint8Array` GC-eligible but
+ * does NOT scrub the bytes — Hermes / V8 may keep the buffer alive
+ * for many seconds before reclaiming it, and a heap dump taken
+ * during that window leaks a 32-byte chain-code (which derives ALL
+ * descendant keys, including the still-active identity / signing /
+ * encryption keys) and the root private key seed.
+ *
+ * The TypeScript declaration marks both fields as `readonly`, but
+ * `readonly` only prevents reassignment — `.fill(0)` mutates the
+ * bytes in place and is the right escape hatch here.
+ */
+function zeroHdKeyBuffers(hdKey: { privateKey?: Uint8Array; chainCode?: Uint8Array } | undefined) {
+  if (!hdKey) return;
+  zeroBytes(hdKey.privateKey);
+  zeroBytes(hdKey.chainCode);
+}
+
 function toBase64Url(bytes: Uint8Array | ArrayBuffer): string {
   const arr = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
   let binary = '';
@@ -432,35 +468,49 @@ async function deriveContentEncryptionKey(rootHdKey: any): Promise<Uint8Array> {
   // in `vault-constants` to keep the test suite in sync with runtime.
   const vaultHdKey = rootHdKey.derive(VAULT_CEK_DERIVATION_PATH);
   const priv = vaultHdKey.privateKey as Uint8Array;
-  // HKDF via WebCrypto (available both on RN via react-native-quick-crypto
-  // and in Node >= 20 used by Jest).
-  const subtle: SubtleCrypto = (globalThis as any).crypto?.subtle;
-  if (subtle && typeof subtle.deriveBits === 'function') {
-    try {
-      const base = await subtle.importKey('raw', priv as any, 'HKDF', false, [
-        'deriveBits',
-      ]);
-      const bits = await subtle.deriveBits(
-        {
-          name: 'HKDF',
-          hash: 'SHA-256',
-          salt: new Uint8Array(0) as any,
-          info: new TextEncoder().encode('enbox-biometric-vault-cek') as any,
-        } as any,
-        base,
-        256,
-      );
-      return new Uint8Array(bits);
-    } catch {
-      // Fall through to SHA-256 digest below.
+  // Round-11 F5: ensure the vault HDKey buffers are zeroed even if
+  // any branch below throws or returns. The `priv` reference is
+  // passed to WebCrypto APIs that COPY input on import (per the W3C
+  // spec for `subtle.importKey('raw', ...)` / `subtle.digest(...)`),
+  // so zeroing AFTER those calls is safe. We zero in the finally
+  // so the ultimate-fallback `slice(0, 32)` path also gets covered
+  // — slice() returns a NEW Uint8Array (copy), so the original
+  // `priv` (a slice from HMAC output stored on `vaultHdKey`) can
+  // be zeroed without affecting the returned CEK.
+  try {
+    // HKDF via WebCrypto (available both on RN via react-native-quick-crypto
+    // and in Node >= 20 used by Jest).
+    const subtle: SubtleCrypto = (globalThis as any).crypto?.subtle;
+    if (subtle && typeof subtle.deriveBits === 'function') {
+      try {
+        const base = await subtle.importKey('raw', priv as any, 'HKDF', false, [
+          'deriveBits',
+        ]);
+        const bits = await subtle.deriveBits(
+          {
+            name: 'HKDF',
+            hash: 'SHA-256',
+            salt: new Uint8Array(0) as any,
+            info: new TextEncoder().encode('enbox-biometric-vault-cek') as any,
+          } as any,
+          base,
+          256,
+        );
+        return new Uint8Array(bits);
+      } catch {
+        // Fall through to SHA-256 digest below.
+      }
     }
+    if (subtle && typeof subtle.digest === 'function') {
+      const digest = await subtle.digest('SHA-256', priv as any);
+      return new Uint8Array(digest);
+    }
+    // Ultimate fallback: copy the raw vault private key bytes (32) into
+    // a fresh buffer so we can zero the original below.
+    return priv.slice(0, 32);
+  } finally {
+    zeroHdKeyBuffers(vaultHdKey);
   }
-  if (subtle && typeof subtle.digest === 'function') {
-    const digest = await subtle.digest('SHA-256', priv as any);
-    return new Uint8Array(digest);
-  }
-  // Ultimate fallback: use the raw vault private key (32 bytes).
-  return priv.slice(0, 32);
 }
 
 async function aesGcmEncrypt(cek: Uint8Array, plaintext: Uint8Array): Promise<string> {
@@ -579,7 +629,17 @@ export class BiometricVault
   // runtime type is identical to `Uint8Array`.
   private _secretBytes: BinaryBuffer | undefined;
   private _rootSeed: Uint8Array | undefined;
-  private _rootHdKey: any | undefined;
+  // Round-11 F5: pre-fix `_rootHdKey: any | undefined` retained the
+  // root HDKey instance for the lifetime of the unlocked vault. The
+  // field was assigned in `_doInitialize` / `_doUnlock` but NEVER
+  // read by any subsequent operation — every consumer (DID factory,
+  // CEK derivation) used the LOCAL `rootHdKey` from the same
+  // function scope. Storing the field still kept the underlying
+  // `chainCode` + `privateKey` `Uint8Array`s alive in the heap until
+  // `_clearInMemoryState()` dropped the reference (and even then,
+  // GC-eligible — never zeroed). The field was removed and the
+  // local instances now have their `chainCode` / `privateKey`
+  // explicitly zeroed via `zeroHdKeyBuffers()` after derivation.
   private _bearerDid: BearerDid | undefined;
   private _contentEncryptionKey: BinaryBuffer | undefined;
 
@@ -813,23 +873,30 @@ export class BiometricVault
     //    — if `deleteSecret()` itself rejects we log a warning and still
     //    surface the ORIGINAL derivation error so the caller sees the
     //    real root cause.
+    // Round-11 F5: hold the local rootHdKey in `let` so the
+    // outer `finally` can scrub its buffers regardless of which
+    // branch (success / derivation throw / rollback) we exit on.
+    let rootHdKeyLocal: { privateKey?: Uint8Array; chainCode?: Uint8Array } | undefined;
     try {
       const mnemonic = entropyToMnemonic(entropy, wordlist);
       if (!validateMnemonic(mnemonic, wordlist)) {
         throw new VaultError('VAULT_ERROR', 'Derived mnemonic failed validation');
       }
       const rootSeed = await mnemonicToSeed(mnemonic);
-      const rootHdKey = HDKey.fromMasterSeed(rootSeed);
+      rootHdKeyLocal = HDKey.fromMasterSeed(rootSeed);
       const bearerDid = await this._didFactory({
-        rootHdKey,
+        rootHdKey: rootHdKeyLocal,
         dwnEndpoints: params.dwnEndpoints,
       });
-      const cek = await deriveContentEncryptionKey(rootHdKey);
+      const cek = await deriveContentEncryptionKey(rootHdKeyLocal);
 
       // 5. Commit in-memory state only after every step succeeded.
+      //    Round-11 F5: do NOT store rootHdKey on `this`. The field
+      //    was unread (every consumer used the local) and retained
+      //    a 32-byte private key + 32-byte chain code that
+      //    `_clearInMemoryState` only dropped — never zeroed.
       this._secretBytes = entropy;
       this._rootSeed = rootSeed;
-      this._rootHdKey = rootHdKey;
       this._bearerDid = bearerDid;
       this._contentEncryptionKey = cek;
       this._biometricState = 'ready';
@@ -869,6 +936,18 @@ export class BiometricVault
       zeroBytes(entropy);
       this._clearInMemoryState();
       throw err;
+    } finally {
+      // Round-11 F5: scrub the local rootHdKey's chain code +
+      // private key buffers before the local goes out of scope.
+      // Runs on BOTH success and failure paths. The `bearerDid`
+      // (success path) and `cek` (success path) carry COPIES of
+      // the derived material — `bytesToPrivateKey` returns a JWK
+      // with the bytes base64url-encoded into the `d` field, and
+      // `deriveContentEncryptionKey` returns a fresh `Uint8Array`
+      // from HKDF / SHA-256 / `slice()`. Zeroing the rootHdKey
+      // here closes the residency window before GC is allowed
+      // to reclaim the underlying buffers.
+      zeroHdKeyBuffers(rootHdKeyLocal);
     }
   }
 
@@ -1078,6 +1157,11 @@ export class BiometricVault
     let secretBytes: Uint8Array | undefined;
     let rootSeed: Uint8Array | undefined;
     let cek: Uint8Array | undefined;
+    // Round-11 F5: hold the local rootHdKey so the outer `finally`
+    // can scrub its `chainCode` + `privateKey` buffers regardless
+    // of which branch we exit on. See `_doInitialize` for the full
+    // residency-window rationale.
+    let rootHdKeyLocal: { privateKey?: Uint8Array; chainCode?: Uint8Array } | undefined;
     try {
       secretBytes = hexToBytes(secretHex);
       if (secretBytes.length !== 32) {
@@ -1088,16 +1172,17 @@ export class BiometricVault
       }
       const mnemonic = entropyToMnemonic(secretBytes, wordlist);
       rootSeed = await mnemonicToSeed(mnemonic);
-      const rootHdKey = HDKey.fromMasterSeed(rootSeed);
-      const bearerDid = await this._didFactory({ rootHdKey });
-      cek = await deriveContentEncryptionKey(rootHdKey);
+      rootHdKeyLocal = HDKey.fromMasterSeed(rootSeed);
+      const bearerDid = await this._didFactory({ rootHdKey: rootHdKeyLocal });
+      cek = await deriveContentEncryptionKey(rootHdKeyLocal);
 
-      // Atomic publish: assign all five fields in one synchronous
+      // Atomic publish: assign all four fields in one synchronous
       // block AFTER every derivation step has succeeded. No partial
       // assignment is ever observable.
+      // Round-11 F5: do NOT store rootHdKey on `this`. See the
+      // matching note in `_doInitialize`.
       this._secretBytes = secretBytes;
       this._rootSeed = rootSeed;
-      this._rootHdKey = rootHdKey;
       this._bearerDid = bearerDid;
       this._contentEncryptionKey = cek;
       this._biometricState = 'ready';
@@ -1116,6 +1201,12 @@ export class BiometricVault
       zeroBytes(cek);
       this._clearInMemoryState();
       throw err;
+    } finally {
+      // Round-11 F5: scrub the local rootHdKey buffers on every
+      // exit path. `bearerDid` and `cek` carry COPIES of the
+      // derived material; the rootHdKey itself is no longer
+      // referenced by any store-facing field.
+      zeroHdKeyBuffers(rootHdKeyLocal);
     }
   }
 
@@ -1330,7 +1421,12 @@ export class BiometricVault
     zeroBytes(this._contentEncryptionKey);
     this._secretBytes = undefined;
     this._rootSeed = undefined;
-    this._rootHdKey = undefined;
+    // Round-11 F5: `_rootHdKey` was removed entirely (see field
+    // declaration). Local rootHdKey buffers are scrubbed at their
+    // derivation sites (`_doInitialize`, `_doUnlock`,
+    // `defaultDidFactory`, `deriveContentEncryptionKey`) before
+    // the locals go out of scope, so there is no `this._rootHdKey`
+    // for `_clearInMemoryState` to drop.
     this._bearerDid = undefined;
     this._contentEncryptionKey = undefined;
   }

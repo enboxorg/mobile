@@ -676,3 +676,80 @@ describe('runPendingVaultResetCleanup — Round-10 F2', () => {
     );
   });
 });
+
+// ===========================================================================
+// Round-11 F3 — useAgentStore.reset() fails CLOSED when sentinel write fails
+// ===========================================================================
+//
+// Pre-fix `agent-store.reset()` swallowed `SecureStorage.set()` failures
+// when persisting the VAULT_RESET_PENDING_KEY sentinel via `console.warn`
+// and continued into the wipe steps. That defeated the entire crash-
+// resilience contract: if SecureStorage is unwritable AND the
+// subsequent native delete fails (or the process dies mid-reset), the
+// next launch has no sentinel to force the cleanup retry. The user
+// lands in a half-cleaned state with no automatic recovery.
+//
+// The fix: throw before touching the native vault / LevelDB / session
+// store. The user (via the new Settings UI alert) can retry — typical
+// SecureStorage failures are transient. A persistent SecureStorage
+// failure is a system-level problem the user must resolve before any
+// reset can land.
+describe('useAgentStore.reset() — fail-CLOSED on sentinel write failure (Round-11 F3)', () => {
+  it('throws (does NOT proceed to wipe) when the sentinel-set step fails', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    expect(useAgentStore.getState().vault).toBeInstanceOf(BiometricVault);
+
+    nativeSecure.deleteItem.mockClear();
+
+    // Make every SecureStorage WRITE fail. The sentinel persistence
+    // is the FIRST WRITE issued by reset(), so the stub will trip
+    // there and reset() must throw before any native delete /
+    // SecureStorage REMOVE / LevelDB destroy runs.
+    const setError = Object.assign(new Error('SecureStorage out of disk space'), {
+      code: 'SECURE_STORAGE_IO',
+    });
+    nativeSecure.setItem.mockImplementationOnce(async () => {
+      throw setError;
+    });
+
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /SecureStorage out of disk space/,
+    );
+
+    // CRITICAL: nothing destructive should have run. The sentinel
+    // could not be written, so the retry path is unavailable;
+    // failing CLOSED keeps the user's wallet intact for a manual
+    // retry once SecureStorage recovers.
+    //
+    // We assert the BIOMETRIC vault native delete was never called.
+    // (The session store reset / LevelDB destroy paths are also
+    // skipped by the same throw — they're invoked AFTER the native
+    // delete in the reset() ordering.)
+    const biometricMock = (global as any).__enboxBiometricVaultMock as {
+      deleteSecret: jest.Mock;
+    };
+    expect(biometricMock.deleteSecret).not.toHaveBeenCalled();
+  });
+
+  it('proceeds normally when the sentinel-set step succeeds (control)', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    expect(useAgentStore.getState().vault).toBeInstanceOf(BiometricVault);
+
+    nativeSecure.deleteItem.mockClear();
+    const biometricMock = (global as any).__enboxBiometricVaultMock as {
+      deleteSecret: jest.Mock;
+    };
+    biometricMock.deleteSecret.mockClear();
+
+    // Default mock impl from jest.setup.js resolves all writes.
+    await useAgentStore.getState().reset();
+
+    // The native delete ran AND the SecureStorage REMOVE for the
+    // sentinel ran (sentinel was cleared after a successful wipe).
+    expect(biometricMock.deleteSecret).toHaveBeenCalled();
+    const deletedKeys = nativeSecure.deleteItem.mock.calls.map((c) => c[0]);
+    expect(deletedKeys).toEqual(
+      expect.arrayContaining(['enbox:enbox.vault.reset-pending']),
+    );
+  });
+});

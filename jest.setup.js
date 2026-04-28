@@ -259,3 +259,43 @@ jest.mock('./specs/NativeBiometricVault', () => ({
   __esModule: true,
   default: mockNativeBiometricVault,
 }));
+
+// Round-11 F4: provide an explicit default mock for `react-native-leveldb`
+// so JS-only suites don't trip on the removed "is not a function" silent
+// fallback in `isIdempotentDestroyError`. The fallback was unsafe in
+// production (it masked turbomodule registration failures as
+// "successful no-op wipes"), so we removed it. The trade-off is that
+// every test now needs a real (mocked) `LevelDB.destroyDB` symbol.
+//
+// The default mock is a no-op success: `LevelDB(...)` returns a stub
+// instance (matching the in-memory adapter shape `RNLevel` expects),
+// and the static `destroyDB` is a no-op that returns undefined. Suites
+// that need to assert on destroyDB (`agent-store.reset-blockers.test.ts`)
+// override this mock locally with `jest.mock('react-native-leveldb', ...)`
+// at the top of the file.
+jest.mock('react-native-leveldb', () => {
+  function MockLevelDB() {
+    return {
+      getStr: () => null,
+      put: () => undefined,
+      delete: () => undefined,
+      close: () => undefined,
+      newIterator: () => ({
+        seek: () => undefined,
+        seekToFirst: () => undefined,
+        seekLast: () => undefined,
+        valid: () => false,
+        keyStr: () => '',
+        valueStr: () => '',
+        next: () => undefined,
+        prev: () => undefined,
+        close: () => undefined,
+      }),
+    };
+  }
+  // The static `destroyDB` is REQUIRED. `isIdempotentDestroyError` no
+  // longer treats "is not a function" as idempotent (round-11 F4), so
+  // a missing static would make every reset-touching test fail.
+  MockLevelDB.destroyDB = jest.fn(() => undefined);
+  return { __esModule: false, LevelDB: MockLevelDB };
+});

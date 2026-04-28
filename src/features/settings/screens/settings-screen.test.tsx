@@ -305,9 +305,30 @@ describe('SettingsScreen', () => {
       );
     });
 
-    it('still triggers hydrate even if agentStore.reset() rejects (best-effort cleanup)', async () => {
+    // Round-11 F2: pre-fix this test codified the SWALLOW-AND-HYDRATE
+    // contract ("hydrate runs even on reset failure"). That defeated
+    // the round-9/round-10 fail-LOUD reset contract: a real Keystore
+    // failure / LevelDB wipe failure / session-store reset failure
+    // would surface to `useAgentStore.reset()` as a thrown error, but
+    // the user would see the alert close cleanly and the navigator
+    // would refresh to `Welcome` as if the reset succeeded — yet the
+    // OS-gated secret / on-disk identities / stale session flags
+    // would still be alive on disk. The new contract is fail-LOUD at
+    // the UI:
+    //   1. The reset failure is surfaced to the user via a follow-up
+    //      Alert (with retry/cancel buttons).
+    //   2. Hydrate is SUPPRESSED on the failure path. Hydrating after
+    //      a partial reset traps the user in unlock loops because the
+    //      navigator routes to Unlock against a half-cleared
+    //      SecureStorage view.
+    //   3. The retry sentinels persisted by `agent-store.reset()`
+    //      handle the cleanup recovery on the next cold launch
+    //      regardless of whether the user taps Retry.
+    it('surfaces the reset failure via Alert AND suppresses hydrate when agentStore.reset() rejects (Round-11 F2)', async () => {
       agentStoreMocks.__mockReset.mockRejectedValueOnce(
-        new Error('simulated reset failure'),
+        Object.assign(new Error('simulated reset failure'), {
+          code: 'VAULT_ERROR',
+        }),
       );
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -323,10 +344,56 @@ describe('SettingsScreen', () => {
 
         // Reset was attempted.
         expect(agentStoreMocks.__mockReset).toHaveBeenCalledTimes(1);
-        // hydrate still ran so the navigator isn't stranded on Loading.
+        // CRITICAL: hydrate MUST NOT run on the failure path.
+        // Hydrating after a partial reset traps the user in
+        // unlock loops because routing fires against a
+        // half-cleared SecureStorage view.
         expect(
           sessionStoreMocks.__mockSessionHydrate,
-        ).toHaveBeenCalledTimes(1);
+        ).not.toHaveBeenCalled();
+        // The user-facing follow-up Alert was shown:
+        //   capturedAlerts[0] = the initial confirmation alert.
+        //   capturedAlerts[1] = the new Round-11 failure alert.
+        expect(capturedAlerts.length).toBeGreaterThanOrEqual(2);
+        const failureAlert = capturedAlerts[1];
+        expect(failureAlert.title).toBe('Reset failed');
+        expect(failureAlert.message ?? '').toMatch(/VAULT_ERROR/);
+        expect(failureAlert.message ?? '').toMatch(/simulated reset failure/);
+        // Retry + Cancel buttons.
+        expect(failureAlert.buttons?.length).toBe(2);
+        expect(failureAlert.buttons?.[0]?.text).toBe('Cancel');
+        expect(failureAlert.buttons?.[1]?.text).toBe('Retry');
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('Retry button on the failure alert re-invokes performReset', async () => {
+      agentStoreMocks.__mockReset
+        .mockRejectedValueOnce(new Error('first attempt failed'))
+        .mockResolvedValueOnce(undefined);
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      try {
+        const screen = render(<SettingsScreen onLock={() => {}} />);
+
+        fireEvent.press(screen.getByText('Reset wallet'));
+        await act(async () => {
+          await capturedAlerts[0].buttons?.[1]?.onPress?.();
+        });
+
+        expect(agentStoreMocks.__mockReset).toHaveBeenCalledTimes(1);
+        // First attempt failed → failure alert shown, hydrate skipped.
+        expect(sessionStoreMocks.__mockSessionHydrate).not.toHaveBeenCalled();
+
+        // Tap Retry on the failure alert.
+        await act(async () => {
+          await capturedAlerts[1].buttons?.[1]?.onPress?.();
+        });
+
+        // Reset re-invoked; second attempt succeeded → hydrate now runs.
+        expect(agentStoreMocks.__mockReset).toHaveBeenCalledTimes(2);
+        expect(sessionStoreMocks.__mockSessionHydrate).toHaveBeenCalledTimes(1);
       } finally {
         warnSpy.mockRestore();
       }
