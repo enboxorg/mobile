@@ -89,7 +89,29 @@ jest.mock(
   '@enbox/auth',
   () => {
     const create = jest.fn(async () => ({ id: 'auth-manager-stub' }));
-    return { __esModule: true, AuthManager: { create }, __mocks__: { create } };
+    return {
+      __esModule: true,
+      AuthManager: { create },
+      // Round-12 F3: surface the canonical STORAGE_KEYS so
+      // `useAgentStore.reset()` can iterate them and wipe persisted
+      // AuthManager material from SecureStorage. Mirrors the real
+      // export from `@enbox/auth/types.ts`.
+      STORAGE_KEYS: {
+        PREVIOUSLY_CONNECTED: 'enbox:auth:previouslyConnected',
+        ACTIVE_IDENTITY: 'enbox:auth:activeIdentity',
+        DELEGATE_DID: 'enbox:auth:delegateDid',
+        CONNECTED_DID: 'enbox:auth:connectedDid',
+        DELEGATE_DECRYPTION_KEYS: 'enbox:auth:delegateDecryptionKeys',
+        DELEGATE_CONTEXT_KEYS: 'enbox:auth:delegateContextKeys',
+        DELEGATE_MULTI_PARTY_PROTOCOLS:
+          'enbox:auth:delegateMultiPartyProtocols',
+        LOCAL_DWN_ENDPOINT: 'enbox:auth:localDwnEndpoint',
+        REGISTRATION_TOKENS: 'enbox:auth:registrationTokens',
+        SESSION_REVOCATIONS: 'enbox:auth:sessionRevocations',
+        REVOCATION_RETRY_CONTEXT: 'enbox:auth:revocationRetryContext',
+      },
+      __mocks__: { create },
+    };
   },
   { virtual: true },
 );
@@ -564,6 +586,60 @@ describe('useAgentStore.reset() — no-vault fallback clears SecureStorage keys 
     );
     expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
   });
+
+  // Round-12 F3: parallel coverage for the AUTH_RESET sentinel —
+  // every agent-init flow MUST also retry the auth wipe so a
+  // stale `enbox:auth:*` keystore cannot survive a backup-pending
+  // resume / first-launch / unlock / restore that interleaved with
+  // a failed reset.
+  it('resumePendingBackup retries the AUTH wipe via the auth-reset sentinel BEFORE creating the agent (Round-12 F3)', async () => {
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.auth.reset-pending') return 'true';
+      return null;
+    });
+    nativeSecure.deleteItem.mockClear();
+
+    await useAgentStore.getState().resumePendingBackup().catch(() => undefined);
+
+    // The 11 STORAGE_KEYS were each removed via the SecureStorage
+    // adapter (which prefixes 'enbox:' before NativeSecureStorage).
+    const deletedKeys = nativeSecure.deleteItem.mock.calls.map((c) => c[0]);
+    expect(deletedKeys).toEqual(
+      expect.arrayContaining([
+        'enbox:enbox:auth:previouslyConnected',
+        'enbox:enbox:auth:activeIdentity',
+        'enbox:enbox:auth:delegateDid',
+        'enbox:enbox:auth:delegateDecryptionKeys',
+      ]),
+    );
+    // And the sentinel was deleted after the retry succeeded.
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.auth.reset-pending',
+    );
+    expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('initializeFirstLaunch retries the AUTH wipe via the auth-reset sentinel BEFORE creating the agent (Round-12 F3)', async () => {
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.auth.reset-pending') return 'true';
+      return null;
+    });
+    nativeSecure.deleteItem.mockClear();
+
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    const deletedKeys = nativeSecure.deleteItem.mock.calls.map((c) => c[0]);
+    expect(deletedKeys).toEqual(
+      expect.arrayContaining([
+        'enbox:enbox:auth:activeIdentity',
+        'enbox:enbox:auth:delegateDecryptionKeys',
+      ]),
+    );
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.auth.reset-pending',
+    );
+    expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
+  });
 });
 
 // ===========================================================================
@@ -751,5 +827,402 @@ describe('useAgentStore.reset() — fail-CLOSED on sentinel write failure (Round
     expect(deletedKeys).toEqual(
       expect.arrayContaining(['enbox:enbox.vault.reset-pending']),
     );
+  });
+});
+
+// ===========================================================================
+// Round-12 F1 — LevelDB cleanup-pending sentinel is written BEFORE the wipe
+// ===========================================================================
+//
+// Pre-fix `agent-store.reset()` only wrote `LEVELDB_CLEANUP_PENDING_KEY`
+// inside the destroy-failed catch block. A SIGKILL / OOM / JS engine
+// death during the multi-subpath wipe (8 sub-databases) left LevelDB
+// partially deleted with NO sentinel on disk — `runPendingLevelDbCleanup()`
+// would skip the retry on the next launch, and `EnboxUserAgent.create()`
+// would open a corrupt / half-deleted database.
+//
+// The fix mirrors the round-11 F3 pattern: write the sentinel FIRST
+// (in step 0 of reset()), fail-CLOSED on write failure, clear ONLY
+// after the wipe succeeds.
+describe('useAgentStore.reset() — LevelDB sentinel written BEFORE the wipe (Round-12 F1)', () => {
+  it('persists LEVELDB_CLEANUP_PENDING_KEY BEFORE destroyAgentLevelDatabases is invoked', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    expect(useAgentStore.getState().vault).toBeInstanceOf(BiometricVault);
+
+    // Snapshot the order of native calls so we can prove the
+    // sentinel write happened BEFORE the destroyDB call. We use a
+    // single timeline array fed by both `setItem` and the
+    // `destroyDB` mock.
+    const timeline: Array<{ kind: 'set' | 'destroy'; key?: string }> = [];
+    nativeSecure.setItem.mockImplementation(async (key: string) => {
+      timeline.push({ kind: 'set', key });
+    });
+    mockDestroyDB.mockImplementation(() => {
+      timeline.push({ kind: 'destroy' });
+      return undefined;
+    });
+
+    await useAgentStore.getState().reset();
+
+    // Find the index of the FIRST LevelDB sentinel write and the
+    // FIRST destroyDB call. The write MUST appear before the call.
+    const firstSentinelWrite = timeline.findIndex(
+      (e) =>
+        e.kind === 'set' && e.key === 'enbox:enbox.agent.leveldb-cleanup-pending',
+    );
+    const firstDestroy = timeline.findIndex((e) => e.kind === 'destroy');
+    expect(firstSentinelWrite).toBeGreaterThanOrEqual(0);
+    expect(firstDestroy).toBeGreaterThanOrEqual(0);
+    expect(firstSentinelWrite).toBeLessThan(firstDestroy);
+  });
+
+  it('keeps LEVELDB_CLEANUP_PENDING_KEY set when destroyAgentLevelDatabases throws mid-wipe (crash resilience)', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    expect(useAgentStore.getState().vault).toBeInstanceOf(BiometricVault);
+
+    nativeSecure.deleteItem.mockClear();
+    nativeSecure.setItem.mockClear();
+
+    // Force ALL destroyDB calls to throw (simulating a permission
+    // denied / IO error mid-wipe). The reset() should rethrow the
+    // LevelDB error AND leave the sentinel SET on disk so the next
+    // cold launch retries the wipe.
+    mockDestroyDB.mockImplementation(() => {
+      throw new Error('IO error: lock /data/.../LOCK: Permission denied');
+    });
+
+    // The destroyAgentLevelDatabases() helper aggregates the
+    // sub-path failures into a single Error whose message starts
+    // with "destroyAgentLevelDatabases:" — that's what reset()
+    // rethrows on the failure path.
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /destroyAgentLevelDatabases:/,
+    );
+
+    // Sentinel was written (step 0 of reset()).
+    const sentinelWrites = nativeSecure.setItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.agent.leveldb-cleanup-pending',
+    );
+    expect(sentinelWrites.length).toBeGreaterThanOrEqual(1);
+    // Sentinel was NOT cleared (step 6's clear is gated on a
+    // successful wipe; failure leaves the sentinel set).
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.agent.leveldb-cleanup-pending',
+    );
+    expect(sentinelDeletes.length).toBe(0);
+  });
+
+  it('rolls back already-written sentinels when a later sentinel write fails (fail-CLOSED)', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    expect(useAgentStore.getState().vault).toBeInstanceOf(BiometricVault);
+
+    nativeSecure.deleteItem.mockClear();
+    nativeSecure.setItem.mockClear();
+
+    // Make the LEVELDB sentinel write specifically fail. The vault
+    // sentinel write (the first call) succeeds; the leveldb sentinel
+    // (the second call) fails. The reset() MUST throw AND
+    // best-effort roll back the vault sentinel via the deleteItem
+    // path.
+    nativeSecure.setItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.agent.leveldb-cleanup-pending') {
+        throw new Error('SecureStorage IO error');
+      }
+    });
+
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /SecureStorage IO error/,
+    );
+
+    // Vault sentinel was rolled back (deleteItem called for it).
+    const vaultSentinelRollback = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.vault.reset-pending',
+    );
+    expect(vaultSentinelRollback.length).toBeGreaterThanOrEqual(1);
+
+    // Critical: NO destructive operations ran (vault deleteSecret,
+    // destroyDB).
+    const biometricMock = (global as any).__enboxBiometricVaultMock as {
+      deleteSecret: jest.Mock;
+    };
+    expect(biometricMock.deleteSecret).not.toHaveBeenCalled();
+    expect(mockDestroyDB).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// Round-12 F2 — session reset deferred until ALL critical wipes succeed
+// ===========================================================================
+//
+// Pre-fix `agent-store.reset()` ALWAYS called `useSessionStore.getState().reset()`
+// before rethrowing. `session.reset()` sets `biometricStatus: 'unknown'`
+// which the navigator routes to `Loading` (see `getInitialRoute` rule 3).
+// The Settings UI showed the reset-failure Alert ON TOP of the transition,
+// but dismissing it left the user stranded on a permanent Loading screen
+// until they backgrounded the app.
+//
+// The fix: skip session reset on failure. The session-store keeps its
+// prior `hasIdentity=true` / `biometricStatus='ready'` flags so the
+// Settings screen stays mounted and the follow-up Alert renders against
+// a stable navigator. Retry sentinels handle next-launch recovery.
+describe('useAgentStore.reset() — defers session-store reset on failure (Round-12 F2)', () => {
+  it('does NOT reset session-store when LevelDB wipe fails', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    expect(useAgentStore.getState().vault).toBeInstanceOf(BiometricVault);
+
+    // Pre-populate the session-store with a "main app" snapshot so
+    // we can detect a reset() afterwards.
+    const { useSessionStore } = require('@/features/session/session-store');
+    useSessionStore.setState({
+      hasIdentity: true,
+      isLocked: false,
+      hasCompletedOnboarding: true,
+      biometricStatus: 'ready',
+      isHydrated: true,
+    });
+
+    // Force the LevelDB destroy to fail. Vault wipe / auth wipe
+    // remain on the default success mocks.
+    mockDestroyDB.mockImplementation(() => {
+      throw new Error('LevelDB unavailable');
+    });
+
+    // destroyAgentLevelDatabases wraps sub-path failures in an
+    // aggregate Error whose message starts with
+    // "destroyAgentLevelDatabases:".
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /destroyAgentLevelDatabases:/,
+    );
+
+    // The session-store snapshot MUST be unchanged. A pre-fix
+    // reset() would have flipped `biometricStatus` to `'unknown'`
+    // and `hasIdentity` to `false`, routing the navigator to
+    // `Loading`.
+    const session = useSessionStore.getState();
+    expect(session.hasIdentity).toBe(true);
+    expect(session.isLocked).toBe(false);
+    expect(session.hasCompletedOnboarding).toBe(true);
+    expect(session.biometricStatus).toBe('ready');
+  });
+
+  it('does NOT reset session-store when vault wipe fails', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    const { useSessionStore } = require('@/features/session/session-store');
+    useSessionStore.setState({
+      hasIdentity: true,
+      isLocked: false,
+      hasCompletedOnboarding: true,
+      biometricStatus: 'ready',
+      isHydrated: true,
+    });
+
+    // Force vault.reset() to fail by stubbing native deleteSecret.
+    nativeBiometric.deleteSecret.mockRejectedValueOnce(
+      Object.assign(new Error('Keystore unreachable'), { code: 'VAULT_ERROR' }),
+    );
+
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /Keystore unreachable/,
+    );
+
+    // Session-store snapshot unchanged.
+    const session = useSessionStore.getState();
+    expect(session.hasIdentity).toBe(true);
+    expect(session.biometricStatus).toBe('ready');
+  });
+
+  it('DOES reset session-store on successful reset (control — happy path)', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    const { useSessionStore } = require('@/features/session/session-store');
+    useSessionStore.setState({
+      hasIdentity: true,
+      isLocked: false,
+      hasCompletedOnboarding: true,
+      biometricStatus: 'ready',
+      isHydrated: true,
+    });
+
+    // Default mocks all succeed.
+    await useAgentStore.getState().reset();
+
+    // Session-store WAS reset to the canonical post-reset snapshot.
+    const session = useSessionStore.getState();
+    expect(session.hasIdentity).toBe(false);
+    expect(session.hasCompletedOnboarding).toBe(false);
+    // session.reset() sets `biometricStatus: 'unknown'` which the
+    // Settings UI handler then re-resolves via `hydrate()`.
+    expect(session.biometricStatus).toBe('unknown');
+  });
+});
+
+// ===========================================================================
+// Round-12 F3 — wallet reset clears persisted AuthManager / Web5 connect material
+// ===========================================================================
+//
+// Pre-fix `agent-store.reset()` cleared vault + LevelDB + session state
+// but NEVER touched the `enbox:auth:*` keys that `AuthManager` writes
+// through its `SecureStorageAdapter`. The new wallet inherited the
+// previous wallet's `activeIdentity` DID, `delegateDid` +
+// `delegateDecryptionKeys` (cryptographic material), `connectedDid`,
+// `registrationTokens`, and `sessionRevocations`. A Web5 dApp that the
+// previous wallet had connected to could be silently re-authorised
+// under the new wallet's identity.
+//
+// The fix iterates `STORAGE_KEYS` from `@enbox/auth` and removes each
+// key. The new `AUTH_RESET_PENDING_KEY` sentinel guards against
+// crash-during-iteration leaks, and `runPendingAuthResetCleanup()`
+// retries the iteration on the next agent-init.
+describe('useAgentStore.reset() — wipes persisted AuthManager material (Round-12 F3)', () => {
+  it('removes all 11 enbox:auth:* keys via SecureStorage on a successful reset', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    nativeSecure.deleteItem.mockClear();
+
+    await useAgentStore.getState().reset();
+
+    const deletedKeys = nativeSecure.deleteItem.mock.calls.map((c) => c[0]);
+    // The 11 STORAGE_KEYS, each prefixed with 'enbox:' by
+    // SecureStorageAdapter. The leading 'enbox:' is the adapter
+    // prefix; the trailing 'enbox:auth:*' is the canonical key.
+    expect(deletedKeys).toEqual(
+      expect.arrayContaining([
+        'enbox:enbox:auth:previouslyConnected',
+        'enbox:enbox:auth:activeIdentity',
+        'enbox:enbox:auth:delegateDid',
+        'enbox:enbox:auth:connectedDid',
+        'enbox:enbox:auth:delegateDecryptionKeys',
+        'enbox:enbox:auth:delegateContextKeys',
+        'enbox:enbox:auth:delegateMultiPartyProtocols',
+        'enbox:enbox:auth:localDwnEndpoint',
+        'enbox:enbox:auth:registrationTokens',
+        'enbox:enbox:auth:sessionRevocations',
+        'enbox:enbox:auth:revocationRetryContext',
+      ]),
+    );
+  });
+
+  it('persists AUTH_RESET_PENDING_KEY before iterating + clears it after success', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    nativeSecure.setItem.mockClear();
+    nativeSecure.deleteItem.mockClear();
+
+    await useAgentStore.getState().reset();
+
+    const sentinelWrites = nativeSecure.setItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.auth.reset-pending',
+    );
+    expect(sentinelWrites.length).toBeGreaterThanOrEqual(1);
+    expect(sentinelWrites[0][1]).toBe('true');
+
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.auth.reset-pending',
+    );
+    expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('keeps AUTH_RESET_PENDING_KEY set when an auth-storage remove fails (rethrow + retry path)', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    nativeSecure.deleteItem.mockClear();
+
+    // Pass-through default delete behaviour; reject only the
+    // `enbox:enbox:auth:delegateDecryptionKeys` remove. Every other
+    // remove succeeds. We capture the failure and rethrow so the
+    // caller knows the wipe was incomplete.
+    nativeSecure.deleteItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox:auth:delegateDecryptionKeys') {
+        throw new Error('Keychain entry locked');
+      }
+    });
+
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /Keychain entry locked/,
+    );
+
+    // Sentinel was NOT cleared (failure path).
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.auth.reset-pending',
+    );
+    expect(sentinelDeletes.length).toBe(0);
+  });
+
+  it('runPendingAuthResetCleanup retries the iteration on a subsequent agent-init flow', async () => {
+    const { runPendingAuthResetCleanup } = require('@/lib/enbox/agent-store');
+    const removed: string[] = [];
+    const sentinelStorage = {
+      get: jest.fn(async () => 'true'),
+      set: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+    };
+    const authStorage = {
+      remove: jest.fn(async (key: string) => {
+        removed.push(key);
+      }),
+    };
+
+    await expect(
+      runPendingAuthResetCleanup(sentinelStorage, authStorage),
+    ).resolves.toBe(true);
+
+    // All 11 STORAGE_KEYS were removed.
+    expect(removed).toEqual(
+      expect.arrayContaining([
+        'enbox:auth:previouslyConnected',
+        'enbox:auth:activeIdentity',
+        'enbox:auth:delegateDid',
+        'enbox:auth:connectedDid',
+        'enbox:auth:delegateDecryptionKeys',
+        'enbox:auth:delegateContextKeys',
+        'enbox:auth:delegateMultiPartyProtocols',
+        'enbox:auth:localDwnEndpoint',
+        'enbox:auth:registrationTokens',
+        'enbox:auth:sessionRevocations',
+        'enbox:auth:revocationRetryContext',
+      ]),
+    );
+    expect(removed.length).toBe(11);
+    // Sentinel cleared after success.
+    expect(sentinelStorage.remove).toHaveBeenCalledWith(
+      'enbox.auth.reset-pending',
+    );
+  });
+
+  it('runPendingAuthResetCleanup is a no-op when sentinel absent', async () => {
+    const { runPendingAuthResetCleanup } = require('@/lib/enbox/agent-store');
+    const sentinelStorage = {
+      get: jest.fn(async () => null),
+      set: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+    };
+    const authStorage = { remove: jest.fn(async () => undefined) };
+
+    await expect(
+      runPendingAuthResetCleanup(sentinelStorage, authStorage),
+    ).resolves.toBe(true);
+    expect(authStorage.remove).not.toHaveBeenCalled();
+    expect(sentinelStorage.remove).not.toHaveBeenCalled();
+  });
+
+  it('runPendingAuthResetCleanup propagates SecureStorage.get failures (Round-10 F3 parity)', async () => {
+    const { runPendingAuthResetCleanup } = require('@/lib/enbox/agent-store');
+    const stubError = Object.assign(new Error('SecureStorage temporarily unavailable'), {
+      code: 'SECURE_STORAGE_LOCKED',
+    });
+    const sentinelStorage = {
+      get: jest.fn(async () => {
+        throw stubError;
+      }),
+      set: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+    };
+    const authStorage = { remove: jest.fn(async () => undefined) };
+
+    await expect(
+      runPendingAuthResetCleanup(sentinelStorage, authStorage),
+    ).rejects.toThrow(/SecureStorage temporarily unavailable/);
+    expect(authStorage.remove).not.toHaveBeenCalled();
   });
 });

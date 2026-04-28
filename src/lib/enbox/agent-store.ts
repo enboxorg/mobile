@@ -14,6 +14,7 @@
 import { create } from 'zustand';
 import type { EnboxUserAgent, BearerIdentity } from '@enbox/agent';
 import type { AuthManager } from '@enbox/auth';
+import { STORAGE_KEYS as AUTH_STORAGE_KEYS } from '@enbox/auth';
 import { validateMnemonic } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english';
 
@@ -89,6 +90,32 @@ export const LEVELDB_CLEANUP_PENDING_KEY = 'enbox.agent.leveldb-cleanup-pending'
  * `runPendingLevelDbCleanup()`.
  */
 export const VAULT_RESET_PENDING_KEY = 'enbox.vault.reset-pending';
+
+/**
+ * Round-12 F3: SecureStorage sentinel that records "the last
+ * `useAgentStore.reset()` failed to wipe the persisted AuthManager
+ * (Web5 connect) material; the next agent initialization MUST retry
+ * the SecureStorage wipe BEFORE provisioning a fresh `AuthManager`".
+ *
+ * The auth keys (`enbox:auth:*` — see `STORAGE_KEYS` from
+ * `@enbox/auth`) carry delegate decryption keys, the active
+ * identity DID, registration tokens, and session-revocation
+ * grants. A surviving `enbox:auth:delegateDid` +
+ * `enbox:auth:delegateDecryptionKeys` pair is privacy-critical: a
+ * Web5 dApp that the previous wallet had connected to (with its
+ * delegate keys still cached on this device) would be silently
+ * re-authorised under the new wallet's identity.
+ *
+ * Pre-fix `useAgentStore.reset()` cleared vault + LevelDB + session
+ * state but NEVER touched these keys, so the leak persisted across
+ * any reset → fresh-onboarding cycle. Round-12 F3 added the
+ * iterate-and-remove wipe in `reset()` and this sentinel so a
+ * SIGKILL / OS suspend / SecureStorage transient error during the
+ * iteration doesn't leave half-cleared auth state on disk with no
+ * retry marker. Mirrors the round-9 / round-11 patterns for
+ * `LEVELDB_CLEANUP_PENDING_KEY` and `VAULT_RESET_PENDING_KEY`.
+ */
+export const AUTH_RESET_PENDING_KEY = 'enbox.auth.reset-pending';
 
 /** Error code emitted by the biometric vault when the OS cannot satisfy a biometric prompt. */
 const BIOMETRICS_UNAVAILABLE_CODE = 'VAULT_ERROR_BIOMETRICS_UNAVAILABLE';
@@ -237,22 +264,91 @@ export async function runPendingVaultResetCleanup(
 }
 
 /**
- * Round-10 F4: convenience wrapper that runs BOTH pending-cleanup
- * helpers in sequence. Every agent-init entry point
+ * Round-12 F3: re-iterate `STORAGE_KEYS` and remove each key on the
+ * `AUTH_RESET_PENDING_KEY` retry path. Mirrors the
+ * `runPendingVaultResetCleanup` / `runPendingLevelDbCleanup`
+ * pattern: read the sentinel, run the wipe iff set, clear the
+ * sentinel only after success.
+ *
+ * The remove() loop is idempotent — `SecureStorageAdapter.remove()`
+ * is a no-op against an already-absent key, so re-running this on
+ * a partially-cleaned-up state finishes the wipe without
+ * resurrecting any state.
+ *
+ * Per-key try/catch parity with `useAgentStore.reset()`: a single
+ * key's remove() failure does NOT abort the iteration. We capture
+ * the first error and continue removing the rest so the wipe is as
+ * complete as possible on this attempt; the captured error is
+ * rethrown at the end so the caller knows the retry did not fully
+ * succeed AND the sentinel stays SET on disk for the next attempt.
+ *
+ * Round-10 F3 parity: fail CLOSED on `storage.get` failures so an
+ * unreadable sentinel never lets the caller proceed onto stale
+ * delegate keys / active identity / registration tokens.
+ */
+export async function runPendingAuthResetCleanup(
+  storage: CleanupStorageGetSetRemove = new SecureStorageAdapter(),
+  authStorage: { remove: (key: string) => Promise<void> } = new SecureStorageAdapter(),
+): Promise<boolean> {
+  const pending = await storage.get(AUTH_RESET_PENDING_KEY);
+  if (pending !== 'true') return true;
+  let firstRemoveError: unknown = null;
+  for (const key of Object.values(AUTH_STORAGE_KEYS)) {
+    try {
+      await authStorage.remove(key);
+    } catch (err) {
+      if (firstRemoveError === null) firstRemoveError = err;
+      console.warn(
+        `[agent-store] runPendingAuthResetCleanup: failed to remove auth storage key "${key}":`,
+        err,
+      );
+    }
+  }
+  if (firstRemoveError !== null) {
+    // Sentinel STAYS SET — the next agent-init flow will retry.
+    throw firstRemoveError;
+  }
+  try {
+    await storage.remove(AUTH_RESET_PENDING_KEY);
+  } catch (err) {
+    console.warn(
+      '[agent-store] runPendingAuthResetCleanup: failed to clear sentinel after successful retry (next launch will re-run the cleanup):',
+      err,
+    );
+  }
+  return true;
+}
+
+/**
+ * Round-10 F4 + Round-12 F3: convenience wrapper that runs ALL
+ * pending-cleanup helpers in sequence. Every agent-init entry point
  * (`initializeFirstLaunch`, `unlockAgent`, `resumePendingBackup`,
  * `restoreFromMnemonic`) calls this BEFORE `initializeAgent()` so
- * a failed prior reset can never let a stale LevelDB or a
- * still-resident native vault secret leak into the new agent.
+ * a failed prior reset can never let a stale LevelDB, a
+ * still-resident native vault secret, OR persisted Web5 connect
+ * material leak into the new agent.
  *
- * Order matters: the vault wipe runs FIRST so a stale OS-gated
- * secret is gone before the LevelDB retry runs. The LevelDB wipe is
- * harmless to re-run on a healthy install, but a stale native
- * secret is a privacy / correctness hazard, so we surface that
- * failure to the operator first.
+ * Order matters and reflects the threat model:
+ *   1. Vault wipe FIRST — stale OS-gated secret is the most
+ *      privacy-critical leak (a fresh "first launch" provisioning
+ *      would otherwise overwrite the alias and the user thinks
+ *      they have a new wallet, but the prior wallet's bytes still
+ *      exist in the Keychain / Keystore).
+ *   2. LevelDB wipe — stale identity / DWN records on disk would
+ *      be re-loaded by the next `EnboxUserAgent.create()` against
+ *      the same `dataPath`. Encrypted by the same biometric-gated
+ *      key the next vault would derive, so this ranks below vault
+ *      reset.
+ *   3. Auth wipe — stale delegate keys / active identity DID /
+ *      registration tokens would be inherited by the next
+ *      `AuthManager.create()` call. Less privacy-critical than the
+ *      root vault material (the keys are scoped to specific
+ *      dApps), but still must not leak across a wallet reset.
  */
 async function runPendingResetCleanups(): Promise<void> {
   await runPendingVaultResetCleanup();
   await runPendingLevelDbCleanup();
+  await runPendingAuthResetCleanup();
 }
 
 export interface AgentStore {
@@ -1119,42 +1215,76 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   reset: async () => {
     const { vault } = get();
 
-    // 0. Round-10 F2 + Round-11 F3: persist the vault-reset-pending
-    //    sentinel BEFORE we attempt the native wipe. This is
-    //    intentionally pessimistic: even if we crash mid-`vault.reset()`
-    //    (SIGKILL, OS suspend that never resumes, JS engine death)
-    //    the next cold launch sees the sentinel and re-runs
-    //    `runPendingVaultResetCleanup()` before any unlock / setup /
-    //    restore flow proceeds. The sentinel is cleared at the end of
-    //    step 1 ONLY if every delete succeeded — partial failures
-    //    keep the sentinel set so the next agent-init flow retries.
+    // 0. Round-10 F2 + Round-11 F3 + Round-12 F1/F3: persist all
+    //    three retry sentinels (vault, LevelDB, auth) BEFORE we
+    //    touch any wipe operation. Pessimistic by construction:
+    //    even if we crash mid-wipe (SIGKILL, OS suspend that never
+    //    resumes, JS engine death) the next cold launch sees the
+    //    sentinels and re-runs the corresponding cleanups before
+    //    any unlock / setup / restore / agent-init flow proceeds.
+    //    Each sentinel is cleared at the end of its own wipe step
+    //    ONLY if every sub-step succeeded — partial failures keep
+    //    the sentinel set so the next agent-init flow retries.
     //
-    //    Round-11 F3: pre-fix this swallowed `set()` failures via
-    //    `console.warn` and continued into the wipe steps. That
-    //    defeated the entire crash-resilience contract: if
-    //    SecureStorage is unwritable AND the subsequent native
-    //    delete fails (or the process dies mid-reset), the next
-    //    launch has no sentinel to force the cleanup retry. The
-    //    user lands in a half-cleaned state with no automatic
-    //    recovery.
+    //    Fail-CLOSED on ANY sentinel write failure: throw before
+    //    touching the native vault / LevelDB / session store, AND
+    //    best-effort roll back any sentinels we already wrote. A
+    //    persistent SecureStorage failure is a system-level problem
+    //    the user must resolve before any reset can land — failing
+    //    closed keeps the wallet intact for a manual retry once
+    //    SecureStorage recovers.
     //
-    //    Fix: fail-CLOSED on sentinel write failure. Throw before
-    //    touching the native vault / LevelDB / session store. The
-    //    user (via the new Settings UI alert) can retry, which
-    //    typically succeeds because SecureStorage failures are
-    //    usually transient (Keychain locked / process backgrounded
-    //    on iOS, transient SharedPreferences IO on Android). A
-    //    persistent SecureStorage failure is a system-level
-    //    problem the user must resolve before any reset can land.
+    //    Round-12 F1: the LevelDB sentinel pre-fix was written ONLY
+    //    inside the destroy-failed catch — a crash during the
+    //    multi-subpath wipe left the LevelDB partially deleted
+    //    with NO sentinel on disk, so the next cold launch's
+    //    `runPendingLevelDbCleanup()` would skip the retry and
+    //    `EnboxUserAgent.create()` would open a corrupt /
+    //    half-deleted database.
     const sentinelStorage = new SecureStorageAdapter();
-    try {
-      await sentinelStorage.set(VAULT_RESET_PENDING_KEY, 'true');
-    } catch (err) {
-      console.warn(
-        '[agent-store] reset: refusing to start wipe — sentinel persistence failed (failing closed so a partial reset cannot leak past a non-existent retry path):',
-        err,
+    const SENTINEL_KEYS = [
+      VAULT_RESET_PENDING_KEY,
+      LEVELDB_CLEANUP_PENDING_KEY,
+      AUTH_RESET_PENDING_KEY,
+    ] as const;
+    const sentinelWrites = await Promise.allSettled(
+      SENTINEL_KEYS.map((k) => sentinelStorage.set(k, 'true')),
+    );
+    const writtenKeys: string[] = [];
+    let firstSentinelWriteError: unknown = null;
+    for (let i = 0; i < SENTINEL_KEYS.length; i++) {
+      const result = sentinelWrites[i];
+      if (result.status === 'fulfilled') {
+        writtenKeys.push(SENTINEL_KEYS[i]);
+      } else if (firstSentinelWriteError === null) {
+        firstSentinelWriteError = result.reason;
+      }
+    }
+    if (firstSentinelWriteError !== null) {
+      // Best-effort roll back any sentinels we DID succeed in
+      // writing so the next cold launch doesn't run a cleanup
+      // retry for a reset that never started. Rollback failures
+      // are logged but do NOT promote to a thrown error — we
+      // already have a definitive sentinel-write failure to
+      // surface, and a stuck retry sentinel is recoverable
+      // (its cleanup helper is idempotent on a healthy install).
+      const rollbacks = await Promise.allSettled(
+        writtenKeys.map((k) => sentinelStorage.remove(k)),
       );
-      throw err;
+      const rollbackFailures = rollbacks.filter(
+        (r) => r.status === 'rejected',
+      );
+      if (rollbackFailures.length > 0) {
+        console.warn(
+          '[agent-store] reset: failed to roll back retry sentinels after a sentinel write failure (the next cold launch will run no-op cleanup retries):',
+          rollbackFailures.map((r) => (r as PromiseRejectedResult).reason),
+        );
+      }
+      console.warn(
+        '[agent-store] reset: refusing to start wipe — retry-sentinel persistence failed (failing closed so a partial reset cannot leak past a non-existent retry path):',
+        firstSentinelWriteError,
+      );
+      throw firstSentinelWriteError;
     }
 
     // 1. Wipe the biometric-gated native secret + the persisted vault
@@ -1172,12 +1302,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    failures used to be swallowed via `console.warn` only. Both
     //    paths now SURFACE the error: we capture it into
     //    `vaultResetError` and re-throw at the end (alongside any
-    //    LevelDB error) so the caller knows the wipe is incomplete
-    //    AND the sentinel persisted in step 0 keeps the retry path
-    //    armed for the next launch. Native modules treat
-    //    missing-alias as success on both Android (`promise.resolve(null)`)
-    //    and iOS (`errSecItemNotFound` -> resolve), so any rejection
-    //    here is a real failure that we must not mask.
+    //    LevelDB / auth error) so the caller knows the wipe is
+    //    incomplete AND the sentinel persisted in step 0a keeps the
+    //    retry path armed for the next launch. Native modules treat
+    //    missing-alias as success on both Android
+    //    (`promise.resolve(null)`) and iOS (`errSecItemNotFound` ->
+    //    resolve), so any rejection here is a real failure that we
+    //    must not mask.
     let vaultResetError: unknown = null;
     if (vault) {
       try {
@@ -1196,14 +1327,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           err,
         );
       }
-      // Clear the SecureStorage flags that BiometricVault would have
-      // cleared if a vault instance existed. The two keys match the
-      // constants exported from `biometric-vault.ts`. We attempt
-      // both even if the native delete failed, but a clear failure
-      // promotes to `vaultResetError` only if native didn't already
-      // fail (the native delete is the privacy-critical step; a
-      // surviving SecureStorage flag with an absent native secret is
-      // recoverable via the next cold launch's hydrate gate).
       const fallbackStorage = new SecureStorageAdapter();
       try {
         await fallbackStorage.remove(INITIALIZED_STORAGE_KEY);
@@ -1225,7 +1348,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }
     }
     if (vaultResetError === null) {
-      // Clear the sentinel persisted in step 0 since every step
+      // Clear the sentinel persisted in step 0a since every step
       // succeeded. A failure here is logged but does NOT promote to
       // `vaultResetError` — the worst case is one extra no-op
       // `runPendingVaultResetCleanup()` on the next launch.
@@ -1241,92 +1364,168 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
     // 2. Wipe the on-disk ENBOX_AGENT LevelDB data so a post-reset
     //    relaunch starts from a genuinely clean state rather than
-    //    resurrecting identities / DWN records / sync cursors from the
-    //    previous wallet. The helper closes any open handle first and
-    //    resolves idempotently when nothing is on disk.
+    //    resurrecting identities / DWN records / sync cursors from
+    //    the previous wallet. The helper closes any open handle
+    //    first and resolves idempotently when nothing is on disk.
     //
-    //    Round-9 F4: pre-fix code SILENTLY SWALLOWED a
-    //    `destroyAgentLevelDatabases()` rejection (the catch block
-    //    only logged a warning). That conflicts with the reset
-    //    contract — "erase identities, DWN records, sync cursors,
-    //    biometric secret" — because a swallowed wipe leaves stale
-    //    identity material on disk that the very next
-    //    `initializeFirstLaunch()` resurrects via the LevelDB handle
-    //    `EnboxUserAgent.create()` opens against `dataPath`. The
-    //    user's "Reset wallet" tap reports success, but the
-    //    next launch quietly re-loads the previous wallet's
-    //    identities / DWN records.
-    //
-    //    The fix is two-pronged:
-    //      a) Persist a `LEVELDB_CLEANUP_PENDING_KEY` sentinel BEFORE
-    //         rethrowing so the next cold launch retries the wipe
-    //         (`runPendingLevelDbCleanup()`) before opening any
-    //         agent LevelDB handle. The retry is fail-CLOSED — if it
-    //         still throws, agent initialization refuses to proceed.
-    //      b) Rethrow the LevelDB error from `reset()` so the
-    //         immediate caller (Settings, recovery-restore-screen)
-    //         can surface the failure to the user and offer a retry.
-    //
-    //    Steps 1, 3 and 4 still execute on the failure path so the
-    //    in-memory state and biometric secret cleanup land BEFORE
-    //    the rethrow — only the LevelDB wipe is left pending.
+    //    The cleanup-pending sentinel was already written in step 0b
+    //    BEFORE this call — see the round-12 F1 rationale there. So
+    //    a crash mid-wipe still gets retried on the next cold
+    //    launch. Here we only need to CLEAR the sentinel after a
+    //    successful wipe.
     let levelDbError: unknown = null;
     try {
       await destroyAgentLevelDatabases(AGENT_DATA_PATH);
-    } catch (err) {
-      levelDbError = err;
       try {
-        await new SecureStorageAdapter().set(
-          LEVELDB_CLEANUP_PENDING_KEY,
-          'true',
-        );
-      } catch (storageErr) {
+        await sentinelStorage.remove(LEVELDB_CLEANUP_PENDING_KEY);
+      } catch (err) {
         console.warn(
-          '[agent-store] reset: failed to persist LevelDB cleanup-pending sentinel (next launch will not retry the wipe):',
-          storageErr,
+          '[agent-store] reset: failed to clear LevelDB sentinel after successful wipe (next launch will run a no-op cleanup retry):',
+          err,
         );
       }
+    } catch (err) {
+      levelDbError = err;
       console.warn(
-        '[agent-store] reset: LevelDB wipe failed; sentinel persisted for retry:',
+        '[agent-store] reset: LevelDB wipe failed; sentinel from step 0b stays set for next-launch retry:',
         err,
       );
     }
 
-    // 3. Tear down the in-memory agent / authManager / vault state and
-    //    null out the one-shot recovery phrase if it was still held.
-    get().teardown();
-
-    // 4. Clear persisted session state + PIN-era storage artefacts.
-    //    `useSessionStore` is imported statically at the top of the
-    //    module now that `session-store.ts` no longer pulls in the
-    //    ESM-only `@enbox/agent` runtime (the shared constants live in
-    //    the pure-data `vault-constants.ts` module).
+    // 3. Round-12 F3: wipe persisted AuthManager / Web5 connect
+    //    material from SecureStorage. Pre-fix `agent-store.reset()`
+    //    cleared vault + LevelDB + session state but NEVER touched
+    //    the `enbox:auth:*` keys that `AuthManager` (created by
+    //    `agent-init.ts`) writes through its `SecureStorageAdapter`
+    //    — so the new wallet inherited the previous wallet's
+    //    `activeIdentity` DID, `delegateDid` + `delegateDecryptionKeys`
+    //    (cryptographic material), `connectedDid`, `registrationTokens`,
+    //    `sessionRevocations`, etc. That is a privacy-critical leak:
+    //    a Web5 dApp that the previous wallet had connected to (with
+    //    its delegate keys still cached on this device) could be
+    //    silently re-authorised under the new wallet's identity.
     //
-    //    Round-10 self-review: pre-fix this swallowed the rejection
-    //    via `console.warn`. If `session-store.reset()` rejected
-    //    (e.g. SecureStorage write to clear `SESSION_KEY` failed),
-    //    `agent-store.reset()` would still return success. The next
-    //    cold launch would then `hydrate()` against the STALE
-    //    `SESSION_KEY` (still containing the prior wallet's
-    //    `hasCompletedOnboarding=true` / `hasIdentity=true` /
-    //    `isLocked` flags) and route the user to "unlock" — but the
-    //    vault and LevelDB had been wiped, so the unlock would
-    //    immediately fail and trap the user in an error loop.
-    //    Surface the rejection (capture-then-rethrow at step 5)
-    //    so callers can offer a retry instead of reporting success
-    //    on an inconsistent persisted state.
-    let sessionResetError: unknown = null;
-    try {
-      await useSessionStore.getState().reset();
-    } catch (err) {
-      sessionResetError = err;
-      console.warn('[agent-store] reset: session-store reset failed:', err);
+    //    Fix: iterate `STORAGE_KEYS` from `@enbox/auth` and remove
+    //    each key. We use the canonical export instead of
+    //    `SecureStorageAdapter.clear()` because clear() would also
+    //    nuke the in-flight sentinels (which still drive the
+    //    failure-path retry semantics) and the session-store keys
+    //    (which step 5 owns). Iterating STORAGE_KEYS gives us a
+    //    precise, future-proof wipe — any new key added to
+    //    `@enbox/auth/types.ts` automatically flows through here on
+    //    the next mobile build via the `Object.values(STORAGE_KEYS)`
+    //    loop.
+    //
+    //    Failures are CAPTURED (not swallowed) so a transient
+    //    SecureStorage error surfaces to the caller alongside
+    //    vault / LevelDB errors. The auth-reset sentinel from step
+    //    0 stays SET so the next cold launch's
+    //    `runPendingAuthResetCleanup()` retries the iteration. The
+    //    user can also manually retry via Settings; remove() is
+    //    idempotent on already-absent keys.
+    let authResetError: unknown = null;
+    const authStorage = new SecureStorageAdapter();
+    for (const key of Object.values(AUTH_STORAGE_KEYS)) {
+      try {
+        await authStorage.remove(key);
+      } catch (err) {
+        if (authResetError === null) authResetError = err;
+        console.warn(
+          `[agent-store] reset: failed to remove auth storage key "${key}":`,
+          err,
+        );
+      }
+    }
+    if (authResetError === null) {
+      // Clear the sentinel persisted in step 0 since every key was
+      // successfully removed. A failure here is logged but does
+      // NOT promote to `authResetError` — the worst case is one
+      // extra no-op `runPendingAuthResetCleanup()` on the next
+      // launch.
+      try {
+        await sentinelStorage.remove(AUTH_RESET_PENDING_KEY);
+      } catch (err) {
+        console.warn(
+          '[agent-store] reset: failed to clear auth-reset sentinel after successful wipe (next launch will run a no-op cleanup retry):',
+          err,
+        );
+      }
     }
 
-    // 5. Round-9 F4 + Round-10 F2 + self-review: rethrow any captured
-    //    failure now that the in-memory state has been torn down and
-    //    the session-store has been reset. The sentinels persisted
-    //    above guarantee the next agent-init flow retries the
+    // 4. Tear down the in-memory agent / authManager / vault state
+    //    and null out the one-shot recovery phrase if it was still
+    //    held. Always runs — teardown is a synchronous in-memory
+    //    operation with no persistence side-effects, so even on
+    //    failure paths we want the in-process refs cleared.
+    get().teardown();
+
+    // 5. Round-12 F2: defer session-store reset until ALL critical
+    //    wipes (vault + LevelDB + auth) succeeded. Pre-fix this
+    //    ALWAYS ran before rethrowing — but `session-store.reset()`
+    //    sets `biometricStatus: 'unknown'` which the navigator
+    //    routes to `Loading` (see `getInitialRoute` rule 3). The
+    //    Settings UI shows the reset-failure Alert ON TOP of the
+    //    transition, so even though the alert remained
+    //    interactable, dismissing it left the user stranded on a
+    //    permanent Loading screen until they backgrounded the app.
+    //
+    //    Fix: skip session reset on failure. The session-store keeps
+    //    its prior `hasIdentity=true` / `biometricStatus='ready'`
+    //    flags so the Settings screen stays mounted and the
+    //    follow-up Alert renders against a stable navigator. The
+    //    retry sentinels persisted in step 0 still drive automatic
+    //    recovery on the next cold launch — at which point the
+    //    cleanup helpers re-run before any agent-init proceeds.
+    //
+    //    Trade-off (deliberate, narrow): on the failure path the
+    //    persisted SESSION_KEY remains stale. If the user
+    //    backgrounds + relaunches AFTER seeing the failure alert
+    //    (without retrying), `session.hydrate()` reads the stale
+    //    `hasIdentity=true` snapshot and the navigator routes to
+    //    BiometricUnlock. The user-tap on Unlock then hits
+    //    `unlockAgent()` which calls `runPendingResetCleanups()`
+    //    first — successfully retrying the wipes — but the
+    //    subsequent `vault.unlock()` against a now-cleaned vault
+    //    surfaces `VAULT_ERROR_NOT_INITIALIZED`. The user sees an
+    //    in-screen error and must manually re-trigger Reset (which
+    //    succeeds via the no-vault fallback path). This is a known
+    //    recoverable trap; we accept it because the alternative
+    //    (clearing persisted session on failure) breaks the
+    //    orphan-secret detection invariants in `session.hydrate()`
+    //    and would silently re-route the user to a phantom-wallet
+    //    RecoveryPhrase backup. A follow-up will introduce a
+    //    "reset-in-progress" sentinel for `getInitialRoute()` to
+    //    consult — out of scope for round-12.
+    //
+    //    Round-10 self-review: when session reset DOES run (success
+    //    path) we still capture-then-rethrow on rejection. A
+    //    `SecureStorage.set` failure to clear `SESSION_KEY` would
+    //    otherwise leave the next cold launch routing against a
+    //    stale session that says `hasIdentity=true` — agent-init
+    //    would attempt unlock against a wiped vault and trap the
+    //    user in an error loop.
+    let sessionResetError: unknown = null;
+    if (
+      vaultResetError === null &&
+      levelDbError === null &&
+      authResetError === null
+    ) {
+      try {
+        await useSessionStore.getState().reset();
+      } catch (err) {
+        sessionResetError = err;
+        console.warn('[agent-store] reset: session-store reset failed:', err);
+      }
+    } else {
+      console.warn(
+        '[agent-store] reset: skipping session-store reset because a critical wipe failed; the user stays on the current route so the failure alert can render against a stable navigator. Retry sentinels handle next-launch recovery.',
+      );
+    }
+
+    // 6. Round-9 F4 + Round-10 F2 + Round-12 F1/F2/F3 + self-review:
+    //    rethrow any captured failure now that the in-memory state
+    //    has been torn down. The sentinels persisted in steps 0a/0b
+    //    guarantee the next agent-init flow retries the
     //    privacy-critical wipes (vault secret + LevelDB) before
     //    opening any handle / provisioning a new vault, so even a
     //    caller that swallows the throw cannot resurrect stale
@@ -1336,20 +1535,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    Order of precedence reflects the threat model:
     //      1. `vaultResetError` — privacy-critical surviving secret.
     //      2. `levelDbError`    — correctness-critical surviving
-    //                              identities / DWN records (data on
-    //                              disk is encrypted by the same
-    //                              biometric-gated key the next vault
-    //                              would derive, so this ranks below
-    //                              vault-reset failure).
-    //      3. `sessionResetError` — last-priority misroute risk: a
-    //                              stale SESSION_KEY can put the user
-    //                              into an unlock loop even though
-    //                              the wallet / LevelDB are clean.
+    //                              identities / DWN records.
+    //      3. `authResetError`  — privacy-critical surviving auth
+    //                              material (delegate keys, active
+    //                              identity DID, registration tokens).
+    //                              Ranks above session because
+    //                              delegate keys can re-authorise the
+    //                              new wallet under the old wallet's
+    //                              connected dApps.
+    //      4. `sessionResetError` — last-priority misroute risk.
     if (vaultResetError !== null) {
       throw vaultResetError;
     }
     if (levelDbError !== null) {
       throw levelDbError;
+    }
+    if (authResetError !== null) {
+      throw authResetError;
     }
     if (sessionResetError !== null) {
       throw sessionResetError;

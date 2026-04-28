@@ -108,6 +108,24 @@ jest.mock(
     return {
       __esModule: true,
       AuthManager: { create },
+      // Round-12 F3: surface the canonical STORAGE_KEYS so
+      // `useAgentStore.reset()` can iterate them and wipe persisted
+      // AuthManager material from SecureStorage. Mirrors the real
+      // export from `@enbox/auth/types.ts`.
+      STORAGE_KEYS: {
+        PREVIOUSLY_CONNECTED: 'enbox:auth:previouslyConnected',
+        ACTIVE_IDENTITY: 'enbox:auth:activeIdentity',
+        DELEGATE_DID: 'enbox:auth:delegateDid',
+        CONNECTED_DID: 'enbox:auth:connectedDid',
+        DELEGATE_DECRYPTION_KEYS: 'enbox:auth:delegateDecryptionKeys',
+        DELEGATE_CONTEXT_KEYS: 'enbox:auth:delegateContextKeys',
+        DELEGATE_MULTI_PARTY_PROTOCOLS:
+          'enbox:auth:delegateMultiPartyProtocols',
+        LOCAL_DWN_ENDPOINT: 'enbox:auth:localDwnEndpoint',
+        REGISTRATION_TOKENS: 'enbox:auth:registrationTokens',
+        SESSION_REVOCATIONS: 'enbox:auth:sessionRevocations',
+        REVOCATION_RETRY_CONTEXT: 'enbox:auth:revocationRetryContext',
+      },
       __mocks__: { create },
     };
   },
