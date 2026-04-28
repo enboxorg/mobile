@@ -1133,49 +1133,82 @@ export class BiometricVault
 
   /**
    * Wipe the biometric-gated native secret and all in-memory / persisted
-   * vault state. Idempotent — callable repeatedly even after the secret is
-   * already gone. Callers use this as part of "Reset wallet" flows and
-   * after recovery-phrase restore to re-arm biometric protection.
+   * vault state. Idempotent on a missing native alias — callable repeatedly
+   * even after the secret is already gone (both Android and iOS native
+   * modules resolve missing-alias deletes as success). Callers use this
+   * as part of "Reset wallet" flows and after recovery-phrase restore to
+   * re-arm biometric protection.
    *
-   * Intentionally does NOT throw when the native secret is absent — the
-   * goal is to leave the vault in a clean, uninitialized state regardless
-   * of the starting point.
+   * Round-10 F2: the in-memory state is ALWAYS cleared (defense in
+   * depth) but native delete and SecureStorage clear failures now
+   * PROPAGATE to the caller. Pre-fix every step swallowed errors via
+   * empty `catch {}` blocks, which let `useAgentStore.reset()` report
+   * success while the OS-gated secret remained alive on disk. The
+   * caller (`useAgentStore.reset()`) maintains a SecureStorage
+   * sentinel so the next agent-init retries the wipe even if the
+   * caller crashes on the throw.
+   *
+   * Native modules already handle missing-alias deletes idempotently
+   * (Android `promise.resolve(null)` on absent alias, iOS
+   * `errSecItemNotFound` -> resolve), so any rejection from the
+   * native layer here represents a real failure (Keystore exception,
+   * non-cancel OSStatus, etc.) that MUST be surfaced.
    */
   async reset(): Promise<void> {
-    // 1. Delete the biometric-gated native secret. Best-effort — if
-    //    deletion fails we still clear in-memory state below so the
-    //    caller isn't stuck holding stale data.
+    // Capture the FIRST failure across all steps; rethrow it after
+    // the in-memory cleanup runs unconditionally. We always run
+    // every step so a single early failure does not block later
+    // SecureStorage clears or the in-memory zeroization.
+    let firstError: unknown = null;
+
+    // 1. Delete the biometric-gated native secret. Idempotent on
+    //    missing-alias — but a rejection from a present-alias delete
+    //    indicates a real Keystore / Keychain failure that we MUST
+    //    surface. Pre-fix this was `try { ... } catch {}`.
     try {
       await this._native.deleteSecret(WALLET_ROOT_KEY_ALIAS);
-    } catch {
-      // Native modules treat missing-alias deletes as success; any other
-      // error is logged by the native layer. Swallow here so reset stays
-      // idempotent.
+    } catch (err) {
+      firstError = err;
     }
 
     // 2. Clear SecureStorage flags so `isInitialized()` correctly
     //    reports `false` on the next call and so a future app launch
-    //    cannot spuriously restore a stale `invalidated` biometric state.
+    //    cannot spuriously restore a stale `invalidated` biometric
+    //    state. Both writes are independent — we attempt the second
+    //    even if the first throws so a single corrupt key does not
+    //    block the other.
     if (this._secureStorage) {
       try {
         await this._secureStorage.remove(INITIALIZED_STORAGE_KEY);
-      } catch {
-        // best-effort
+      } catch (err) {
+        if (firstError === null) firstError = err;
       }
       try {
         await this._secureStorage.remove(BIOMETRIC_STATE_STORAGE_KEY);
-      } catch {
-        // best-effort
+      } catch (err) {
+        if (firstError === null) firstError = err;
       }
     }
 
     // 3. Clear in-memory derived material + reset the biometric state
     //    machine to "unknown" so the next hydrate / initialize starts
-    //    fresh.
+    //    fresh. This MUST run regardless of whether steps 1/2 threw —
+    //    leaving stale derived material in memory after a
+    //    user-requested reset is its own correctness problem
+    //    (subsequent `getDid()` / `getMnemonic()` would resolve to
+    //    the OLD wallet's values).
     this._clearInMemoryState();
     this._biometricState = 'unknown';
     this._lastBackup = null;
     this._lastRestore = null;
+
+    // 4. Round-10 F2: surface the first captured failure (if any).
+    //    The `useAgentStore.reset()` caller maintains the
+    //    `VAULT_RESET_PENDING_KEY` sentinel so a thrown error
+    //    automatically rearms the next-launch retry.
+    if (firstError !== null) {
+      throw firstError;
+    }
   }
 
   async getDid(): Promise<BearerDid> {

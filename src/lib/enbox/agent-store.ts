@@ -65,10 +65,54 @@ const AGENT_DATA_PATH = 'ENBOX_AGENT';
  */
 export const LEVELDB_CLEANUP_PENDING_KEY = 'enbox.agent.leveldb-cleanup-pending';
 
+/**
+ * Round-10 F2: SecureStorage sentinel that records "the last
+ * `vault.reset()` failed to wipe the OS-gated biometric secret; the
+ * next agent initialization MUST retry the native delete BEFORE any
+ * unlock / setup flow proceeds". Pre-fix `BiometricVault.reset()` and
+ * `useAgentStore.reset()` swallowed every native deleteSecret() /
+ * SecureStorage clear failure, leaving the OS-gated entry alive while
+ * the app routed through reset / re-onboarding as if the wipe
+ * succeeded. The next setup attempt then either:
+ *
+ *   1. failed loudly because the native non-upsert guard refused to
+ *      provision over an existing alias (correct, but user-visible
+ *      regression on what the user thinks is a clean wallet), or
+ *   2. unlocked the OLD wallet via the surviving secret if a future
+ *      caller skipped the non-upsert guard.
+ *
+ * The sentinel is written with `'true'` BEFORE `reset()` rethrows so a
+ * caller that crashes between the throw and a UI surface still gets
+ * the cleanup retried on the next cold launch. It is cleared by
+ * `runPendingVaultResetCleanup()` once a retry succeeds — that helper
+ * runs at the top of every agent-init flow alongside
+ * `runPendingLevelDbCleanup()`.
+ */
+export const VAULT_RESET_PENDING_KEY = 'enbox.vault.reset-pending';
+
 /** Error code emitted by the biometric vault when the OS cannot satisfy a biometric prompt. */
 const BIOMETRICS_UNAVAILABLE_CODE = 'VAULT_ERROR_BIOMETRICS_UNAVAILABLE';
 /** Error code emitted by the biometric vault when the key was invalidated by the OS. */
 const KEY_INVALIDATED_CODE = 'VAULT_ERROR_KEY_INVALIDATED';
+
+/**
+ * Round-10 F3: type the SecureStorage surface used by the cleanup
+ * helpers. Both helpers accept ONLY the get / set / remove operations
+ * they need so tests can substitute a focused stub instead of a full
+ * `SecureStorageAdapter`. The shape mirrors `SecureStorageAdapter`
+ * exactly — `set` is included on the `runPendingVaultResetCleanup`
+ * surface even though only the local helper writes the sentinel,
+ * because `runPendingVaultResetCleanup` writes the key when a retry
+ * fails (see implementation below).
+ */
+type CleanupStorageGetRemove = {
+  get: (key: string) => Promise<string | null>;
+  remove: (key: string) => Promise<void>;
+};
+
+type CleanupStorageGetSetRemove = CleanupStorageGetRemove & {
+  set: (key: string, value: string) => Promise<void>;
+};
 
 /**
  * Run a verified retry of `destroyAgentLevelDatabases()` if a previous
@@ -80,20 +124,28 @@ const KEY_INVALIDATED_CODE = 'VAULT_ERROR_KEY_INVALIDATED';
  *
  * Round-9 F4: the helper is exported so that `__tests__` can pin the
  * retry contract directly without going through a full reset cycle.
+ *
+ * Round-10 F3: `storage.get` failures now propagate (fail-CLOSED).
+ * Pre-fix the helper logged a warning and returned `true` ("no
+ * pending cleanup"), which lets a transient SecureStorage failure
+ * route the next agent init past a still-unreaped LevelDB. With the
+ * sentinel set on disk but unreadable, we cannot prove the database
+ * is safe to open — the only correct behaviour is to refuse to
+ * proceed and surface the storage error to the operator. Callers
+ * (`initializeFirstLaunch`, `unlockAgent`, `resumePendingBackup`,
+ * `restoreFromMnemonic`) already let the underlying error bubble up
+ * and tear down to a recoverable error state, so failing here is
+ * strictly safer than the pre-fix swallow.
  */
 export async function runPendingLevelDbCleanup(
-  storage: { get: (key: string) => Promise<string | null>; remove: (key: string) => Promise<void> } = new SecureStorageAdapter(),
+  storage: CleanupStorageGetRemove = new SecureStorageAdapter(),
 ): Promise<boolean> {
-  let pending: string | null;
-  try {
-    pending = await storage.get(LEVELDB_CLEANUP_PENDING_KEY);
-  } catch (err) {
-    console.warn(
-      '[agent-store] runPendingLevelDbCleanup: storage.get failed (treating as no-pending):',
-      err,
-    );
-    return true;
-  }
+  // Round-10 F3: any failure here propagates to the caller.
+  // The `await` surfaces the rejection naturally; we do NOT wrap it
+  // in a try/catch that swallows or rebrands the error, because the
+  // operator needs to see the underlying SecureStorage failure code
+  // (e.g. KEYCHAIN_LOCKED, IO_ERROR) to diagnose.
+  const pending = await storage.get(LEVELDB_CLEANUP_PENDING_KEY);
   if (pending !== 'true') return true;
   await destroyAgentLevelDatabases(AGENT_DATA_PATH);
   // Wipe the sentinel ONLY after the retry succeeded. A crash between
@@ -111,6 +163,96 @@ export async function runPendingLevelDbCleanup(
     );
   }
   return true;
+}
+
+/**
+ * Round-10 F2: run a verified retry of the native vault wipe if a
+ * previous `reset()` failed to delete the biometric-gated secret OR
+ * failed to clear the SecureStorage flags. Resolves `true` on a
+ * successful (or vacuous) cleanup; throws with the underlying error
+ * if the retry STILL fails — same fail-CLOSED semantics as
+ * `runPendingLevelDbCleanup`.
+ *
+ * Pre-fix the failure paths were:
+ *   1. `BiometricVault.reset()` swallowed `deleteSecret()` failures
+ *      via `try { ... } catch {}`. Native modules treat
+ *      missing-alias as success, so a non-idempotent rejection
+ *      indicates an actual Keystore / Keychain failure (e.g.
+ *      `KeyStoreException`, `errSecAuthFailed`). The pre-fix flow
+ *      proceeded to clear the SecureStorage flags and report success
+ *      while the OS-gated entry remained alive on disk.
+ *   2. `useAgentStore.reset()` independently caught both
+ *      `vault.reset()` and the fallback-path `deleteSecret()` /
+ *      `SecureStorage.remove` rejections via `console.warn` only,
+ *      then proceeded to wipe LevelDB and the session store as if
+ *      the native delete had succeeded.
+ *
+ * Combined effect: a successful-looking "Reset wallet" tap could
+ * leave the prior wallet's biometric secret intact, and the next
+ * `initializeFirstLaunch()` would either fail on the non-upsert
+ * guard (visible regression) or — if a future caller skipped the
+ * guard — silently unlock the OLD wallet under fresh onboarding
+ * routing.
+ *
+ * The sentinel + retry pattern matches `runPendingLevelDbCleanup`:
+ *   - `useAgentStore.reset()` writes the sentinel BEFORE the
+ *     wipe attempt and clears it AFTER success.
+ *   - This helper retries the native delete + SecureStorage clear
+ *     when the sentinel is set, propagating any failure so the
+ *     calling agent-init flow refuses to provision a fresh wallet
+ *     over a still-resident OS-gated secret.
+ *
+ * `nativeVault` and `vaultStorage` are dependency-injected to keep
+ * the helper unit-testable without booting a `BiometricVault`
+ * instance.
+ */
+export async function runPendingVaultResetCleanup(
+  storage: CleanupStorageGetSetRemove = new SecureStorageAdapter(),
+  nativeVault: { deleteSecret: (alias: string) => Promise<void> } = NativeBiometricVault,
+  vaultStorage: { remove: (key: string) => Promise<void> } = new SecureStorageAdapter(),
+): Promise<boolean> {
+  // Round-10 F3 parity: fail CLOSED on storage.get failures so an
+  // unreadable sentinel never lets the caller proceed onto a
+  // not-yet-cleaned native secret.
+  const pending = await storage.get(VAULT_RESET_PENDING_KEY);
+  if (pending !== 'true') return true;
+  // Re-run the same delete + clear sequence `BiometricVault.reset()`
+  // performs. Native modules are idempotent on missing-alias deletes
+  // (`promise.resolve(null)` on Android, `errSecItemNotFound` ->
+  // resolve on iOS), so retrying is always safe.
+  await nativeVault.deleteSecret(WALLET_ROOT_KEY_ALIAS);
+  await vaultStorage.remove(INITIALIZED_STORAGE_KEY);
+  await vaultStorage.remove(BIOMETRIC_STATE_STORAGE_KEY);
+  // Sentinel cleared ONLY after every step succeeded — partial
+  // success keeps the sentinel and forces a retry on the next launch.
+  try {
+    await storage.remove(VAULT_RESET_PENDING_KEY);
+  } catch (err) {
+    console.warn(
+      '[agent-store] runPendingVaultResetCleanup: failed to clear sentinel after successful retry (next launch will re-run the cleanup):',
+      err,
+    );
+  }
+  return true;
+}
+
+/**
+ * Round-10 F4: convenience wrapper that runs BOTH pending-cleanup
+ * helpers in sequence. Every agent-init entry point
+ * (`initializeFirstLaunch`, `unlockAgent`, `resumePendingBackup`,
+ * `restoreFromMnemonic`) calls this BEFORE `initializeAgent()` so
+ * a failed prior reset can never let a stale LevelDB or a
+ * still-resident native vault secret leak into the new agent.
+ *
+ * Order matters: the vault wipe runs FIRST so a stale OS-gated
+ * secret is gone before the LevelDB retry runs. The LevelDB wipe is
+ * harmless to re-run on a healthy install, but a stale native
+ * secret is a privacy / correctness hazard, so we surface that
+ * failure to the operator first.
+ */
+async function runPendingResetCleanups(): Promise<void> {
+  await runPendingVaultResetCleanup();
+  await runPendingLevelDbCleanup();
 }
 
 export interface AgentStore {
@@ -403,12 +545,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // applies to first-launch as to unlock.
     let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
-      // Round-9 F4: retry any pending LevelDB wipe from a previous
-      // `reset()` BEFORE creating the agent. `runPendingLevelDbCleanup`
-      // is fail-CLOSED — if the retry rejects we throw before opening
-      // the LevelDB handle so a stale identity / DWN record can never
-      // resurrect into a fresh wallet.
-      await runPendingLevelDbCleanup();
+      // Round-9 F4 + Round-10 F2/F4: retry both pending cleanups
+      // (native vault secret + on-disk LevelDB) from a previous
+      // failed `reset()` BEFORE creating the agent. Both helpers are
+      // fail-CLOSED — if the retry rejects we throw before opening
+      // the LevelDB handle OR provisioning a new vault, so a stale
+      // identity / DWN record / OS-gated secret can never resurrect
+      // into a fresh wallet.
+      await runPendingResetCleanups();
       console.log('[agent-store] initializeFirstLaunch: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       vaultRef = vault;
@@ -517,8 +661,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // review Finding 5.)
     let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
-      // Round-9 F4: see `initializeFirstLaunch()` for the rationale.
-      await runPendingLevelDbCleanup();
+      // Round-9 F4 + Round-10 F2/F4: see `initializeFirstLaunch()`
+      // for the rationale.
+      await runPendingResetCleanups();
       console.log('[agent-store] unlockAgent: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       vaultRef = vault;
@@ -596,6 +741,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // memory until GC unless we explicitly call `lock()`.
     let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
+      // Round-10 F4: pre-fix `resumePendingBackup` jumped straight to
+      // `initializeAgent()` without retrying any pending reset
+      // cleanups. The other three init flows
+      // (`initializeFirstLaunch`, `unlockAgent`,
+      // `restoreFromMnemonic`) all gate on
+      // `runPendingResetCleanups()` — only this path skipped it.
+      // If a user hit "Reset wallet" mid-backup-pending session and
+      // the wipe failed, the next backup-pending resume opened the
+      // stale ENBOX_AGENT LevelDB / unlocked the stale OS-gated
+      // secret here. The fix mirrors the other flows: cleanup
+      // first (fail-CLOSED), then create the agent.
+      await runPendingResetCleanups();
       console.log('[agent-store] resumePendingBackup: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       vaultRef = vault;
@@ -716,13 +873,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // restored entropy.
     let vaultRef: { lock: () => Promise<void> } | null = null;
     try {
-      // Round-9 F4: retry any pending LevelDB wipe from a previous
-      // `reset()` BEFORE creating the agent. Restore is the most
-      // important place to enforce this — a user typing a recovery
-      // phrase MUST land on a clean DWN/identity store, not one that
-      // still contains residue from the wallet they're recovering away
-      // from.
-      await runPendingLevelDbCleanup();
+      // Round-9 F4 + Round-10 F2/F4: retry any pending cleanup
+      // (native vault secret + on-disk LevelDB) from a previous
+      // failed `reset()` BEFORE creating the agent. Restore is the
+      // most important place to enforce both: a user typing a
+      // recovery phrase MUST land on a clean DWN/identity store AND
+      // must not have a stale prior-wallet OS-gated secret blocking
+      // the new vault's `initialize({ recoveryPhrase })` (the
+      // `deleteSecret()` block below is best-effort and would fail
+      // open if the prior wallet's secret survived a failed reset).
+      await runPendingResetCleanups();
       // Wipe any prior biometric-gated secret so the vault's
       // `initialize({ recoveryPhrase })` path won't fast-fail with
       // `VAULT_ERROR_ALREADY_INITIALIZED`. Best-effort — a missing
@@ -959,6 +1119,30 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   reset: async () => {
     const { vault } = get();
 
+    // 0. Round-10 F2: persist the vault-reset-pending sentinel BEFORE
+    //    we attempt the native wipe. This is intentionally pessimistic:
+    //    even if we crash mid-`vault.reset()` (SIGKILL, OS suspend
+    //    that never resumes, JS engine death) the next cold launch
+    //    sees the sentinel and re-runs `runPendingVaultResetCleanup()`
+    //    before any unlock / setup / restore flow proceeds. The
+    //    sentinel is cleared at the end of step 1 ONLY if every
+    //    delete succeeded — partial failures keep the sentinel set so
+    //    the next agent-init flow retries.
+    const sentinelStorage = new SecureStorageAdapter();
+    try {
+      await sentinelStorage.set(VAULT_RESET_PENDING_KEY, 'true');
+    } catch (err) {
+      // Log but do NOT abort. The sentinel is the safety net for
+      // crash-resilience; if SecureStorage is unwritable the wipe
+      // attempt below STILL runs and reports failure synchronously
+      // to the caller. We only lose the next-launch retry, not the
+      // current attempt's correctness signal.
+      console.warn(
+        '[agent-store] reset: failed to pre-persist vault-reset sentinel (next-launch retry will be skipped if this run also fails):',
+        err,
+      );
+    }
+
     // 1. Wipe the biometric-gated native secret + the persisted vault
     //    SecureStorage flags. When a vault instance exists we delegate
     //    to `vault.reset()` which clears both
@@ -969,28 +1153,48 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    keys directly via the SecureStorageAdapter so the next cold
     //    launch does not misroute away from onboarding because a stale
     //    `enbox.vault.initialized = 'true'` flag survived.
+    //
+    //    Round-10 F2: native deleteSecret + SecureStorage clear
+    //    failures used to be swallowed via `console.warn` only. Both
+    //    paths now SURFACE the error: we capture it into
+    //    `vaultResetError` and re-throw at the end (alongside any
+    //    LevelDB error) so the caller knows the wipe is incomplete
+    //    AND the sentinel persisted in step 0 keeps the retry path
+    //    armed for the next launch. Native modules treat
+    //    missing-alias as success on both Android (`promise.resolve(null)`)
+    //    and iOS (`errSecItemNotFound` -> resolve), so any rejection
+    //    here is a real failure that we must not mask.
+    let vaultResetError: unknown = null;
     if (vault) {
       try {
         await vault.reset();
       } catch (err) {
+        vaultResetError = err;
         console.warn('[agent-store] reset: vault.reset failed:', err);
       }
     } else {
       try {
         await NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS);
       } catch (err) {
+        vaultResetError = err;
         console.warn(
-          '[agent-store] reset: native deleteSecret failed (ignored):',
+          '[agent-store] reset: native deleteSecret failed:',
           err,
         );
       }
       // Clear the SecureStorage flags that BiometricVault would have
       // cleared if a vault instance existed. The two keys match the
-      // constants exported from `biometric-vault.ts`.
+      // constants exported from `biometric-vault.ts`. We attempt
+      // both even if the native delete failed, but a clear failure
+      // promotes to `vaultResetError` only if native didn't already
+      // fail (the native delete is the privacy-critical step; a
+      // surviving SecureStorage flag with an absent native secret is
+      // recoverable via the next cold launch's hydrate gate).
       const fallbackStorage = new SecureStorageAdapter();
       try {
         await fallbackStorage.remove(INITIALIZED_STORAGE_KEY);
       } catch (err) {
+        if (vaultResetError === null) vaultResetError = err;
         console.warn(
           '[agent-store] reset: no-vault fallback clear initialized failed:',
           err,
@@ -999,8 +1203,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       try {
         await fallbackStorage.remove(BIOMETRIC_STATE_STORAGE_KEY);
       } catch (err) {
+        if (vaultResetError === null) vaultResetError = err;
         console.warn(
           '[agent-store] reset: no-vault fallback clear biometric-state failed:',
+          err,
+        );
+      }
+    }
+    if (vaultResetError === null) {
+      // Clear the sentinel persisted in step 0 since every step
+      // succeeded. A failure here is logged but does NOT promote to
+      // `vaultResetError` — the worst case is one extra no-op
+      // `runPendingVaultResetCleanup()` on the next launch.
+      try {
+        await sentinelStorage.remove(VAULT_RESET_PENDING_KEY);
+      } catch (err) {
+        console.warn(
+          '[agent-store] reset: failed to clear vault-reset sentinel after successful wipe (next launch will run a no-op cleanup retry):',
           err,
         );
       }
@@ -1068,22 +1287,58 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    module now that `session-store.ts` no longer pulls in the
     //    ESM-only `@enbox/agent` runtime (the shared constants live in
     //    the pure-data `vault-constants.ts` module).
+    //
+    //    Round-10 self-review: pre-fix this swallowed the rejection
+    //    via `console.warn`. If `session-store.reset()` rejected
+    //    (e.g. SecureStorage write to clear `SESSION_KEY` failed),
+    //    `agent-store.reset()` would still return success. The next
+    //    cold launch would then `hydrate()` against the STALE
+    //    `SESSION_KEY` (still containing the prior wallet's
+    //    `hasCompletedOnboarding=true` / `hasIdentity=true` /
+    //    `isLocked` flags) and route the user to "unlock" — but the
+    //    vault and LevelDB had been wiped, so the unlock would
+    //    immediately fail and trap the user in an error loop.
+    //    Surface the rejection (capture-then-rethrow at step 5)
+    //    so callers can offer a retry instead of reporting success
+    //    on an inconsistent persisted state.
+    let sessionResetError: unknown = null;
     try {
       await useSessionStore.getState().reset();
     } catch (err) {
+      sessionResetError = err;
       console.warn('[agent-store] reset: session-store reset failed:', err);
     }
 
-    // 5. Round-9 F4: rethrow the LevelDB wipe failure now that the
-    //    in-memory state has been torn down and the session-store
-    //    has been reset. The sentinel persisted above guarantees the
-    //    next agent-init flow retries the wipe before opening the
-    //    LevelDB handle, so even a caller that swallows the throw
-    //    cannot resurrect stale identities. We rethrow the ORIGINAL
-    //    error (not a wrapped one) so callers using `instanceof Error`
-    //    / `.code` predicates still work.
+    // 5. Round-9 F4 + Round-10 F2 + self-review: rethrow any captured
+    //    failure now that the in-memory state has been torn down and
+    //    the session-store has been reset. The sentinels persisted
+    //    above guarantee the next agent-init flow retries the
+    //    privacy-critical wipes (vault secret + LevelDB) before
+    //    opening any handle / provisioning a new vault, so even a
+    //    caller that swallows the throw cannot resurrect stale
+    //    identities OR leak the prior wallet's OS-gated secret into
+    //    a new onboarding flow.
+    //
+    //    Order of precedence reflects the threat model:
+    //      1. `vaultResetError` — privacy-critical surviving secret.
+    //      2. `levelDbError`    — correctness-critical surviving
+    //                              identities / DWN records (data on
+    //                              disk is encrypted by the same
+    //                              biometric-gated key the next vault
+    //                              would derive, so this ranks below
+    //                              vault-reset failure).
+    //      3. `sessionResetError` — last-priority misroute risk: a
+    //                              stale SESSION_KEY can put the user
+    //                              into an unlock loop even though
+    //                              the wallet / LevelDB are clean.
+    if (vaultResetError !== null) {
+      throw vaultResetError;
+    }
     if (levelDbError !== null) {
       throw levelDbError;
+    }
+    if (sessionResetError !== null) {
+      throw sessionResetError;
     }
   },
 }));

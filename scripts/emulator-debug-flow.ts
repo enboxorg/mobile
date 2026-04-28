@@ -56,8 +56,34 @@ const BIP39_WORDS: ReadonlySet<string> = new Set(BIP39_LIST);
 /**
  * Artifact output root. Both the workflow and validators read PNG/XML files
  * from here, so do not change without coordinating with the CI workflow.
+ *
+ * NOTHING that has not been content-sanitized may EVER be written under
+ * this path. The CI runner copies ``ROOT/.`` into
+ * ``/tmp/emulator-ui-artifacts/`` during the always-run capture phase
+ * and the workflow uploads ``/tmp/emulator-ui-artifacts/**`` regardless
+ * of driver exit code, so a raw write here is one signal-trap / OOM /
+ * hardware-fault away from leaking a plaintext mnemonic.
  */
 const ROOT = '/tmp/emulator-ui';
+
+/**
+ * Round-10 F1: scratch directory for ``adb pull`` stages that have NOT
+ * yet been sanitized. ``dumpUi()`` and ``foregroundIsSensitive()`` pull
+ * the device's ``/sdcard/window_dump.xml`` here FIRST, sanitize the
+ * bytes in memory, then write the sanitized form to ``ROOT``. The
+ * staging path is intentionally OUTSIDE ``ROOT`` so the CI artifact
+ * upload glob (``/tmp/emulator-ui-artifacts/**``) never sees raw
+ * mnemonic XML even if the driver dies between ``adb pull`` and the
+ * sanitize step. A SIGKILL / OOM / signal-handler crash mid-pull leaves
+ * the raw bytes in ``STAGING_DIR``, which the runner does NOT copy and
+ * the workflow does NOT upload.
+ *
+ * Pre-fix: both helpers pulled directly to ``join(ROOT, 'window_dump.xml')``
+ * and only overwrote with sanitized bytes AFTER reading them back. A
+ * crash in that window staged a plaintext-mnemonic XML inside the
+ * upload tree.
+ */
+const STAGING_DIR = '/tmp/emulator-driver-staging';
 
 const APP_PACKAGE = 'org.enbox.mobile';
 const APP_ACTIVITY = `${APP_PACKAGE}/.MainActivity`;
@@ -93,6 +119,13 @@ const BIOMETRIC_PROMPT_PATTERNS: readonly string[] = [
 ];
 
 mkdirSync(ROOT, {recursive: true});
+// Round-10 F1: ensure the unsanitized-staging directory exists before
+// the first ``adb pull``. Created OUTSIDE ``ROOT`` so the CI upload
+// path never sees its contents. We do NOT pre-clean any existing
+// files here — a stale ``window_dump.xml`` from a prior run is
+// overwritten by the next ``adb pull`` and never copied into ``ROOT``
+// until it has been sanitized.
+mkdirSync(STAGING_DIR, {recursive: true});
 
 // ---------------------------------------------------------------------------
 // subprocess + adb plumbing
@@ -343,19 +376,32 @@ function sanitizeBip39Xml(xmlText: string): string {
  * **Content-aware sanitization** is applied to every dump via
  * ``sanitizeBip39Xml`` — regardless of the value of ``name``, including
  * the nameless case where only ``window_dump.xml`` is written.
+ *
+ * Round-10 F1: the raw ``adb pull`` lands in ``STAGING_DIR``, NOT
+ * ``ROOT``. Only sanitized bytes ever reach ``ROOT``. The CI capture
+ * path copies ``ROOT`` into ``/tmp/emulator-ui-artifacts``, which is
+ * what the workflow uploads — so a crash between ``adb pull`` and the
+ * sanitize/write step leaves the raw mnemonic XML in
+ * ``STAGING_DIR``, which is NEVER part of the upload glob.
+ *
+ * The pre-fix variant pulled directly into ``ROOT`` and only
+ * overwrote the file with sanitized bytes after reading it back; a
+ * SIGKILL / OOM / signal-handler unwind in that window staged a
+ * plaintext mnemonic inside the upload tree.
  */
 async function dumpUi(name?: string): Promise<UiNode[]> {
   adb(['shell', 'uiautomator', 'dump', '/sdcard/window_dump.xml']);
-  const local = join(ROOT, 'window_dump.xml');
-  adb(['pull', '/sdcard/window_dump.xml', local]);
-  const rawText = readFileSync(local, 'utf-8');
+  const stagedPath = join(STAGING_DIR, 'window_dump.xml');
+  adb(['pull', '/sdcard/window_dump.xml', stagedPath]);
+  const rawText = readFileSync(stagedPath, 'utf-8');
   const sanitized = sanitizeBip39Xml(rawText);
-  if (sanitized !== rawText) {
-    // Overwrite the working file so the mnemonic cannot leak via
-    // ``window_dump.xml`` if the driver crashes before the next dump_ui
-    // call overwrites it with a non-RecoveryPhrase hierarchy.
-    writeFileSync(local, sanitized, 'utf-8');
-  }
+  // Always write the sanitized form into ROOT — even when sanitized
+  // === rawText (no BIP-39 hits) — so the on-disk ``window_dump.xml``
+  // under the upload tree is unconditionally a sanitized snapshot of
+  // the latest dump. We cannot rely on the no-op fast path: a future
+  // sanitizer rule that ALSO redacts a non-mnemonic field would
+  // otherwise leak that field through the unsanitized fast path.
+  writeFileSync(join(ROOT, 'window_dump.xml'), sanitized, 'utf-8');
   if (name) {
     writeFileSync(join(ROOT, `${name}.xml`), sanitized, 'utf-8');
   }
@@ -729,20 +775,28 @@ function classifyForegroundDumpFromReader(readRawXml: () => string): {
 }
 
 function foregroundIsSensitive(): boolean {
-  const local = join(ROOT, 'window_dump.xml');
+  // Round-10 F1: stage to ``STAGING_DIR`` (NOT ``ROOT``). The raw
+  // mnemonic XML must not exist inside the upload tree at any point.
+  // Only sanitized bytes are written to ``ROOT``. See ``dumpUi()`` and
+  // the ``ROOT`` / ``STAGING_DIR`` docstrings for the full rationale.
+  const stagedPath = join(STAGING_DIR, 'window_dump.xml');
   const {isSensitive, rawXml, sanitizedXml} = classifyForegroundDumpFromReader(
     () => {
       adb(['shell', 'uiautomator', 'dump', '/sdcard/window_dump.xml']);
-      adb(['pull', '/sdcard/window_dump.xml', local]);
-      return readFileSync(local, 'utf-8');
+      adb(['pull', '/sdcard/window_dump.xml', stagedPath]);
+      return readFileSync(stagedPath, 'utf-8');
     },
   );
-  // Persist the sanitized form so the on-disk window_dump.xml never
-  // carries plaintext mnemonic words even if the driver crashes before
-  // the next dumpUi() call overwrites it. Skip the write on the
-  // fail-closed branch (rawXml === null) — there is nothing to persist.
-  if (rawXml !== null && sanitizedXml !== null && sanitizedXml !== rawXml) {
-    writeFileSync(local, sanitizedXml, 'utf-8');
+  // Always persist the sanitized form into ``ROOT`` so the on-disk
+  // ``window_dump.xml`` under the upload tree is unconditionally a
+  // sanitized snapshot of the latest dump. Skip ONLY on the
+  // fail-closed branch (rawXml === null) — there are no bytes to
+  // persist when the dump itself failed. The pre-fix variant
+  // conditionally wrote only when ``sanitizedXml !== rawXml``, which
+  // (in addition to the staging bug) would leak any future
+  // non-mnemonic redaction rule via the fast path.
+  if (rawXml !== null && sanitizedXml !== null) {
+    writeFileSync(join(ROOT, 'window_dump.xml'), sanitizedXml, 'utf-8');
   }
   return isSensitive;
 }
@@ -3672,6 +3726,95 @@ async function selfTestSanitizer(): Promise<number> {
     );
   }
 
+  // -------------------------------------------------------------------
+  // (j) Round-10 F1: raw mnemonic XML must NEVER be staged inside
+  // ``ROOT`` (the artifact-upload tree). Pre-fix ``dumpUi()`` and
+  // ``foregroundIsSensitive()`` pulled ``adb shell uiautomator dump``
+  // output directly to ``join(ROOT, 'window_dump.xml')`` and only
+  // overwrote it with sanitized bytes after reading it back. A
+  // SIGKILL / OOM / signal-handler unwind in that window staged a
+  // plaintext mnemonic XML inside the upload tree — and the
+  // always-run capture step would copy it into
+  // ``/tmp/emulator-ui-artifacts`` and the workflow would upload it.
+  //
+  // The fix is structural: pull to ``STAGING_DIR`` (NOT ``ROOT``),
+  // sanitize in memory, and write only sanitized bytes to ``ROOT``.
+  // These cases pin the STRUCTURAL invariant — the helpers don't
+  // exist as pure functions we can call, but the constants are
+  // exported and the contract can be expressed declaratively.
+  //
+  //   (j.1) ``ROOT`` and ``STAGING_DIR`` MUST be different paths.
+  //         A misconfiguration where they collapse to the same
+  //         path re-creates the pre-fix pull-into-upload-tree bug.
+  //   (j.2) ``STAGING_DIR`` MUST NOT be a subdirectory of ``ROOT``.
+  //         If staging were nested inside the upload tree
+  //         (``/tmp/emulator-ui/staging``) the runner's
+  //         ``cp -R "${UI_DIR}/." "${ARTIFACT_DIR}/"`` would still
+  //         catch the raw bytes.
+  //   (j.3) ``STAGING_DIR`` MUST NOT be a parent of ``ROOT``. If
+  //         the runner ever changed its UI_DIR to a path under
+  //         staging this would break the upload-isolation invariant.
+  //   (j.4) End-to-end smoke: write a synthetic raw mnemonic XML to
+  //         ``STAGING_DIR/window_dump.xml``, call ``sanitizeBip39Xml``
+  //         on it, and verify the sanitized bytes pass the
+  //         ``hasRecoveryPhraseContent`` gate (no mnemonic words),
+  //         confirming the staging-then-sanitize pipeline yields a
+  //         leak-free output. Only the sanitized bytes ever reach
+  //         ``ROOT``, but exercising the round-trip here proves the
+  //         sanitizer is the right tool for the job.
+  // Cast to string to escape TypeScript's literal-type narrowing.
+  // The whole point of these checks is that a FUTURE refactor that
+  // collapses the two constants gets caught here at self-test time;
+  // narrowing the types away from each other (which TS does for
+  // distinct string literals) would let the regression slip through
+  // at compile time AND at self-test time.
+  const rootStr: string = ROOT;
+  const stagingStr: string = STAGING_DIR;
+  if (rootStr === stagingStr) {
+    failures.push(
+      'case (j.1): ROOT and STAGING_DIR collapsed to the same path — `adb pull` lands inside the artifact upload tree, re-creating the round-10 F1 raw-mnemonic-leak bug',
+    );
+  }
+  if (stagingStr.startsWith(`${rootStr}/`) || stagingStr === rootStr) {
+    failures.push(
+      `case (j.2): STAGING_DIR (${JSON.stringify(stagingStr)}) is nested inside ROOT (${JSON.stringify(rootStr)}) — the runner's cp -R copies the staging contents into the artifact tree, re-creating the round-10 F1 raw-mnemonic-leak bug`,
+    );
+  }
+  if (rootStr.startsWith(`${stagingStr}/`)) {
+    failures.push(
+      `case (j.3): ROOT (${JSON.stringify(rootStr)}) is nested inside STAGING_DIR (${JSON.stringify(stagingStr)}) — a future runner change that uploads STAGING_DIR contents would also upload the upload tree, leaking raw bytes`,
+    );
+  }
+  // (j.4) Round-trip: synthetic raw XML → sanitize → expect no
+  // BIP-39 words. We don't actually pull from a device here (no
+  // emulator in the self-test env), but we do exercise the
+  // sanitizer on the EXACT shape that ``dumpUi`` would have read
+  // off ``STAGING_DIR/window_dump.xml`` had a real pull occurred.
+  const rawStagingXml = buildRecoveryPhraseXml();
+  const sanitizedFromStaging = sanitizeBip39Xml(rawStagingXml);
+  let stagingLeak = false;
+  for (const node of parseUiNodes(sanitizedFromStaging)) {
+    for (const attr of ['text', 'content-desc'] as const) {
+      const value = (node.attributes[attr] ?? '').trim();
+      if (isBip39Word(value)) {
+        stagingLeak = true;
+      }
+    }
+  }
+  if (stagingLeak) {
+    failures.push(
+      'case (j.4): sanitizer pipeline left BIP-39 words in the output — the staging-then-sanitize fix relies on the sanitizer to scrub the raw bytes before they reach ROOT, and a regression here re-leaks the mnemonic into the artifact tree',
+    );
+  }
+  if (
+    sanitizedFromStaging.length === 0 ||
+    !sanitizedFromStaging.includes('content-desc="Recovery phrase"')
+  ) {
+    failures.push(
+      'case (j.4): sanitizer pipeline produced empty/unrecognizable output — the staging-then-sanitize fix would write garbage into ROOT/window_dump.xml, breaking downstream artifact validators that require a parseable XML',
+    );
+  }
+
   if (failures.length > 0) {
     logErr('== sanitizer self-test FAILED ==');
     for (const line of failures) {
@@ -3700,6 +3843,9 @@ async function selfTestSanitizer(): Promise<number> {
   );
   logInfo(
     '  (i) ENROLL_FOCUS_CREDENTIAL [Round-9 F1]: ConfirmLockPassword/Pin/Pattern + ChooseLockPassword/Pin/Pattern/Generic positive matches; FingerprintEnrollIntroduction/Enrolling, Launcher, our app are correctly REJECTED; ENROLL_FOCUS_CONFIRM back-compat alias preserved',
+  );
+  logInfo(
+    `  (j) Round-10 F1 raw-mnemonic-staging contract pinned: ROOT=${JSON.stringify(ROOT)} STAGING_DIR=${JSON.stringify(STAGING_DIR)} are disjoint paths, neither nested inside the other; sanitizer round-trip on synthetic raw RecoveryPhrase XML scrubs all BIP-39 words while keeping the structural fragments downstream validators rely on. The structural invariant guarantees that even on a SIGKILL / OOM between adb pull and the sanitize step, raw mnemonic XML lives ONLY in STAGING_DIR (which the CI runner does NOT copy or upload).`,
   );
   return 0;
 }

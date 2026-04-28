@@ -409,14 +409,31 @@ describe('useAgentStore.reset() — no-vault fallback clears SecureStorage keys 
     expect(nativeBiometric.deleteSecret).toHaveBeenCalledWith('enbox.wallet.root');
   });
 
-  it('still clears SecureStorage keys even when NativeBiometricVault.deleteSecret rejects', async () => {
+  // Round-10 F2: pre-fix this test codified the SWALLOWED-error
+  // contract ("reset() resolves cleanly even when native deleteSecret
+  // throws"). That hides genuine native wipe failures from the caller
+  // and leaves the OS-gated secret alive while the app reports
+  // success and routes back to setup. The new contract is fail-LOUD:
+  //   1. The SecureStorage flags are STILL cleared (defense in depth).
+  //   2. The `VAULT_RESET_PENDING_KEY` sentinel is persisted (so the
+  //      next agent-init flow retries the native wipe via
+  //      `runPendingVaultResetCleanup()`).
+  //   3. The native error is RETHROWN so callers (Settings,
+  //      recovery-restore-screen) can surface the failure and offer
+  //      a retry instead of reporting success on a half-completed wipe.
+  it('rethrows native deleteSecret failure AND persists a vault-reset-pending sentinel (Round-10 F2)', async () => {
     resetStoreState();
     nativeBiometric.deleteSecret.mockRejectedValueOnce(
       Object.assign(new Error('simulated native error'), { code: 'VAULT_ERROR' }),
     );
 
-    await expect(useAgentStore.getState().reset()).resolves.toBeUndefined();
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /simulated native error/,
+    );
 
+    // SecureStorage flags STILL cleared (defense in depth — even
+    // though the native delete failed, removing the flags ensures the
+    // hydrate gate can route to onboarding instead of an unlock loop).
     const deletedKeys = nativeSecure.deleteItem.mock.calls.map((c) => c[0]);
     expect(deletedKeys).toEqual(
       expect.arrayContaining([
@@ -424,6 +441,218 @@ describe('useAgentStore.reset() — no-vault fallback clears SecureStorage keys 
         'enbox:enbox.vault.biometric-state',
       ]),
     );
+
+    // The vault-reset-pending sentinel was persisted under the
+    // canonical key. SecureStorageAdapter prefixes every key with
+    // 'enbox:' so the on-disk key is `enbox:enbox.vault.reset-pending`.
+    const sentinelWrites = nativeSecure.setItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.vault.reset-pending',
+    );
+    expect(sentinelWrites.length).toBeGreaterThanOrEqual(1);
+    expect(sentinelWrites[0][1]).toBe('true');
+
+    // The sentinel was NOT cleared (it stays set so the next
+    // agent-init flow retries the native wipe).
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.vault.reset-pending',
+    );
+    expect(sentinelDeletes.length).toBe(0);
+  });
+
+  // Round-10 F2 cont.: regression test for the recovery path. After a
+  // failed reset persists the sentinel, the very NEXT agent-init flow
+  // MUST retry the native delete + SecureStorage clears before any
+  // unlock / setup proceeds.
+  it('next initializeFirstLaunch() retries the native wipe via the vault-reset sentinel (Round-10 F2)', async () => {
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.vault.reset-pending') return 'true';
+      return null;
+    });
+    nativeBiometric.deleteSecret.mockClear();
+
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    // The retry must call native deleteSecret with the canonical alias.
+    const deleteCalls = nativeBiometric.deleteSecret.mock.calls.filter(
+      (c) => c[0] === 'enbox.wallet.root',
+    );
+    expect(deleteCalls.length).toBeGreaterThanOrEqual(1);
+    // And the sentinel was deleted after the retry succeeded.
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.vault.reset-pending',
+    );
+    expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // Round-10 F3: the LevelDB cleanup helper now fails CLOSED on
+  // SecureStorage read failures. Pre-fix it logged a warning and
+  // returned `true` ("no pending cleanup"), which let a transient
+  // SecureStorage failure route the next agent init past a
+  // still-unreaped LevelDB. The unknown-state path MUST throw.
+  it('runPendingLevelDbCleanup propagates SecureStorage.get failures so a stale LevelDB cannot leak through (Round-10 F3)', async () => {
+    const { runPendingLevelDbCleanup } = require('@/lib/enbox/agent-store');
+    const stubError = Object.assign(new Error('SecureStorage temporarily unavailable'), {
+      code: 'SECURE_STORAGE_LOCKED',
+    });
+    const stubStorage = {
+      get: jest.fn(async () => {
+        throw stubError;
+      }),
+      remove: jest.fn(async () => undefined),
+    };
+    await expect(runPendingLevelDbCleanup(stubStorage)).rejects.toThrow(
+      /SecureStorage temporarily unavailable/,
+    );
+    // The retry never ran because we couldn't read the sentinel —
+    // confirms we are NOT silently calling destroyAgentLevelDatabases
+    // on every cold launch as a "fail-pessimistic" workaround.
+    expect(stubStorage.remove).not.toHaveBeenCalled();
+  });
+
+  // Round-10 F4: resumePendingBackup MUST gate on the same cleanup
+  // helpers as the other init flows. Pre-fix it jumped straight to
+  // `initializeAgent()`, so a backup-pending session that interleaved
+  // with a failed reset would open the stale LevelDB / unlock the
+  // stale OS-gated secret here. The store-mocked `agent.start({})`
+  // does not actually unlock the vault (that requires the real
+  // BiometricVault wiring), so `vault.getMnemonic()` will throw
+  // VAULT_ERROR_LOCKED — which is fine, the cleanup MUST already have
+  // run by then. We assert on the cleanup call ordering, not on
+  // resumePendingBackup completing successfully.
+  it('resumePendingBackup retries the LevelDB wipe via the cleanup-pending sentinel BEFORE creating the agent (Round-10 F4)', async () => {
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.agent.leveldb-cleanup-pending') return 'true';
+      return null;
+    });
+    mockDestroyDB.mockReset();
+    mockDestroyDB.mockImplementation(() => undefined);
+
+    // Don't fail the test on the locked-vault rejection from the
+    // virtual-mocked agent.start({}). The wiring assertion is the
+    // contract here.
+    await useAgentStore.getState().resumePendingBackup().catch(() => undefined);
+
+    expect(mockDestroyDB).toHaveBeenCalled();
+    const destroyedNames = mockDestroyDB.mock.calls.map((c) => c[0]);
+    expect(destroyedNames).toEqual(
+      expect.arrayContaining(['ENBOX_AGENT__VAULT_STORE']),
+    );
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.agent.leveldb-cleanup-pending',
+    );
+    expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // Round-10 F4: also assert resumePendingBackup runs the vault-reset
+  // cleanup so a stale OS-gated secret cannot survive a backup-pending
+  // resume. Same wiring approach as the LevelDB test above.
+  it('resumePendingBackup retries the native vault wipe via the vault-reset sentinel BEFORE creating the agent (Round-10 F4)', async () => {
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.vault.reset-pending') return 'true';
+      return null;
+    });
+    nativeBiometric.deleteSecret.mockClear();
+
+    await useAgentStore.getState().resumePendingBackup().catch(() => undefined);
+
+    const deleteCalls = nativeBiometric.deleteSecret.mock.calls.filter(
+      (c) => c[0] === 'enbox.wallet.root',
+    );
+    expect(deleteCalls.length).toBeGreaterThanOrEqual(1);
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.vault.reset-pending',
+    );
+    expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ===========================================================================
+// Round-10 F2 — runPendingVaultResetCleanup helper contract
+// ===========================================================================
+describe('runPendingVaultResetCleanup — Round-10 F2', () => {
+  it('is a no-op when the sentinel is absent', async () => {
+    const { runPendingVaultResetCleanup } = require('@/lib/enbox/agent-store');
+    const sentinelStorage = {
+      get: jest.fn(async () => null),
+      set: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+    };
+    const stubNative = { deleteSecret: jest.fn(async () => undefined) };
+    const stubVaultStorage = {
+      remove: jest.fn(async () => undefined),
+    };
+    await expect(
+      runPendingVaultResetCleanup(sentinelStorage, stubNative, stubVaultStorage),
+    ).resolves.toBe(true);
+    expect(stubNative.deleteSecret).not.toHaveBeenCalled();
+    expect(stubVaultStorage.remove).not.toHaveBeenCalled();
+    // Sentinel was not cleared because it was not set.
+    expect(sentinelStorage.remove).not.toHaveBeenCalled();
+  });
+
+  it('runs deleteSecret + clears both vault flags when the sentinel is set', async () => {
+    const { runPendingVaultResetCleanup } = require('@/lib/enbox/agent-store');
+    const sentinelStorage = {
+      get: jest.fn(async () => 'true'),
+      set: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+    };
+    const stubNative = { deleteSecret: jest.fn(async () => undefined) };
+    const stubVaultStorage = {
+      remove: jest.fn(async () => undefined),
+    };
+    await expect(
+      runPendingVaultResetCleanup(sentinelStorage, stubNative, stubVaultStorage),
+    ).resolves.toBe(true);
+    expect(stubNative.deleteSecret).toHaveBeenCalledWith('enbox.wallet.root');
+    expect(stubVaultStorage.remove).toHaveBeenCalledWith('enbox.vault.initialized');
+    expect(stubVaultStorage.remove).toHaveBeenCalledWith('enbox.vault.biometric-state');
+    expect(sentinelStorage.remove).toHaveBeenCalledWith('enbox.vault.reset-pending');
+  });
+
+  it('propagates the native delete failure and keeps the sentinel set for retry', async () => {
+    const { runPendingVaultResetCleanup } = require('@/lib/enbox/agent-store');
+    const sentinelStorage = {
+      get: jest.fn(async () => 'true'),
+      set: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+    };
+    const stubNative = {
+      deleteSecret: jest.fn(async () => {
+        throw Object.assign(new Error('Keystore unreachable'), {
+          code: 'VAULT_ERROR',
+        });
+      }),
+    };
+    const stubVaultStorage = {
+      remove: jest.fn(async () => undefined),
+    };
+    await expect(
+      runPendingVaultResetCleanup(sentinelStorage, stubNative, stubVaultStorage),
+    ).rejects.toThrow(/Keystore unreachable/);
+    // Sentinel NOT cleared — next launch retries.
+    expect(sentinelStorage.remove).not.toHaveBeenCalled();
+  });
+
+  it('propagates SecureStorage.get failures so an unreadable sentinel cannot leak through (Round-10 F3 parity)', async () => {
+    const { runPendingVaultResetCleanup } = require('@/lib/enbox/agent-store');
+    const stubError = Object.assign(new Error('SecureStorage IO error'), {
+      code: 'SECURE_STORAGE_IO',
+    });
+    const sentinelStorage = {
+      get: jest.fn(async () => {
+        throw stubError;
+      }),
+      set: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+    };
+    const stubNative = { deleteSecret: jest.fn(async () => undefined) };
+    const stubVaultStorage = { remove: jest.fn(async () => undefined) };
+    await expect(
+      runPendingVaultResetCleanup(sentinelStorage, stubNative, stubVaultStorage),
+    ).rejects.toThrow(/SecureStorage IO error/);
+    expect(stubNative.deleteSecret).not.toHaveBeenCalled();
+    expect(stubVaultStorage.remove).not.toHaveBeenCalled();
   });
 
   it('the main-path (with vault) also leaves those SecureStorage keys cleared', async () => {
