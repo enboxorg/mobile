@@ -1241,23 +1241,33 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    `runPendingLevelDbCleanup()` would skip the retry and
     //    `EnboxUserAgent.create()` would open a corrupt /
     //    half-deleted database.
+    //
+    //    Round-12 self-review: the writes MUST be sequential, NOT
+    //    Promise.allSettled. `SecureStorageAdapter.set()` reads +
+    //    writes the on-disk `KEY_INDEX` tracker on every call (see
+    //    `trackKey` in `storage-adapter.ts`); concurrent writes
+    //    against the same adapter race on that index because each
+    //    `trackKey` does a read-modify-write of the JSON-encoded
+    //    key list. With three parallel writes the LAST write wins
+    //    and the other two sentinels disappear from `KEY_INDEX` —
+    //    a downstream `SecureStorageAdapter.clear()` would then
+    //    miss them. Sequential writes are still fast (three
+    //    SecureStorage round-trips) and trivially correct.
     const sentinelStorage = new SecureStorageAdapter();
     const SENTINEL_KEYS = [
       VAULT_RESET_PENDING_KEY,
       LEVELDB_CLEANUP_PENDING_KEY,
       AUTH_RESET_PENDING_KEY,
     ] as const;
-    const sentinelWrites = await Promise.allSettled(
-      SENTINEL_KEYS.map((k) => sentinelStorage.set(k, 'true')),
-    );
     const writtenKeys: string[] = [];
     let firstSentinelWriteError: unknown = null;
-    for (let i = 0; i < SENTINEL_KEYS.length; i++) {
-      const result = sentinelWrites[i];
-      if (result.status === 'fulfilled') {
-        writtenKeys.push(SENTINEL_KEYS[i]);
-      } else if (firstSentinelWriteError === null) {
-        firstSentinelWriteError = result.reason;
+    for (const key of SENTINEL_KEYS) {
+      try {
+        await sentinelStorage.set(key, 'true');
+        writtenKeys.push(key);
+      } catch (err) {
+        firstSentinelWriteError = err;
+        break; // fail-fast: stop attempting further sentinels
       }
     }
     if (firstSentinelWriteError !== null) {
@@ -1268,17 +1278,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // already have a definitive sentinel-write failure to
       // surface, and a stuck retry sentinel is recoverable
       // (its cleanup helper is idempotent on a healthy install).
-      const rollbacks = await Promise.allSettled(
-        writtenKeys.map((k) => sentinelStorage.remove(k)),
-      );
-      const rollbackFailures = rollbacks.filter(
-        (r) => r.status === 'rejected',
-      );
-      if (rollbackFailures.length > 0) {
-        console.warn(
-          '[agent-store] reset: failed to roll back retry sentinels after a sentinel write failure (the next cold launch will run no-op cleanup retries):',
-          rollbackFailures.map((r) => (r as PromiseRejectedResult).reason),
-        );
+      // Sequential rollback to avoid the same KEY_INDEX race.
+      for (const key of writtenKeys) {
+        try {
+          await sentinelStorage.remove(key);
+        } catch (rollbackErr) {
+          console.warn(
+            `[agent-store] reset: failed to roll back retry sentinel "${key}" after a sentinel write failure (next cold launch may run a no-op cleanup retry):`,
+            rollbackErr,
+          );
+        }
       }
       console.warn(
         '[agent-store] reset: refusing to start wipe — retry-sentinel persistence failed (failing closed so a partial reset cannot leak past a non-existent retry path):',

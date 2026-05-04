@@ -320,14 +320,16 @@ export async function createRNLevelDatabase(
 }
 
 /**
- * Every LevelDB location the `EnboxUserAgent` opens under a given
+ * Every LevelDB location the `EnboxUserAgent` opens AS A CHILD of
  * `dataPath`. Used by `destroyAgentLevelDatabases()` to wipe persistent
  * agent state during reset.
  *
  * This mirrors the upstream `@enbox/agent` and `@enbox/dwn-sdk-js`
- * sub-store names (`VAULT_STORE`, `DID_RESOLVERCACHE`, `DWN_*`,
- * `SYNC_STORE`). Keep in sync with `node_modules/@enbox/agent/src/
- * enbox-user-agent.ts` / `dwn-api.ts` / `sync-engine-level.ts`.
+ * sub-store names. Keep in sync with `node_modules/@enbox/agent/src/
+ * enbox-user-agent.ts` / `dwn-api.ts`. The replication-cursor / dead-
+ * letter / ledger DB owned by `SyncEngineLevel` is NOT a child path
+ * (see `AGENT_LEVEL_DB_ROOT_PATH` below) so it is intentionally
+ * absent from this list — round-13 F2.
  */
 export const AGENT_LEVEL_DB_SUBPATHS: readonly string[] = [
   'VAULT_STORE',
@@ -337,8 +339,37 @@ export const AGENT_LEVEL_DB_SUBPATHS: readonly string[] = [
   'DWN_MESSAGESTORE',
   'DWN_MESSAGEINDEX',
   'DWN_RESUMABLETASKSTORE',
-  'SYNC_STORE',
 ];
+
+/**
+ * Round-13 F2: the `EnboxUserAgent` constructs `SyncEngineLevel` with
+ * `new SyncEngineLevel({ dataPath })`, and inside that class the
+ * underlying LevelDB is opened DIRECTLY at `dataPath` (NOT at a
+ * subpath such as `${dataPath}/SYNC_STORE`):
+ *
+ *     // node_modules/@enbox/agent/src/sync-engine-level.ts:282
+ *     this._db = (db) ? db : new Level(dataPath ?? 'DATA/AGENT/SYNC_STORE');
+ *
+ * The replication ledger, dead-letter store, and watermark cursors
+ * live as sublevels of THAT root DB. So `${dataPath}/SYNC_STORE`
+ * does not actually exist on disk — destroying it was a no-op and
+ * left every byte of sync ledger / dead-letter / DWN-cursor data
+ * resident across reset.
+ *
+ * `destroyAgentLevelDatabases()` therefore destroys both the
+ * subpath children AND the root path (this constant). Order:
+ * children first, root last. LevelDB's `DestroyDB` only removes
+ * its OWN files (CURRENT, MANIFEST-*, LOCK, *.log, *.ldb) and does
+ * NOT recurse into subdirectories, so destroying the root after
+ * the children is safe — the child subdirectories are already
+ * gone, leaving only the sync DB's flat files at the root for
+ * the final destroy to remove.
+ *
+ * Empty string is the canonical "destroy at the root path itself"
+ * marker; the join below special-cases it to skip the trailing
+ * slash that would otherwise rename the target to `${dataPath}/`.
+ */
+export const AGENT_LEVEL_DB_ROOT_PATH = '';
 
 /**
  * Predicate matching error messages emitted by ``LevelDB.destroyDB``
@@ -426,12 +457,22 @@ export async function destroyRNLevelDatabase(location: string): Promise<void> {
  * failure abort the rest, which left the wipe in a half-completed
  * state. The new contract is:
  *   1. Attempt every subpath unconditionally — a failure on
- *      `VAULT_STORE` does not block `DWN_DATASTORE` / `SYNC_STORE`.
+ *      `VAULT_STORE` does not block `DWN_DATASTORE` / `DWN_MESSAGESTORE`.
  *   2. Collect any non-idempotent throws.
  *   3. After the loop, rethrow as an AggregateError-style ``Error``
  *      whose `cause` lists every failure. ``useAgentStore.reset()``
  *      uses this to decide whether to persist the
  *      `LEVELDB_CLEANUP_PENDING_KEY` retry sentinel.
+ *
+ * Round-13 F2: ALSO destroy the root `dataPath` itself — that's
+ * where `SyncEngineLevel` opens its replication-ledger /
+ * dead-letter / cursor DB (see `AGENT_LEVEL_DB_ROOT_PATH` for the
+ * full rationale). Pre-fix the wipe targeted `${dataPath}/SYNC_STORE`
+ * which does not exist on disk, leaving every byte of sync state
+ * resident across reset. The root destroy is run LAST so the
+ * subpath children (which live inside the same parent directory
+ * as siblings to the sync DB's own files) are removed first; LevelDB's
+ * `DestroyDB` only touches its own flat files, never subdirectories.
  */
 export async function destroyAgentLevelDatabases(dataPath: string): Promise<void> {
   const failures: Array<{ subpath: string; error: unknown }> = [];
@@ -442,14 +483,27 @@ export async function destroyAgentLevelDatabases(dataPath: string): Promise<void
       failures.push({ subpath: sub, error: err });
     }
   }
+  // Round-13 F2: destroy the root path itself (sync engine DB).
+  // Tracked separately so the failure-list label is unambiguous —
+  // a failure here means the SyncEngineLevel state survived, NOT
+  // a missing subpath.
+  try {
+    await destroyRNLevelDatabase(dataPath);
+  } catch (err) {
+    failures.push({ subpath: '<root sync DB>', error: err });
+  }
   if (failures.length === 0) return;
   const subpathList = failures.map((f) => f.subpath).join(', ');
+  // The denominator counts subpaths PLUS the root destroy attempt
+  // so a partial failure surfaces an honest ratio (e.g. "1/8" when
+  // only the root sync DB destroy threw).
+  const totalAttempts = AGENT_LEVEL_DB_SUBPATHS.length + 1;
   const aggregate = new Error(
-    `destroyAgentLevelDatabases: ${failures.length}/${AGENT_LEVEL_DB_SUBPATHS.length} ` +
+    `destroyAgentLevelDatabases: ${failures.length}/${totalAttempts} ` +
       `subpaths failed to wipe (${subpathList}). The agent's on-disk state may ` +
-      `still contain identities / DWN records; useAgentStore.reset() persists a ` +
-      `cleanup-pending sentinel so the next launch retries the wipe before ` +
-      `opening any LevelDB handle.`,
+      `still contain identities / DWN records / sync cursors; useAgentStore.reset() ` +
+      `persists a cleanup-pending sentinel so the next launch retries the wipe ` +
+      `before opening any LevelDB handle.`,
   );
   // Attach the original failure list so callers / dev-tools can
   // inspect which subpaths failed. ``cause`` is supported on Error

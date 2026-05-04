@@ -615,6 +615,130 @@ describe('BiometricVault.encryptData/decryptData (VAL-VAULT-013)', () => {
 });
 
 // ===========================================================================
+// Round-13 F4 — compact JWE format complies with RFC 7516 + IdentityVault
+// ===========================================================================
+//
+// Pre-fix the encrypt path concatenated the AES-GCM auth tag onto the
+// ciphertext segment and left segment 5 empty. Two consequences:
+//   (1) Cross-implementation interop was broken — every upstream
+//       `CompactJwe.decrypt` reads `parts[4]` as the tag, found an
+//       empty string, and rejected the JWE before any AES-GCM call.
+//   (2) The protected header was never bound as Additional
+//       Authenticated Data, so an attacker who could substitute a
+//       different protected header (e.g. flipping `enc` to a weaker
+//       cipher) on a stored ciphertext would produce a JWE that
+//       decrypted cleanly under the original CEK. RFC 7516 §5.1 step
+//       14 requires `AAD = ASCII(BASE64URL(header))` for AES-GCM JWEs.
+//
+// New contract:
+//   - 5 non-empty segments with the 16-byte AES-GCM tag in segment 5.
+//   - Segment 4 (`ciphertext`) is exactly `plaintext.length` bytes
+//     when decoded — i.e. AES-GCM in CTR mode is length-preserving.
+//   - The protected header is bound as AAD on encrypt + verified on
+//     decrypt; tampering with the header rejects.
+//   - Empty / wrong-length tag segment is rejected with a stable
+//     `VAULT_ERROR` on decrypt — pre-fix ciphertexts (tag concatenated
+//     onto ciphertext, segment 5 empty) cannot survive a round-trip
+//     through the new decoder.
+describe('BiometricVault.encryptData — Round-13 F4 standard compact JWE', () => {
+  function fromBase64Url(s: string): Uint8Array {
+    const padded = s.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - (s.length % 4)) % 4);
+    const raw = atob(padded);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  it('produces 5 segments with header / iv / ciphertext / 16-byte tag populated and encrypted_key empty', async () => {
+    const vault = new BiometricVault();
+    await vault.initialize({});
+
+    const plaintext = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    const jwe = await vault.encryptData({ plaintext });
+    const parts = jwe.split('.');
+    expect(parts.length).toBe(5);
+
+    const [headerB64, encryptedKey, ivB64, ctB64, tagB64] = parts;
+
+    // Header decodes to the JOSE `dir` / `A256GCM` JSON.
+    const headerBytes = fromBase64Url(headerB64);
+    const header = JSON.parse(new TextDecoder().decode(headerBytes));
+    expect(header).toEqual({ alg: 'dir', enc: 'A256GCM' });
+
+    // `dir` mode → encrypted_key segment MUST be empty.
+    expect(encryptedKey).toBe('');
+
+    // IV is the AES-GCM 96-bit nonce (12 bytes).
+    expect(fromBase64Url(ivB64).length).toBe(12);
+
+    // Ciphertext is plaintext-length (AES-CTR is length-preserving)
+    // — the tag is NOT concatenated here in the new format.
+    expect(fromBase64Url(ctB64).length).toBe(plaintext.length);
+
+    // Auth tag is in segment 5 and is exactly 16 bytes (RFC 7518
+    // §5.3 default for A256GCM).
+    expect(fromBase64Url(tagB64).length).toBe(16);
+  });
+
+  it('rejects on decrypt when the protected header is tampered (AAD enforcement)', async () => {
+    const vault = new BiometricVault();
+    await vault.initialize({});
+
+    const plaintext = new Uint8Array([42, 42, 42]);
+    const jwe = await vault.encryptData({ plaintext });
+    const parts = jwe.split('.');
+
+    // Re-encode the header with a flipped (still-valid-JSON)
+    // `enc` field to simulate header substitution. The body is
+    // unchanged so a non-AAD-binding decoder would happily produce
+    // plaintext; the new AAD-binding decoder MUST reject.
+    const tampered = btoa(JSON.stringify({ alg: 'dir', enc: 'A128GCM' }))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      // eslint-disable-next-line no-div-regex
+      .replace(/=+$/, '');
+    parts[0] = tampered;
+    const tamperedJwe = parts.join('.');
+
+    await expect(vault.decryptData({ jwe: tamperedJwe })).rejects.toBeDefined();
+  });
+
+  it('rejects a pre-round-13 JWE shape (tag in ct segment, empty tag segment) — no silent re-decode of legacy format', async () => {
+    const vault = new BiometricVault();
+    await vault.initialize({});
+
+    // Construct a pre-fix shape by hand: header..iv.<ct||tag>.<empty>
+    const plaintext = new Uint8Array([7, 7, 7, 7]);
+    const jwe = await vault.encryptData({ plaintext });
+    const parts = jwe.split('.');
+    const ct = fromBase64Url(parts[3]);
+    const tag = fromBase64Url(parts[4]);
+    const cipherWithTag = new Uint8Array(ct.length + tag.length);
+    cipherWithTag.set(ct, 0);
+    cipherWithTag.set(tag, ct.length);
+    const ctWithTagB64 = btoa(String.fromCharCode(...cipherWithTag))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      // eslint-disable-next-line no-div-regex
+      .replace(/=+$/, '');
+    const legacyJwe = `${parts[0]}..${parts[2]}.${ctWithTagB64}.`;
+
+    await expect(vault.decryptData({ jwe: legacyJwe })).rejects.toMatchObject({
+      code: 'VAULT_ERROR',
+    });
+  });
+
+  it('rejects a JWE with fewer than 5 segments (parser invariant)', async () => {
+    const vault = new BiometricVault();
+    await vault.initialize({});
+
+    await expect(
+      vault.decryptData({ jwe: 'a.b.c.d' }),
+    ).rejects.toMatchObject({ code: 'VAULT_ERROR' });
+  });
+});
+
+// ===========================================================================
 // VAL-VAULT-024 — conforms to IdentityVault<{InitializeResult:string}>
 // ===========================================================================
 describe('BiometricVault — IdentityVault conformance (VAL-VAULT-024)', () => {

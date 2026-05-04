@@ -274,12 +274,17 @@ describe('useAgentStore.reset() — LevelDB wipe (scrutiny blocker 3)', () => {
     await useAgentStore.getState().reset();
 
     // reset() delegates to destroyAgentLevelDatabases('ENBOX_AGENT')
-    // which enumerates the known sub-locations and invokes
-    // LevelDB.destroyDB(name, true) for each. Every destroyDB call
-    // must pass `force: true` so an open handle is closed first.
+    // which enumerates the known sub-locations AND the root path
+    // (round-13 F2: SyncEngineLevel opens its DB at the literal
+    // dataPath, not at a subpath) and invokes LevelDB.destroyDB(name,
+    // true) for each. Every destroyDB call must pass `force: true`
+    // so an open handle is closed first.
     expect(mockDestroyDB).toHaveBeenCalled();
     for (const call of mockDestroyDB.mock.calls) {
-      expect(call[0]).toMatch(/^ENBOX_AGENT__/);
+      // Either a subpath child (`ENBOX_AGENT__<SUB>`) or the root
+      // path itself (`ENBOX_AGENT`). Both are required for a
+      // complete wipe.
+      expect(call[0]).toMatch(/^ENBOX_AGENT(__|$)/);
       expect(call[1]).toBe(true);
     }
     // The canonical ENBOX_AGENT sub-databases must all be wiped in one
@@ -290,6 +295,8 @@ describe('useAgentStore.reset() — LevelDB wipe (scrutiny blocker 3)', () => {
     expect(destroyedNames).toEqual(expect.arrayContaining([
       'ENBOX_AGENT__VAULT_STORE',
       'ENBOX_AGENT__DWN_DATASTORE',
+      // Round-13 F2: the root path itself (sync engine LevelDB).
+      'ENBOX_AGENT',
     ]));
   });
 

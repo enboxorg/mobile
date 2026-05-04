@@ -513,6 +513,54 @@ async function deriveContentEncryptionKey(rootHdKey: any): Promise<Uint8Array> {
   }
 }
 
+/**
+ * GCM authentication-tag length, in bytes. Mirrors the JOSE `A256GCM`
+ * default (RFC 7518 §5.3) and what every upstream `CompactJwe`
+ * encoder / decoder in `@enbox/agent` and `@web5/crypto` emits.
+ */
+const AES_GCM_TAG_BYTES = 16;
+
+/**
+ * Round-13 F4: produce a STANDARD compact JWE so a wallet exported by
+ * this vault and re-imported through the upstream `CompactJwe.decrypt`
+ * (e.g. inside `@enbox/agent`'s `HdIdentityVault`) round-trips
+ * byte-for-byte.
+ *
+ * Pre-fix this returned a NON-STANDARD 5-segment string:
+ *
+ *     <header>..<iv>.<ciphertext||tag>.<empty>
+ *
+ * with the GCM auth tag concatenated to the ciphertext segment and
+ * the tag segment intentionally left empty. Two consequences:
+ *
+ *   (1) `CompactJwe.decrypt({ jwe })` (every upstream Web5 / @enbox
+ *       implementation) reads `jwe.split('.')[4]` as the tag, gets
+ *       an empty string, and rejects the JWE before any AES-GCM
+ *       call is dispatched. Cross-implementation interop is
+ *       categorically broken: nothing other than this vault's own
+ *       `aesGcmDecrypt` can read the output.
+ *
+ *   (2) The protected header was never bound as Additional
+ *       Authenticated Data, so an attacker who could substitute a
+ *       different protected header (e.g. flipping `enc` to a weaker
+ *       cipher) on a stored ciphertext would produce a JWE that
+ *       decrypts cleanly under the original CEK. The IdentityVault
+ *       compact-JWE contract requires AAD = ASCII(BASE64URL(header))
+ *       per RFC 7516 §5.1 step 14.
+ *
+ * Standard format produced now:
+ *
+ *     <BASE64URL(header)>..<BASE64URL(iv)>.<BASE64URL(ct)>.<BASE64URL(tag)>
+ *
+ * with `dir` keeping the encrypted-key segment empty (CEK is shared
+ * out-of-band via the vault), the IV in segment 3, the AES-GCM
+ * ciphertext in segment 4, the 16-byte auth tag in segment 5, and
+ * the protected header bound as AAD on both encrypt and decrypt.
+ *
+ * WebCrypto's `AES-GCM` encrypt/decrypt expects the tag concatenated
+ * to the ciphertext (input on decrypt, output on encrypt), so the
+ * helpers split / join those bytes around the JWE boundary.
+ */
 async function aesGcmEncrypt(cek: Uint8Array, plaintext: Uint8Array): Promise<string> {
   const subtle: SubtleCrypto = (globalThis as any).crypto?.subtle;
   if (!subtle) {
@@ -526,14 +574,42 @@ async function aesGcmEncrypt(cek: Uint8Array, plaintext: Uint8Array): Promise<st
     ['encrypt'],
   );
   const iv = (globalThis as any).crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(
-    await subtle.encrypt({ name: 'AES-GCM', iv: iv as any }, key, plaintext as any),
-  );
-  const header = toBase64Url(
+
+  // Encode the protected header FIRST so we can bind its base64url
+  // form as AAD on the AES-GCM encrypt call. RFC 7516 §5.1 step 14
+  // requires `Additional Authenticated Data = ASCII(BASE64URL-UTF8(JWE
+  // Protected Header))`.
+  const headerB64 = toBase64Url(
     new TextEncoder().encode(JSON.stringify({ alg: 'dir', enc: 'A256GCM' })),
   );
-  // Compact JWE: header..iv.ciphertext+tag.<empty tag segment>
-  return `${header}..${toBase64Url(iv)}.${toBase64Url(ct)}.`;
+  const aad = new TextEncoder().encode(headerB64);
+
+  const cipherWithTag = new Uint8Array(
+    await subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: iv as any,
+        additionalData: aad as any,
+        tagLength: AES_GCM_TAG_BYTES * 8,
+      } as any,
+      key,
+      plaintext as any,
+    ),
+  );
+  if (cipherWithTag.length < AES_GCM_TAG_BYTES) {
+    // Defensive: WebCrypto's AES-GCM contract guarantees output is
+    // `ciphertext || tag` with `tag` being the trailing 16 bytes.
+    // A shorter result would mean the underlying SubtleCrypto
+    // implementation is non-conformant — fail closed.
+    throw new VaultError(
+      'VAULT_ERROR',
+      `AES-GCM encrypt returned ${cipherWithTag.length} bytes; expected at least ${AES_GCM_TAG_BYTES} (auth tag missing)`,
+    );
+  }
+  const ct = cipherWithTag.subarray(0, cipherWithTag.length - AES_GCM_TAG_BYTES);
+  const tag = cipherWithTag.subarray(cipherWithTag.length - AES_GCM_TAG_BYTES);
+
+  return `${headerB64}..${toBase64Url(iv)}.${toBase64Url(ct)}.${toBase64Url(tag)}`;
 }
 
 async function aesGcmDecrypt(cek: Uint8Array, jwe: string): Promise<Uint8Array> {
@@ -545,8 +621,31 @@ async function aesGcmDecrypt(cek: Uint8Array, jwe: string): Promise<Uint8Array> 
   if (parts.length !== 5) {
     throw new VaultError('VAULT_ERROR', 'Invalid compact JWE');
   }
+  const headerB64 = parts[0];
   const iv = fromBase64Url(parts[2]);
   const ct = fromBase64Url(parts[3]);
+  const tag = fromBase64Url(parts[4]);
+  // Round-13 F4: an empty tag segment used to be silently accepted
+  // because WebCrypto would happily decrypt zero-tagged ciphertext
+  // produced by the pre-fix encoder; reject it explicitly so a
+  // stale ciphertext written by an older vault build (where the
+  // 16-byte tag was concatenated to `ct` instead of carried in
+  // segment 5) cannot survive a round-trip through the new decoder.
+  if (tag.length !== AES_GCM_TAG_BYTES) {
+    throw new VaultError(
+      'VAULT_ERROR',
+      `Invalid compact JWE: expected ${AES_GCM_TAG_BYTES}-byte AES-GCM tag in segment 5, got ${tag.length}`,
+    );
+  }
+  // WebCrypto's AES-GCM decrypt expects `ciphertext || tag` as the
+  // input buffer. Concatenate the two parts and let the implementation
+  // verify the tag — any mismatch (including one caused by a
+  // tampered protected header that fails AAD verification) throws an
+  // OperationError that propagates to the caller.
+  const cipherWithTag = new Uint8Array(ct.length + tag.length);
+  cipherWithTag.set(ct, 0);
+  cipherWithTag.set(tag, ct.length);
+  const aad = new TextEncoder().encode(headerB64);
   const key = await subtle.importKey(
     'raw',
     cek as any,
@@ -554,7 +653,16 @@ async function aesGcmDecrypt(cek: Uint8Array, jwe: string): Promise<Uint8Array> 
     false,
     ['decrypt'],
   );
-  const pt = await subtle.decrypt({ name: 'AES-GCM', iv: iv as any }, key, ct as any);
+  const pt = await subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: iv as any,
+      additionalData: aad as any,
+      tagLength: AES_GCM_TAG_BYTES * 8,
+    } as any,
+    key,
+    cipherWithTag as any,
+  );
   return new Uint8Array(pt);
 }
 
