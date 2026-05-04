@@ -958,7 +958,20 @@ export class BiometricVault
       const mapped = mapNativeErrorToVaultError(err);
       if (mapped?.code === 'VAULT_ERROR_KEY_INVALIDATED') {
         this._biometricState = 'invalidated';
-        await this._persistBiometricState('invalidated');
+        try {
+          await this._persistBiometricState('invalidated');
+        } catch (persistErr) {
+          // Round-13 self-review: log the persist failure with full
+          // context so on-call can correlate stuck-on-BiometricUnlock
+          // user reports with the SecureStorage write failure. The
+          // primary error (KEY_INVALIDATED below) is still thrown,
+          // and the next unlock attempt will re-fire the same
+          // invalidation code path, which re-tries the persist.
+          console.warn(
+            '[biometric-vault] failed to persist biometricState=invalidated after KEY_INVALIDATED during _doInitialize provisioning; the next launch may route to BiometricUnlock instead of RecoveryRestore until a subsequent unlock retry succeeds in persisting the flag:',
+            persistErr,
+          );
+        }
       }
       // Zero the derived entropy — it never landed on-device but may
       // still be in JS memory.
@@ -1010,11 +1023,24 @@ export class BiometricVault
       this._biometricState = 'ready';
 
       if (this._secureStorage) {
+        // Round-13 self-review: log SecureStorage write failures
+        // here. The vault IS provisioned at this point (native
+        // secret stored, derived material in memory) so this is
+        // genuinely non-fatal: round-7 F2 added the orphan-secret
+        // detection in `session-store.hydrate()` precisely so a
+        // crash between native provisioning and these flag persists
+        // is recoverable on the next launch via the `hasSecret=true`
+        // probe. We still LOG the failure so on-call sees it in
+        // logcat — pre-fix the empty `catch {}` left zero
+        // observability into a hot path that affects routing.
         try {
           await this._secureStorage.set(INITIALIZED_STORAGE_KEY, 'true');
           await this._secureStorage.set(BIOMETRIC_STATE_STORAGE_KEY, 'ready');
-        } catch {
-          // SecureStorage is optional — non-fatal if it errors.
+        } catch (persistErr) {
+          console.warn(
+            "[biometric-vault] failed to persist post-initialize SecureStorage flags (INITIALIZED + biometricState=ready); the vault is fully provisioned and the round-7 orphan-secret recovery in session-store.hydrate() will route the next launch correctly via the hasSecret=true probe, but the routing-fast-path flags are stale:",
+            persistErr,
+          );
         }
       }
 
@@ -1151,8 +1177,16 @@ export class BiometricVault
         this._biometricState = 'invalidated';
         try {
           await this._persistBiometricState('invalidated');
-        } catch {
-          // best-effort
+        } catch (persistErr) {
+          // Round-13 self-review: log + continue. The KEY_INVALIDATED
+          // throw below remains the user-facing error; a chronic
+          // SecureStorage write failure here would degrade next-launch
+          // routing (BiometricUnlock → RecoveryRestore re-derivation
+          // takes one extra retry cycle to land via the same path).
+          console.warn(
+            '[biometric-vault] failed to persist biometricState=invalidated after detecting hasSecret=false on a previously-initialized vault (Round-6 F1 path); next launch routing may take an extra unlock retry to flip to RecoveryRestore:',
+            persistErr,
+          );
         }
         throw new VaultError(
           'VAULT_ERROR_KEY_INVALIDATED',
@@ -1192,8 +1226,15 @@ export class BiometricVault
         this._biometricState = 'invalidated';
         try {
           await this._persistBiometricState('invalidated');
-        } catch {
-          // best-effort
+        } catch (persistErr) {
+          // Round-13 self-review: log + continue. Same retry
+          // semantics as the Round-6 F1 path above — the KEY_INVALIDATED
+          // throw still propagates and the next unlock attempt will
+          // re-fire this code path.
+          console.warn(
+            '[biometric-vault] failed to persist biometricState=invalidated after KEY_INVALIDATED from getSecret() (unlocked-then-invalidated path); next launch routing may take an extra unlock retry to flip to RecoveryRestore:',
+            persistErr,
+          );
         }
         throw mapped;
       }
@@ -1225,8 +1266,13 @@ export class BiometricVault
           this._biometricState = 'invalidated';
           try {
             await this._persistBiometricState('invalidated');
-          } catch {
-            // best-effort
+          } catch (persistErr) {
+            // Round-13 self-review: log + continue. iOS
+            // biometry-current-set race path (Round-7 F1).
+            console.warn(
+              '[biometric-vault] failed to persist biometricState=invalidated after NOT_FOUND→KEY_INVALIDATED disambiguation (Round-7 F1 iOS biometry-current-set path); next launch routing may take an extra unlock retry to flip to RecoveryRestore:',
+              persistErr,
+            );
           }
           throw new VaultError(
             'VAULT_ERROR_KEY_INVALIDATED',
@@ -1539,13 +1585,33 @@ export class BiometricVault
     this._contentEncryptionKey = undefined;
   }
 
+  /**
+   * Persist the BiometricState flag to SecureStorage so
+   * `session-store.hydrate()` can route the next cold launch correctly
+   * (e.g. `'invalidated'` → RecoveryRestore, `'ready'` → BiometricUnlock).
+   *
+   * Round-13 self-review: this used to silently swallow SecureStorage
+   * write failures with an empty `catch {}` block. Pre-fix consequence:
+   * a transient SecureStorage error (or a chronic one in a corrupted
+   * build) would leave the in-memory `this._biometricState` correct
+   * but the on-disk flag stale, so the next cold launch would route
+   * the user to the WRONG screen (BiometricUnlock instead of
+   * RecoveryRestore on enrollment-change), with NO observability into
+   * the silent failure. The user would only escape via a 1–2 retry
+   * cycle (each subsequent unlock attempt re-fires KEY_INVALIDATED
+   * which re-tries the persist) — and on a chronic failure, never.
+   *
+   * The helper now PROPAGATES SecureStorage errors. Each caller logs
+   * with full context so on-call sees the persist failure in logcat
+   * and can correlate it with the user's stuck-on-BiometricUnlock
+   * report. Callers still treat the persist as best-effort relative
+   * to the primary error they're already throwing — they catch and
+   * log without re-throwing — but the `catch` block is no longer
+   * empty.
+   */
   private async _persistBiometricState(state: BiometricState): Promise<void> {
     if (!this._secureStorage) return;
-    try {
-      await this._secureStorage.set(BIOMETRIC_STATE_STORAGE_KEY, state);
-    } catch {
-      // best-effort
-    }
+    await this._secureStorage.set(BIOMETRIC_STATE_STORAGE_KEY, state);
   }
 
   /**
