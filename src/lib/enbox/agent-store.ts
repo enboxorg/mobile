@@ -117,6 +117,46 @@ export const VAULT_RESET_PENDING_KEY = 'enbox.vault.reset-pending';
  */
 export const AUTH_RESET_PENDING_KEY = 'enbox.auth.reset-pending';
 
+/**
+ * Round-14 F3: SecureStorage sentinel that records "the last
+ * `useAgentStore.reset()` succeeded at the vault / LevelDB / auth
+ * wipes but failed (or was never reached) at `useSessionStore.reset()`,
+ * leaving the persisted SESSION_KEY on disk with stale
+ * `hasIdentity=true` while every other piece of wallet state was
+ * already wiped".
+ *
+ * Without this sentinel the next cold launch's `session.hydrate()`
+ * reads the stale `hasIdentity=true` snapshot, the navigator routes
+ * to BiometricUnlock, the user taps Unlock, and `vault.unlock()`
+ * surfaces `VAULT_ERROR_NOT_INITIALIZED` — a hard trap with no
+ * automatic recovery because the other three sentinels were already
+ * cleared on the successful wipe steps. The user has no usable path
+ * forward: onboarding is gated by `hasIdentity=false`, but the
+ * persisted session insists they already have one.
+ *
+ * Mechanism:
+ *   - Persisted alongside the other three sentinels at the very top
+ *     of `reset()` (round-12 F1 pattern, fail-CLOSED on write
+ *     failure).
+ *   - Cleared at the END of `reset()` only when `session.reset()`
+ *     resolves successfully.
+ *   - `session.hydrate()` checks for it BEFORE reading SESSION_KEY.
+ *     When set, hydrate ignores the persisted SESSION_KEY (treats
+ *     it as if absent), then attempts the SESSION_KEY +
+ *     SESSION_RESET_PENDING_KEY deletes inline. The user lands on
+ *     the fresh-install Welcome flow regardless of whether the
+ *     inline retry succeeds — the sentinel itself prevents the
+ *     ghost-state misroute from ever firing.
+ *
+ * Round-14 self-review: previously the per-step sentinel clears
+ * (vault → LevelDB → auth) ran sequentially BEFORE session.reset(),
+ * so a session-reset failure left zero retry markers on disk.
+ * Adding a fourth sentinel keeps the per-step clearing pattern
+ * (faster recovery on partial failures) while closing the
+ * ghost-state hole.
+ */
+export const SESSION_RESET_PENDING_KEY = 'enbox.session.reset-pending';
+
 /** Error code emitted by the biometric vault when the OS cannot satisfy a biometric prompt. */
 const BIOMETRICS_UNAVAILABLE_CODE = 'VAULT_ERROR_BIOMETRICS_UNAVAILABLE';
 /** Error code emitted by the biometric vault when the key was invalidated by the OS. */
@@ -1253,33 +1293,58 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    a downstream `SecureStorageAdapter.clear()` would then
     //    miss them. Sequential writes are still fast (three
     //    SecureStorage round-trips) and trivially correct.
+    //
+    //    Round-14 F3: session reset is the FOURTH sentinel. See
+    //    `SESSION_RESET_PENDING_KEY` for the full ghost-state
+    //    rationale — pre-fix, a successful vault/LevelDB/auth
+    //    wipe followed by a failing `useSessionStore.reset()`
+    //    cleared every other sentinel while leaving SESSION_KEY
+    //    on disk with `hasIdentity=true`, routing the next launch
+    //    to BiometricUnlock against a wiped vault.
     const sentinelStorage = new SecureStorageAdapter();
     const SENTINEL_KEYS = [
       VAULT_RESET_PENDING_KEY,
       LEVELDB_CLEANUP_PENDING_KEY,
       AUTH_RESET_PENDING_KEY,
+      SESSION_RESET_PENDING_KEY,
     ] as const;
-    const writtenKeys: string[] = [];
     let firstSentinelWriteError: unknown = null;
     for (const key of SENTINEL_KEYS) {
       try {
         await sentinelStorage.set(key, 'true');
-        writtenKeys.push(key);
       } catch (err) {
         firstSentinelWriteError = err;
         break; // fail-fast: stop attempting further sentinels
       }
     }
     if (firstSentinelWriteError !== null) {
-      // Best-effort roll back any sentinels we DID succeed in
-      // writing so the next cold launch doesn't run a cleanup
-      // retry for a reset that never started. Rollback failures
-      // are logged but do NOT promote to a thrown error — we
-      // already have a definitive sentinel-write failure to
-      // surface, and a stuck retry sentinel is recoverable
-      // (its cleanup helper is idempotent on a healthy install).
-      // Sequential rollback to avoid the same KEY_INDEX race.
-      for (const key of writtenKeys) {
+      // Round-14 F2: roll back EVERY sentinel in `SENTINEL_KEYS`,
+      // NOT just the ones whose `set()` resolved successfully.
+      // Pre-fix the rollback iterated `writtenKeys` (sentinels
+      // pushed only when `set()` resolved) — which missed the
+      // partial-success case where `SecureStorageAdapter.set()`
+      // landed the value via `NativeSecureStorage.setItem()` but
+      // then threw inside the follow-up `trackKey()` call (see
+      // `storage-adapter.ts:set`). The value was on disk, the
+      // promise was rejected, and the caller never recorded it
+      // in `writtenKeys` — so the rollback loop skipped it.
+      //
+      // The on-disk consequence was severe: a stale
+      // VAULT_RESET_PENDING_KEY=`true` survives the failed-
+      // sentinel-write throw, and the next cold launch's
+      // `runPendingVaultResetCleanup()` calls
+      // `NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS)`
+      // on a STILL-VALID biometric vault that was never wiped.
+      // The user loses access to their wallet on a transient
+      // SecureStorage tracking failure, with no way to
+      // distinguish from a genuine reset.
+      //
+      // `SecureStorageAdapter.remove()` is idempotent on
+      // already-absent keys, so iterating every sentinel
+      // unconditionally is safe — it covers the partial-success
+      // case AND short-circuits cleanly when `set()` never wrote
+      // the value in the first place.
+      for (const key of SENTINEL_KEYS) {
         try {
           await sentinelStorage.remove(key);
         } catch (rollbackErr) {
@@ -1486,25 +1551,28 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     //    recovery on the next cold launch — at which point the
     //    cleanup helpers re-run before any agent-init proceeds.
     //
-    //    Trade-off (deliberate, narrow): on the failure path the
-    //    persisted SESSION_KEY remains stale. If the user
-    //    backgrounds + relaunches AFTER seeing the failure alert
-    //    (without retrying), `session.hydrate()` reads the stale
-    //    `hasIdentity=true` snapshot and the navigator routes to
-    //    BiometricUnlock. The user-tap on Unlock then hits
-    //    `unlockAgent()` which calls `runPendingResetCleanups()`
-    //    first — successfully retrying the wipes — but the
-    //    subsequent `vault.unlock()` against a now-cleaned vault
-    //    surfaces `VAULT_ERROR_NOT_INITIALIZED`. The user sees an
-    //    in-screen error and must manually re-trigger Reset (which
-    //    succeeds via the no-vault fallback path). This is a known
-    //    recoverable trap; we accept it because the alternative
-    //    (clearing persisted session on failure) breaks the
-    //    orphan-secret detection invariants in `session.hydrate()`
-    //    and would silently re-route the user to a phantom-wallet
-    //    RecoveryPhrase backup. A follow-up will introduce a
-    //    "reset-in-progress" sentinel for `getInitialRoute()` to
-    //    consult — out of scope for round-12.
+    //    Round-14 F3: the prior round-12 design left a hole on the
+    //    failure-then-relaunch path. SESSION_KEY remained on disk
+    //    with `hasIdentity=true` while every other piece of wallet
+    //    state was wiped, and the per-step sentinel clears (vault →
+    //    LevelDB → auth) had already cleared every retry marker on
+    //    a successful-wipe / failed-session-reset combination.
+    //    `session.hydrate()` then read the stale snapshot and the
+    //    navigator routed to BiometricUnlock against a wiped vault,
+    //    surfacing `VAULT_ERROR_NOT_INITIALIZED` with no automatic
+    //    recovery.
+    //
+    //    Fix: a fourth sentinel — `SESSION_RESET_PENDING_KEY` — is
+    //    persisted alongside the other three at the very top of
+    //    reset() and cleared ONLY when `session.reset()` resolves
+    //    successfully. On the next launch `session.hydrate()`
+    //    checks the sentinel BEFORE reading SESSION_KEY: when set,
+    //    SESSION_KEY is treated as if absent (fresh-install
+    //    defaults) and the user routes to Welcome. Inline retry of
+    //    the SESSION_KEY delete is best-effort with strict
+    //    "clear-sentinel-only-after-key-is-gone" ordering so an
+    //    arbitrary chain of partial-cleanup failures still
+    //    preserves the ghost-state guard.
     //
     //    Round-10 self-review: when session reset DOES run (success
     //    path) we still capture-then-rethrow on rejection. A
@@ -1525,10 +1593,34 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         sessionResetError = err;
         console.warn('[agent-store] reset: session-store reset failed:', err);
       }
+      // Round-14 F3: clear SESSION_RESET_PENDING_KEY ONLY when
+      // session.reset() resolves successfully. A failure here keeps
+      // the sentinel set so `session.hydrate()` on the next cold
+      // launch refuses to read the stale SESSION_KEY and routes the
+      // user to the fresh-install Welcome flow instead of trapping
+      // them on BiometricUnlock against a wiped vault.
+      if (sessionResetError === null) {
+        try {
+          await sentinelStorage.remove(SESSION_RESET_PENDING_KEY);
+        } catch (err) {
+          console.warn(
+            '[agent-store] reset: failed to clear session-reset sentinel after successful wipe (next launch will run a no-op cleanup retry):',
+            err,
+          );
+        }
+      }
     } else {
       console.warn(
         '[agent-store] reset: skipping session-store reset because a critical wipe failed; the user stays on the current route so the failure alert can render against a stable navigator. Retry sentinels handle next-launch recovery.',
       );
+      // Round-14 F3: SESSION_RESET_PENDING_KEY stays SET on the
+      // skip path too. Even though we never touched the persisted
+      // session, the OTHER sentinels (vault / LevelDB / auth) might
+      // have CLEARED individually if their wipe steps succeeded —
+      // leaving a partial-wipe state where SESSION_KEY says
+      // `hasIdentity=true` but vault/LevelDB are mid-cleanup. The
+      // session sentinel ensures next-launch hydrate ignores the
+      // stale SESSION_KEY and routes to Welcome regardless.
     }
 
     // 6. Round-9 F4 + Round-10 F2 + Round-12 F1/F2/F3 + self-review:

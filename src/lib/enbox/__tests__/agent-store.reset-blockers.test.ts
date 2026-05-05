@@ -1233,3 +1233,226 @@ describe('useAgentStore.reset() — wipes persisted AuthManager material (Round-
     expect(authStorage.remove).not.toHaveBeenCalled();
   });
 });
+
+// ===========================================================================
+// Round-14 F2 — sentinel rollback covers values that landed before trackKey
+// ===========================================================================
+//
+// `SecureStorageAdapter.set()` writes the on-disk value FIRST (via
+// `NativeSecureStorage.setItem`) and only THEN updates `KEY_INDEX` via
+// `trackKey()`. If the value write succeeds but `trackKey()` throws,
+// `set()` rejects — but the value is already persisted. The pre-fix
+// rollback loop iterated `writtenKeys` (sentinels pushed only AFTER
+// `set()` resolved), which silently skipped the partial-success
+// case. That left a stale `enbox:enbox.vault.reset-pending=true` on
+// disk after `reset()` failed-CLOSED on the sentinel write — and on
+// the next cold launch, `runPendingVaultResetCleanup()` interpreted
+// the sentinel as a real "wipe in progress" signal and called
+// `NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS)` against
+// the still-valid biometric vault that `reset()` never actually
+// touched. The user lost their wallet on a transient SecureStorage
+// tracking failure, with no way to distinguish from a genuine reset.
+//
+// The fix: roll back EVERY sentinel in `SENTINEL_KEYS`
+// unconditionally on a sentinel-write failure. `remove()` is
+// idempotent on already-absent keys, so calling it for a sentinel
+// that was never written is a harmless no-op.
+describe('useAgentStore.reset() — sentinel rollback covers partial-success writes (Round-14 F2)', () => {
+  it('removes the partially-persisted sentinel value when set() rejects after the value landed', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    nativeSecure.deleteItem.mockClear();
+    nativeBiometric.deleteSecret.mockClear();
+
+    // Track which keys were "written" on disk by the simulated
+    // partial-success setItem. We pretend the value write succeeded
+    // for the FIRST sentinel (vault-reset) but make the IMMEDIATELY
+    // FOLLOWING KEY_INDEX update fail. The adapter's `set()` then
+    // rejects but the value is on disk.
+    const onDiskKeys = new Set<string>();
+    const trackKeyError = Object.assign(new Error('KEY_INDEX disk full'), {
+      code: 'SECURE_STORAGE_INDEX_IO',
+    });
+
+    nativeSecure.setItem.mockImplementation(async (key: string, _value: string) => {
+      // `SecureStorageAdapter.trackKey()` updates the on-disk
+      // `KEY_INDEX` blob via a literal `setItem('enbox:__keys__', …)`
+      // call (see `storage-adapter.ts:80`). Force that ONE call (the
+      // first time it fires after the vault-reset value lands) to
+      // throw. All other setItems succeed and record their key.
+      if (key === 'enbox:__keys__') {
+        // Partial-success simulation: only the FIRST KEY_INDEX
+        // write fails. Subsequent writes resolve so the rollback
+        // loop's own KEY_INDEX updates don't get tangled in the
+        // failure mode under test.
+        if (!(global as any).__r14F2KeyIndexThrew) {
+          (global as any).__r14F2KeyIndexThrew = true;
+          throw trackKeyError;
+        }
+      }
+      onDiskKeys.add(key);
+    });
+
+    nativeSecure.deleteItem.mockImplementation(async (key: string) => {
+      onDiskKeys.delete(key);
+    });
+
+    try {
+      // sentinel value lands → KEY_INDEX throws → adapter set() rejects
+      // → reset() rolls back ALL sentinels (Round-14 F2).
+      await expect(useAgentStore.getState().reset()).rejects.toThrow(
+        /KEY_INDEX disk full/,
+      );
+
+      // CRITICAL: the value that landed before trackKey threw must
+      // be rolled back so the next cold launch does not see a
+      // stale `enbox:enbox.vault.reset-pending=true` and run the
+      // cleanup against a still-valid vault.
+      expect(onDiskKeys.has('enbox:enbox.vault.reset-pending')).toBe(false);
+      // The native biometric secret was NEVER deleted (fail-CLOSED
+      // means we never reached the wipe step).
+      expect(nativeBiometric.deleteSecret).not.toHaveBeenCalled();
+      // `deleteItem` was invoked for the partial-success sentinel
+      // even though `writtenKeys` would have been empty — proves
+      // the rollback iterated SENTINEL_KEYS unconditionally.
+      const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+        (c) => c[0] === 'enbox:enbox.vault.reset-pending',
+      );
+      expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      delete (global as any).__r14F2KeyIndexThrew;
+    }
+  });
+
+  it('rolls back every SENTINEL_KEY (vault + leveldb + auth + session) on a sentinel-write failure', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    nativeSecure.deleteItem.mockClear();
+
+    // Simulate a complete sentinel-write failure: every setItem
+    // rejects. The rollback loop should still attempt deleteItem
+    // for ALL FOUR canonical sentinels so we don't depend on which
+    // sub-step failed.
+    nativeSecure.setItem.mockImplementation(async () => {
+      throw new Error('SecureStorage write disabled');
+    });
+
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /SecureStorage write disabled/,
+    );
+
+    const deletedKeys = nativeSecure.deleteItem.mock.calls.map((c) => c[0]);
+    expect(deletedKeys).toEqual(
+      expect.arrayContaining([
+        'enbox:enbox.vault.reset-pending',
+        'enbox:enbox.agent.leveldb-cleanup-pending',
+        'enbox:enbox.auth.reset-pending',
+        // Round-14 F3: SESSION_RESET_PENDING_KEY is the fourth
+        // sentinel. The rollback must cover it too.
+        'enbox:enbox.session.reset-pending',
+      ]),
+    );
+  });
+});
+
+// ===========================================================================
+// Round-14 F3 — session-reset sentinel guards the ghost-state misroute
+// ===========================================================================
+//
+// Pre-fix, `agent-store.reset()` cleared the vault / LevelDB / auth
+// retry sentinels per-step on success and only THEN ran
+// `useSessionStore.reset()`. If `SESSION_KEY` deletion failed (or
+// session.reset() was never reached because it was conditioned on
+// every other wipe succeeding), the on-disk state collapsed into a
+// ghost: vault wiped, LevelDB wiped, auth wiped, ALL retry sentinels
+// cleared, but `SESSION_KEY` still saying `hasIdentity=true`. On the
+// next cold launch `session.hydrate()` read the stale snapshot, the
+// navigator routed to BiometricUnlock, and `vault.unlock()` against
+// the wiped vault surfaced `VAULT_ERROR_NOT_INITIALIZED` — a hard
+// trap with no automatic recovery.
+//
+// The fix adds a fourth sentinel `SESSION_RESET_PENDING_KEY` that
+// stays SET until session.reset() resolves successfully.
+// `session.hydrate()` checks the sentinel BEFORE reading SESSION_KEY
+// so the ghost state never routes anywhere except the fresh-install
+// Welcome flow.
+describe('useAgentStore.reset() — session-reset sentinel (Round-14 F3)', () => {
+  it('persists SESSION_RESET_PENDING_KEY before any wipe + clears it after a successful session.reset()', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    nativeSecure.setItem.mockClear();
+    nativeSecure.deleteItem.mockClear();
+
+    await useAgentStore.getState().reset();
+
+    const sentinelWrites = nativeSecure.setItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.session.reset-pending',
+    );
+    expect(sentinelWrites.length).toBeGreaterThanOrEqual(1);
+    expect(sentinelWrites[0][1]).toBe('true');
+
+    const sentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.session.reset-pending',
+    );
+    expect(sentinelDeletes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('keeps SESSION_RESET_PENDING_KEY set when SESSION_KEY deletion fails (ghost-state guard)', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    nativeSecure.deleteItem.mockClear();
+
+    // Default mock impl deletes everything except SESSION_KEY. The
+    // session-store reads/writes SESSION_KEY through the raw
+    // `secure-storage.ts` wrappers (NO `enbox:` prefix), so the on-disk
+    // key is the literal `'session:state'`. session-store.reset()
+    // then rejects the SESSION_KEY delete and agent-store.reset()
+    // captures + rethrows AFTER skipping the sentinel-clear step.
+    nativeSecure.deleteItem.mockImplementation(async (key: string) => {
+      if (key === 'session:state') {
+        throw new Error('SecureStorage SESSION_KEY delete denied');
+      }
+    });
+
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /SESSION_KEY delete denied/,
+    );
+
+    // The session-reset sentinel must NOT have been cleared. Every
+    // OTHER sentinel (vault + leveldb + auth) WAS cleared per-step
+    // because their wipes succeeded; without the new session
+    // sentinel the next cold launch would hydrate the stale
+    // SESSION_KEY ungated and route to BiometricUnlock against a
+    // wiped vault.
+    const sessionSentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.session.reset-pending',
+    );
+    expect(sessionSentinelDeletes.length).toBe(0);
+
+    const vaultSentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.vault.reset-pending',
+    );
+    // Vault sentinel WAS cleared because vault.reset() succeeded —
+    // proves we exercise the partial-success path that pre-Round-14
+    // would have left the user in ghost-state.
+    expect(vaultSentinelDeletes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('keeps SESSION_RESET_PENDING_KEY set when an earlier wipe fails (skip-session-reset path)', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    nativeSecure.deleteItem.mockClear();
+
+    // Vault wipe rejects. agent-store.reset() captures
+    // vaultResetError and SKIPS session-store.reset() entirely.
+    // The session sentinel must still be on disk because nothing
+    // cleared it.
+    nativeBiometric.deleteSecret.mockImplementationOnce(async () => {
+      throw new Error('Keystore delete failed');
+    });
+
+    await expect(useAgentStore.getState().reset()).rejects.toThrow(
+      /Keystore delete failed/,
+    );
+
+    const sessionSentinelDeletes = nativeSecure.deleteItem.mock.calls.filter(
+      (c) => c[0] === 'enbox:enbox.session.reset-pending',
+    );
+    expect(sessionSentinelDeletes.length).toBe(0);
+  });
+});

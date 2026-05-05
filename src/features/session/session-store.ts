@@ -15,6 +15,28 @@ import {
 const SESSION_KEY = 'session:state';
 
 /**
+ * Round-14 F3: SecureStorage sentinel that signals "the last
+ * `useAgentStore.reset()` succeeded at every other wipe but failed
+ * (or was never reached) at `useSessionStore.reset()`, leaving the
+ * persisted SESSION_KEY on disk with stale `hasIdentity=true`".
+ *
+ * `hydrate()` checks this BEFORE reading SESSION_KEY — when set,
+ * the persisted SESSION_KEY is treated as if absent (defaults to
+ * fresh-install state) so the navigator routes the user to the
+ * Welcome flow instead of trapping them on BiometricUnlock against
+ * a wiped vault.
+ *
+ * The `enbox:` prefix is the same one applied by
+ * `SecureStorageAdapter` in `agent-store.reset()` / per the
+ * canonical `SESSION_RESET_PENDING_KEY` constant in
+ * `agent-store.ts`. Defined locally here ONLY because
+ * `agent-store.ts` already imports `useSessionStore` (a circular
+ * import would break Metro's module graph). Any change to the
+ * canonical key MUST be mirrored here.
+ */
+const SESSION_RESET_PENDING_RAW_KEY = 'enbox:enbox.session.reset-pending';
+
+/**
  * Raw SecureStorage key where BiometricVault persists its `biometricState`
  * signal (via `@enbox/auth` SecureStorageAdapter which prefixes keys with
  * `enbox:`). Session-store reads the raw key directly so it can gate the
@@ -275,15 +297,73 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // ``hasSecret=true`` natively. The vault's own ``INITIALIZED``
       // flag is the authoritative durable signal that
       // ``_doInitialize()`` ran to completion.
-      const [rawSession, rawBiometricState, rawVaultInitialized] =
+      //
+      // Round-14 F3: ALSO read SESSION_RESET_PENDING_RAW_KEY. When
+      // set, it means the previous `useAgentStore.reset()` succeeded
+      // at the vault / LevelDB / auth wipes but the in-line
+      // `useSessionStore.reset()` failed to delete SESSION_KEY (or
+      // the agent-store throw landed before session.reset() ran).
+      // Without this gate, hydrate would observe a stale
+      // `hasIdentity=true` snapshot, the navigator would route to
+      // BiometricUnlock, and the unlock attempt would surface
+      // VAULT_ERROR_NOT_INITIALIZED against a wiped vault — a
+      // dead-end the user cannot escape. With the gate, we treat
+      // SESSION_KEY as if absent, retry the SecureStorage delete
+      // best-effort, and route the user to the fresh-install
+      // Welcome flow.
+      const [rawSession, rawBiometricState, rawVaultInitialized, sessionResetPending] =
         await Promise.all([
           getSecureItem(SESSION_KEY),
           getSecureItem(BIOMETRIC_STATE_RAW_KEY),
           getSecureItem(VAULT_INITIALIZED_RAW_KEY),
+          getSecureItem(SESSION_RESET_PENDING_RAW_KEY).catch(() => null),
         ]);
 
       let session: Partial<PersistedSessionState> = {};
-      if (rawSession) {
+      // Round-14 F3: if the session-reset sentinel is set we IGNORE
+      // any persisted SESSION_KEY (treat as `{}` → fresh-install
+      // defaults) regardless of whether the read succeeded. This
+      // closes the ghost-state hole even if the inline retry below
+      // also fails — the user lands on Welcome instead of trapped
+      // on BiometricUnlock.
+      if (sessionResetPending === 'true') {
+        console.warn(
+          '[session] hydrate: SESSION_RESET_PENDING sentinel detected; ignoring persisted SESSION_KEY and re-attempting cleanup',
+        );
+        // Best-effort retry of the deletes that the prior reset()
+        // either skipped or fumbled. Failures here are NON-fatal
+        // because we already neutralised the misroute by treating
+        // the persisted snapshot as absent.
+        //
+        // Order matters: clear the sentinel ONLY after SESSION_KEY
+        // is gone. The opposite order has a subtle hole — if the
+        // SESSION_KEY delete fails but the sentinel-clear succeeds,
+        // the next cold launch reads the still-stale SESSION_KEY
+        // unguarded by the sentinel and routes to BiometricUnlock
+        // anyway. Keeping the sentinel set whenever SESSION_KEY
+        // might still be on disk preserves the ghost-state guard
+        // across an arbitrary chain of partial-cleanup failures.
+        let sessionKeyCleared = false;
+        try {
+          await deleteSecureItem(SESSION_KEY);
+          sessionKeyCleared = true;
+        } catch (err) {
+          console.warn(
+            '[session] hydrate: failed to retry SESSION_KEY delete (sentinel stays set so a future cold launch retries):',
+            err,
+          );
+        }
+        if (sessionKeyCleared) {
+          try {
+            await deleteSecureItem(SESSION_RESET_PENDING_RAW_KEY);
+          } catch (err) {
+            console.warn(
+              '[session] hydrate: failed to clear SESSION_RESET_PENDING sentinel (next cold launch will run a no-op cleanup retry):',
+              err,
+            );
+          }
+        }
+      } else if (rawSession) {
         try {
           const parsed: unknown = JSON.parse(rawSession);
           if (isPersistedSessionState(parsed)) {
@@ -549,8 +629,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   reset: async () => {
+    // Round-14 F3: SESSION_KEY MUST be deleted FIRST and on its
+    // own. The ancillary cleanup (biometric-state, vault-init,
+    // session-reset sentinel) runs only AFTER the SESSION_KEY
+    // delete resolves, so a SESSION_KEY failure cannot
+    // accidentally clear the SESSION_RESET_PENDING sentinel via a
+    // parallel `Promise.all` — that sentinel is the ghost-state
+    // guard `hydrate()` consults on the next launch, and clearing
+    // it while SESSION_KEY is still on disk re-opens the misroute
+    // hole that round-14 F3 fixed in `agent-store.reset()`.
+    //
+    // The pre-fix shape ran all four deletes in a single
+    // `Promise.all([…])`. SESSION_KEY's rejection rejected the
+    // outer await, but the OTHER three promises still
+    // ran-to-completion (catching their own errors). The
+    // SESSION_RESET sentinel delete was then on disk while
+    // SESSION_KEY remained, leaving the next cold launch
+    // ungated against a ghost session.
+    await deleteSecureItem(SESSION_KEY);
     await Promise.all([
-      deleteSecureItem(SESSION_KEY),
       // Always clear the biometric-state flag so a post-reset install
       // does not resurrect an old `'invalidated'` signal.
       deleteSecureItem(BIOMETRIC_STATE_RAW_KEY).catch(() => undefined),
@@ -578,6 +675,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // in this lifecycle. Symmetric cleanup is the right
       // posture: anything ``hydrate()`` reads, ``reset()`` clears.
       deleteSecureItem(VAULT_INITIALIZED_RAW_KEY).catch(() => undefined),
+      // Round-14 F3: clear the session-reset sentinel too so a
+      // direct caller of `useSessionStore.reset()` (tests,
+      // error-recovery paths) doesn't leave a stale sentinel that
+      // would force `hydrate()` to ignore a perfectly valid future
+      // SESSION_KEY write. Safe to run here because we already
+      // awaited SESSION_KEY's delete above — the sentinel is only
+      // cleared on a path where SESSION_KEY is provably gone.
+      deleteSecureItem(SESSION_RESET_PENDING_RAW_KEY).catch(() => undefined),
     ]);
     set({
       isHydrated: true,

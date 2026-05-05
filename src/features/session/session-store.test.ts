@@ -738,4 +738,180 @@ describe('useSessionStore', () => {
       expect(state.hasCompletedOnboarding).toBe(true);
     });
   });
+
+  // =========================================================================
+  // Round-14 F3 — SESSION_RESET_PENDING ghost-state guard
+  // =========================================================================
+  //
+  // Pre-fix `useAgentStore.reset()` cleared the vault / LevelDB / auth
+  // sentinels per-step on success and only THEN ran
+  // `useSessionStore.reset()`. If `SESSION_KEY` deletion failed (or
+  // session.reset() was conditionally skipped on a prior wipe failure),
+  // the on-disk state collapsed into a ghost: every other piece of
+  // wallet state was wiped, every other retry sentinel was cleared, but
+  // SESSION_KEY still claimed `hasIdentity=true`. The next cold launch
+  // routed to BiometricUnlock against a wiped vault and surfaced
+  // `VAULT_ERROR_NOT_INITIALIZED` with no automatic recovery path.
+  //
+  // The fix adds a fourth retry sentinel
+  // (`SESSION_RESET_PENDING_RAW_KEY` here, canonically named
+  // `SESSION_RESET_PENDING_KEY` on the `agent-store.ts` side). When
+  // hydrate() observes the sentinel set, it ignores any persisted
+  // SESSION_KEY (treats it as if absent → fresh-install defaults) and
+  // attempts the SESSION_KEY + sentinel deletes inline.
+  describe('Round-14 F3 — SESSION_RESET_PENDING sentinel ghost-state guard', () => {
+    const SESSION_KEY = 'session:state';
+    const SESSION_RESET_PENDING_RAW_KEY = 'enbox:enbox.session.reset-pending';
+
+    it('ignores stale SESSION_KEY and routes to fresh-install defaults when sentinel is set', async () => {
+      // Stale SESSION_KEY says hasIdentity=true; the prior reset()
+      // wiped vault/LevelDB/auth but failed to delete SESSION_KEY.
+      // The session-reset sentinel is the ONLY remaining marker.
+      nativeBiometric.hasSecret.mockResolvedValue(false);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_KEY) {
+          return JSON.stringify({
+            hasCompletedOnboarding: true,
+            hasIdentity: true,
+            isPendingFirstBackup: false,
+          });
+        }
+        if (key === SESSION_RESET_PENDING_RAW_KEY) return 'true';
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      // CRITICAL: with the sentinel set, we MUST NOT route to
+      // BiometricUnlock against a wiped vault.
+      expect(state.hasIdentity).toBe(false);
+      expect(state.hasCompletedOnboarding).toBe(false);
+      expect(state.isPendingFirstBackup).toBe(false);
+    });
+
+    it('retries the SESSION_KEY delete inline when the sentinel is set', async () => {
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_RESET_PENDING_RAW_KEY) return 'true';
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      // SESSION_KEY delete MUST have been attempted because the
+      // prior reset() left it on disk — the sentinel-driven retry
+      // is what closes the agent-store.reset() crash window.
+      expect(mockedDeleteSecureItem).toHaveBeenCalledWith(SESSION_KEY);
+    });
+
+    it('clears the SESSION_RESET sentinel only after SESSION_KEY delete succeeds', async () => {
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_RESET_PENDING_RAW_KEY) return 'true';
+        return null;
+      });
+      // Both deletes succeed → sentinel may be cleared.
+      mockedDeleteSecureItem.mockResolvedValue(undefined);
+
+      await useSessionStore.getState().hydrate();
+
+      expect(mockedDeleteSecureItem).toHaveBeenCalledWith(SESSION_KEY);
+      expect(mockedDeleteSecureItem).toHaveBeenCalledWith(
+        SESSION_RESET_PENDING_RAW_KEY,
+      );
+    });
+
+    it('keeps the sentinel set when the inline SESSION_KEY delete fails (next-launch retry preserved)', async () => {
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_RESET_PENDING_RAW_KEY) return 'true';
+        return null;
+      });
+      // SESSION_KEY delete rejects, sentinel delete would succeed
+      // if it were attempted. The fix ORDERING means we must NOT
+      // attempt the sentinel delete on this path — otherwise a
+      // future cold launch would read the still-stale SESSION_KEY
+      // ungated by the sentinel and route to BiometricUnlock.
+      mockedDeleteSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_KEY) {
+          throw new Error('SecureStorage SESSION_KEY delete failed');
+        }
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      // Sentinel delete was NOT attempted because SESSION_KEY
+      // delete failed first.
+      const sentinelDeletes = mockedDeleteSecureItem.mock.calls.filter(
+        ([key]) => key === SESSION_RESET_PENDING_RAW_KEY,
+      );
+      expect(sentinelDeletes.length).toBe(0);
+
+      // Hydrate still completed: in-memory state is fresh-install
+      // defaults so the next launch routes correctly even if the
+      // sentinel persists across the failed retry.
+      const state = useSessionStore.getState();
+      expect(state.isHydrated).toBe(true);
+      expect(state.hasIdentity).toBe(false);
+    });
+
+    it('does NOT consult the sentinel path when the sentinel is absent (control)', async () => {
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_KEY) {
+          return JSON.stringify({
+            hasCompletedOnboarding: true,
+            hasIdentity: true,
+            isPendingFirstBackup: false,
+          });
+        }
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      // Without the sentinel, hydrate honours the persisted
+      // SESSION_KEY exactly as it always has.
+      expect(state.hasIdentity).toBe(true);
+      expect(state.hasCompletedOnboarding).toBe(true);
+      // No SESSION_KEY / sentinel deletes were issued in the
+      // sentinel-absent path.
+      expect(mockedDeleteSecureItem).not.toHaveBeenCalledWith(SESSION_KEY);
+      expect(mockedDeleteSecureItem).not.toHaveBeenCalledWith(
+        SESSION_RESET_PENDING_RAW_KEY,
+      );
+    });
+
+    it('treats a SecureStorage read failure for the sentinel as "sentinel absent" (no false-positive ghost-state)', async () => {
+      // Defensive: if the sentinel read itself fails, hydrate
+      // must NOT trigger the ghost-state path against a perfectly
+      // valid SESSION_KEY. We swallow the read error and proceed
+      // with the persisted SESSION_KEY (the same posture as
+      // session-store's other defensive reads).
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_KEY) {
+          return JSON.stringify({
+            hasCompletedOnboarding: true,
+            hasIdentity: true,
+            isPendingFirstBackup: false,
+          });
+        }
+        if (key === SESSION_RESET_PENDING_RAW_KEY) {
+          throw new Error('SecureStorage read failed');
+        }
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.hasIdentity).toBe(true);
+      expect(state.hasCompletedOnboarding).toBe(true);
+    });
+
+    it('reset() clears the SESSION_RESET sentinel for direct callers (symmetric cleanup)', async () => {
+      await useSessionStore.getState().reset();
+      expect(mockedDeleteSecureItem).toHaveBeenCalledWith(
+        SESSION_RESET_PENDING_RAW_KEY,
+      );
+    });
+  });
 });
