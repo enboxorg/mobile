@@ -6,6 +6,7 @@
  * so future refactors can't silently re-order the rules.
  */
 import {
+  BIOMETRIC_UNLOCK_ROUTE,
   getInitialRoute,
   type SessionSnapshot,
 } from '@/features/session/get-initial-route';
@@ -20,19 +21,6 @@ function snap(partial: Partial<SessionSnapshot>): SessionSnapshot {
     ...partial,
   };
 }
-
-/**
- * Canonical biometric-unlock route name, assembled at runtime so this
- * test file's own source doesn't trip negative-greps scanning
- * `src/features/session/` for the legacy knowledge-factor route-name
- * literals. It is cast to the concrete `AppRouteName` union member
- * the matrix returns so Jest's `.toBe(...)` still type-checks against
- * the production return type.
- */
-const BIOMETRIC_UNLOCK_ROUTE = ('Biometric' + 'Un' + 'lock') as Extract<
-  ReturnType<typeof getInitialRoute>,
-  string
->;
 
 describe('getInitialRoute', () => {
   describe('hard gates (biometricStatus)', () => {
@@ -230,13 +218,7 @@ describe('getInitialRoute', () => {
           isLocked: false,
         }),
       ];
-      // Legacy route-name literals are built at runtime so this test
-      // file's own source doesn't trip negative greps scanning
-      // src/features/session/ for legacy route names.
-      const legacyRouteNames = [
-        'Create' + 'P' + 'in',
-        'Un' + 'lock',
-      ];
+      const legacyRouteNames = ['CreatePin', 'Unlock'];
       for (const s of rows) {
         const route = getInitialRoute(s) as string;
         for (const legacy of legacyRouteNames) {

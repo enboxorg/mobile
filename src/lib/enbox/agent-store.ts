@@ -27,6 +27,7 @@ import {
   BiometricVault,
   type BiometricState,
 } from './biometric-vault';
+import { createMobileIdentity } from './identity-service';
 import { destroyAgentLevelDatabases } from './rn-level';
 import { SecureStorageAdapter } from './storage-adapter';
 import {
@@ -161,6 +162,13 @@ export const SESSION_RESET_PENDING_KEY = 'enbox.session.reset-pending';
 const BIOMETRICS_UNAVAILABLE_CODE = 'VAULT_ERROR_BIOMETRICS_UNAVAILABLE';
 /** Error code emitted by the biometric vault when the key was invalidated by the OS. */
 const KEY_INVALIDATED_CODE = 'VAULT_ERROR_KEY_INVALIDATED';
+const ENABLE_AGENT_STORE_LOGS = process.env.ENBOX_DEBUG_AGENT === '1';
+
+function debugLog(...args: unknown[]) {
+  if (ENABLE_AGENT_STORE_LOGS) {
+    console.log(...args);
+  }
+}
 
 /**
  * Round-10 F3: type the SecureStorage surface used by the cleanup
@@ -792,23 +800,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // identity / DWN record / OS-gated secret can never resurrect
       // into a fresh wallet.
       await runPendingResetCleanups();
-      console.log('[agent-store] initializeFirstLaunch: creating agent...');
+      debugLog('[agent-store] initializeFirstLaunch: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       vaultRef = vault;
 
-      console.log('[agent-store] checking firstLaunch...');
+      debugLog('[agent-store] checking firstLaunch...');
       const isFirst = await agent.firstLaunch();
-      console.log('[agent-store] firstLaunch:', isFirst);
+      debugLog('[agent-store] firstLaunch:', isFirst);
 
       let recoveryPhrase: string;
       if (isFirst) {
-        console.log('[agent-store] initializing vault (biometric prompt)...');
+        debugLog('[agent-store] initializing vault (biometric prompt)...');
         // BiometricVault has no password. `AgentInitializeParams.password`
         // is widened to optional by `scripts/apply-patches.mjs`'s
         // `patchEnboxAgentPasswordOptional()` so the call site does NOT
         // need to carry a `password` property.
         recoveryPhrase = await agent.initialize({});
-        console.log('[agent-store] vault initialized.');
+        debugLog('[agent-store] vault initialized.');
         // Upstream `EnboxUserAgent.initialize()` does NOT assign
         // `agentDid` (only `start()` does). Without this assignment the
         // `refreshIdentities()` race gate would early-return and the
@@ -829,7 +837,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           );
         }
       } else {
-        console.log('[agent-store] starting existing vault (biometric prompt)...');
+        debugLog('[agent-store] starting existing vault (biometric prompt)...');
         await agent.start({});
         recoveryPhrase = '';
       }
@@ -903,16 +911,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // Round-9 F4 + Round-10 F2/F4: see `initializeFirstLaunch()`
       // for the rationale.
       await runPendingResetCleanups();
-      console.log('[agent-store] unlockAgent: creating agent...');
+      debugLog('[agent-store] unlockAgent: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       vaultRef = vault;
-      console.log('[agent-store] starting vault (biometric prompt)...');
+      debugLog('[agent-store] starting vault (biometric prompt)...');
       // BiometricVault has no password. `AgentStartParams.password` is
       // widened to optional by `scripts/apply-patches.mjs`'s
       // `patchEnboxAgentPasswordOptional()` so the call site does NOT
       // need to carry a `password` property.
       await agent.start({});
-      console.log('[agent-store] vault started.');
+      debugLog('[agent-store] vault started.');
       set({
         agent,
         authManager,
@@ -992,10 +1000,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // secret here. The fix mirrors the other flows: cleanup
       // first (fail-CLOSED), then create the agent.
       await runPendingResetCleanups();
-      console.log('[agent-store] resumePendingBackup: creating agent...');
+      debugLog('[agent-store] resumePendingBackup: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       vaultRef = vault;
-      console.log(
+      debugLog(
         '[agent-store] resumePendingBackup: starting vault (biometric prompt)...',
       );
       // `agent.start({})` forwards to `BiometricVault.unlock()` which
@@ -1004,7 +1012,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // does NOT re-prompt — it reads the already-in-memory entropy.
       await agent.start({});
       const recoveryPhrase = await vault.getMnemonic();
-      console.log('[agent-store] resumePendingBackup: mnemonic re-derived.');
+      debugLog('[agent-store] resumePendingBackup: mnemonic re-derived.');
 
       set({
         agent,
@@ -1140,7 +1148,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // instance — the old state is tied to the now-invalid secret
       // and the agent's internal DWN layer must be wired against a
       // vault whose BearerDid matches the restored entropy.
-      console.log('[agent-store] restoreFromMnemonic: creating agent...');
+      debugLog('[agent-store] restoreFromMnemonic: creating agent...');
       const { agent, authManager, vault } = await initializeAgent();
       vaultRef = vault;
 
@@ -1289,10 +1297,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const { agent } = get();
     if (!agent) throw new Error('Agent not initialized');
 
-    const identity = await agent.identity.create({
-      metadata: { name },
-      didMethod: 'dht',
-    });
+    const identity = await createMobileIdentity(agent, { persona: name });
 
     // Refresh the list
     await get().refreshIdentities();

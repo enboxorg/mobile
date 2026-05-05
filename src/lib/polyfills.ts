@@ -45,6 +45,9 @@ if (
 import { install as installCrypto } from 'react-native-quick-crypto';
 installCrypto();
 
+const ENABLE_CRYPTO_DIAGNOSTICS =
+  process.env.ENBOX_DEBUG_CRYPTO === '1';
+
 function wrapSubtleMethod<T extends keyof SubtleCrypto>(name: T) {
   const subtle = globalThis.crypto?.subtle as any;
   if (!subtle || typeof subtle[name] !== 'function') return;
@@ -81,14 +84,7 @@ function wrapSubtleMethod<T extends keyof SubtleCrypto>(name: T) {
   };
 }
 
-// Gate the diagnostic wrappers off under Jest. Node/Jest already provides a
-// working WebCrypto implementation, and wrapping its built-in SubtleCrypto
-// leaves async promise chains attached to the shared singleton that keep
-// Jest's event loop alive — the runner then exits 1 with open-handle leaks
-// even when every test passes. RN/Hermes (`NODE_ENV` = 'development' or
-// 'production') continues to install the wrappers so the diagnostic logs
-// remain available on device.
-if (process.env.NODE_ENV !== 'test') {
+if (ENABLE_CRYPTO_DIAGNOSTICS) {
   wrapSubtleMethod('generateKey');
   wrapSubtleMethod('importKey');
   wrapSubtleMethod('encrypt');
@@ -100,11 +96,12 @@ if (process.env.NODE_ENV !== 'test') {
 // ReadableStream / WritableStream / TransformStream
 import 'web-streams-polyfill/polyfill';
 
-// Diagnostic: log what's available after polyfills
-console.log('[polyfills] crypto.subtle:', typeof globalThis.crypto?.subtle);
-console.log('[polyfills] crypto.getRandomValues:', typeof globalThis.crypto?.getRandomValues);
-console.log('[polyfills] ReadableStream:', typeof globalThis.ReadableStream);
-console.log('[polyfills] TextEncoder:', typeof globalThis.TextEncoder);
-console.log('[polyfills] TextDecoder:', typeof globalThis.TextDecoder);
-console.log('[polyfills] Blob:', typeof globalThis.Blob);
-console.log('[polyfills] AbortSignal.timeout:', typeof (AbortSignal as any).timeout);
+if (ENABLE_CRYPTO_DIAGNOSTICS) {
+  console.log('[polyfills] crypto.subtle:', typeof globalThis.crypto?.subtle);
+  console.log('[polyfills] crypto.getRandomValues:', typeof globalThis.crypto?.getRandomValues);
+  console.log('[polyfills] ReadableStream:', typeof globalThis.ReadableStream);
+  console.log('[polyfills] TextEncoder:', typeof globalThis.TextEncoder);
+  console.log('[polyfills] TextDecoder:', typeof globalThis.TextDecoder);
+  console.log('[polyfills] Blob:', typeof globalThis.Blob);
+  console.log('[polyfills] AbortSignal.timeout:', typeof (AbortSignal as any).timeout);
+}

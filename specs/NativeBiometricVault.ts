@@ -27,14 +27,12 @@ export interface Spec extends TurboModule {
    * compare-and-swap primitive — so both implementations enforce the
    * pre-check).
    *
-   * **Per-alias serialization contract (round-15 F3)**: native
-   * implementations MUST serialize concurrent
-   * `generateAndStoreSecret` / `deleteSecret` calls on the SAME
-   * alias. A second concurrent call for an alias whose
-   * provisioning / deletion is still in flight MUST fail-fast with
-   * `VAULT_ERROR_OPERATION_IN_PROGRESS` rather than racing through
-   * the destructive `delete-then-create` window. Cross-alias calls
-   * remain parallel.
+   * Native implementations MUST serialize concurrent
+   * `generateAndStoreSecret` / `deleteSecret` calls on the same alias.
+   * A second concurrent call for an alias whose provisioning or deletion
+   * is still in flight MUST fail-fast with
+   * `VAULT_ERROR_OPERATION_IN_PROGRESS`. Cross-alias calls remain
+   * parallel.
    *
    * iOS satisfies this for free via the module-level serial dispatch
    * queue (`_keychainQueue`); Android uses a per-alias membership
@@ -65,19 +63,11 @@ export interface Spec extends TurboModule {
       /**
        * Optional biometric-prompt copy used during provisioning.
        *
-       * Round-9 F3 contract parity (VAL-VAULT-033). Android's
-       * `Cipher.init(ENCRYPT_MODE)` for a biometric-bound Keystore
-       * key naturally fires a `BiometricPrompt.authenticate()` with
-       * THIS title/message/cancel as part of provisioning, but iOS's
-       * `SecItemAdd` for a Keychain item with a `BiometryCurrentSet`
-       * ACL does NOT prompt by itself — the iOS implementation
-       * therefore drives an explicit `LAContext.evaluatePolicy(...)`
-       * BEFORE the `SecItemAdd` so both platforms gate provisioning
-       * on a fresh, user-present biometric authentication using the
-       * same caller-controlled copy. Tests / dev builds that have no
-       * UI thread (`currentActivity == null` on Android, missing
-       * `LAContext` on iOS) MUST still reject deterministically
-       * rather than silently provisioning under no biometric gate.
+       * Prompt copy used to gate provisioning on a fresh biometric
+       * authentication. Android performs this as part of Keystore cipher
+       * initialization; iOS evaluates local authentication explicitly
+       * before adding the Keychain item so both platforms share the same
+       * user-present contract.
        */
       promptTitle?: string;
       promptMessage?: string;

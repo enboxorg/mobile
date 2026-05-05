@@ -20,35 +20,17 @@
  * signal. A pending WalletConnect request, an in-flight agent, or a
  * deep link MUST NOT navigate away from these gates.
  */
-/**
- * Canonical biometric-relaunch gate route name. Split across two
- * template literal fragments so the literal substring never appears
- * verbatim in this file's source — this keeps the
- * `src/features/session/` directory clean of any substring matches
- * when the negative-grep sweep for legacy knowledge-factor route-name
- * literals runs. At the type level this resolves to the exact string
- * union member the navigator expects, so nothing downstream needs a
- * cast.
- */
-type BiometricRelaunchGateRouteName = `${'Biometric'}${'Un'}${'lock'}`;
-
 export type AppRouteName =
   | 'Loading'
   | 'Welcome'
   | 'BiometricUnavailable'
   | 'BiometricSetup'
   | 'RecoveryPhrase'
-  | BiometricRelaunchGateRouteName
+  | 'BiometricUnlock'
   | 'RecoveryRestore'
   | 'Main';
 
-/**
- * Value-level counterpart of `BiometricRelaunchGateRouteName`.
- * Assembled at runtime so the literal substring never appears in this
- * file's source (see type-level comment above).
- */
-const BIOMETRIC_RELAUNCH_GATE_ROUTE: BiometricRelaunchGateRouteName =
-  `${'Biometric' as const}${'Un' as const}${'lock' as const}`;
+export const BIOMETRIC_UNLOCK_ROUTE = 'BiometricUnlock' satisfies AppRouteName;
 
 export interface SessionSnapshot {
   hasCompletedOnboarding: boolean;
@@ -103,7 +85,7 @@ export function getInitialRoute(snapshot: SessionSnapshot): AppRouteName {
   if (snapshot.pendingBackup) return 'RecoveryPhrase';
 
   // (7) Vault exists + session is locked → prompt biometrics.
-  if (snapshot.isLocked) return BIOMETRIC_RELAUNCH_GATE_ROUTE;
+  if (snapshot.isLocked) return BIOMETRIC_UNLOCK_ROUTE;
 
   // (8) Vault ready + unlocked → main wallet.
   return 'Main';

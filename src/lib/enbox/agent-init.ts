@@ -15,6 +15,14 @@ import { AuthManager } from '@enbox/auth';
 import { BiometricVault } from './biometric-vault';
 import { SecureStorageAdapter } from './storage-adapter';
 
+const ENABLE_AGENT_INIT_LOGS = process.env.ENBOX_DEBUG_AGENT === '1';
+
+function debugLog(...args: unknown[]) {
+  if (ENABLE_AGENT_INIT_LOGS) {
+    console.log(...args);
+  }
+}
+
 function patchAgentDwnApiForMobile() {
   const flag = '__enboxMobilePatchedAgentDwnApi';
   if ((globalThis as any)[flag]) {
@@ -53,7 +61,7 @@ function patchAgentDwnApiForMobile() {
   });
 
   (globalThis as any)[flag] = true;
-  console.log('[agent-init] Patched AgentDwnApi.agent setter for mobile');
+  debugLog('[agent-init] Patched AgentDwnApi.agent setter for mobile');
 }
 
 /**
@@ -68,17 +76,17 @@ export function createBiometricVault(): BiometricVault {
 export async function initializeAgent() {
   patchAgentDwnApiForMobile();
 
-  console.log('[agent-init] Creating auth manager...');
+  debugLog('[agent-init] Creating auth manager...');
   const authManager = await AuthManager.create({
     storage: new SecureStorageAdapter(),
     localDwnStrategy: 'off',
   });
-  console.log('[agent-init] Auth manager created.');
+  debugLog('[agent-init] Auth manager created.');
 
-  console.log('[agent-init] Creating biometric vault...');
+  debugLog('[agent-init] Creating biometric vault...');
   const vault = createBiometricVault();
 
-  console.log('[agent-init] Creating agent...');
+  debugLog('[agent-init] Creating agent...');
   const agent = await EnboxUserAgent.create({
     dataPath: 'ENBOX_AGENT',
     // Mobile wallet runs against remote DID-document endpoints.
@@ -94,7 +102,7 @@ export async function initializeAgent() {
     // are ignored by BiometricVault.
     agentVault: vault,
   });
-  console.log('[agent-init] Agent created.');
+  debugLog('[agent-init] Agent created.');
 
   return { agent, authManager, vault };
 }
