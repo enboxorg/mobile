@@ -1456,3 +1456,299 @@ describe('useAgentStore.reset() — session-reset sentinel (Round-14 F3)', () =>
     expect(sessionSentinelDeletes.length).toBe(0);
   });
 });
+
+// ===========================================================================
+// Round-15 F2 — rollback failure surfacing + vault-intact defensive guard
+// ===========================================================================
+//
+// Round-14 F2 made the rollback iterate every SENTINEL_KEY (not just
+// the ones whose `set()` resolved successfully) so a partial-success
+// where `SecureStorageAdapter.set()` writes the value but rejects
+// from `trackKey()` could still wipe the on-disk sentinel value.
+// Round-15 F2 closes the dual hole:
+//
+//   (1) Rollback failures were SWALLOWED — only `console.warn`'d and
+//       the original sentinel-write error was rethrown unchanged. A
+//       caller (Settings UI / tests / future automation) had no
+//       structured signal that one or more sentinel values were
+//       still live on disk after a failed reset attempt. The fix
+//       captures every rollback failure into a `rollbackFailures`
+//       array and folds them into an aggregated thrown error so the
+//       caller can detect + report the partial-state on retry.
+//
+//   (2) The destructive cleanup helpers (`runPendingResetCleanups`)
+//       used to UNCONDITIONALLY run if any sentinel was on disk.
+//       Combined with (1), that meant a sentinel-write rollback
+//       failure could leave `enbox:enbox.vault.reset-pending=true`
+//       on disk, and the next cold launch's
+//       `runPendingVaultResetCleanup()` would call
+//       `NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS)`
+//       on a still-valid biometric vault. The user lost a working
+//       wallet on a transient SecureStorage failure with no way to
+//       distinguish from a genuine reset.
+//
+//       The fix adds an `isVaultStateIntact()` defensive guard at
+//       the top of `runPendingResetCleanups()`. If the vault's
+//       persisted state is consistent with "fully provisioned,
+//       never wiped" (`enbox.vault.initialized === 'true'` AND
+//       `NativeBiometricVault.hasSecret(WALLET_ROOT_KEY_ALIAS)`
+//       resolves true), every retry sentinel currently on disk is
+//       a false alarm and we clear them WITHOUT running the
+//       destructive cleanups. Genuine partial-wipe states leave at
+//       least one of those signals false (vault.reset clears
+//       INITIALIZED + the secret atomically), so a real
+//       interrupted wipe still gets retried.
+describe('useAgentStore.reset() — Round-15 F2 rollback failure surfacing', () => {
+  it('aggregates rollback failures into the thrown error so callers can detect a stale on-disk sentinel', async () => {
+    await useAgentStore.getState().initializeFirstLaunch();
+    nativeSecure.deleteItem.mockClear();
+
+    // Track which sentinel values landed on disk before the
+    // KEY_INDEX update threw.
+    const onDiskKeys = new Set<string>();
+    // On-disk key has the 'enbox:' prefix added by SecureStorageAdapter.
+    const sentinelKeyOnDisk = 'enbox:enbox.vault.reset-pending';
+    // The `rollbackFailures` array tracks the unprefixed key
+    // SecureStorageAdapter consumers use (the prefix is an adapter
+    // implementation detail).
+    const sentinelKeyForRollback = 'enbox.vault.reset-pending';
+
+    nativeSecure.setItem.mockImplementation(async (key: string, _value: string) => {
+      if (key === 'enbox:__keys__') {
+        // First KEY_INDEX update fails; subsequent ones succeed so
+        // the rollback path's own KEY_INDEX maintenance is not
+        // tangled with the failure under test.
+        if (!(global as any).__r15F2KeyIndexThrew) {
+          (global as any).__r15F2KeyIndexThrew = true;
+          const err = Object.assign(new Error('KEY_INDEX disk full'), {
+            code: 'SECURE_STORAGE_INDEX_IO',
+          });
+          throw err;
+        }
+      }
+      onDiskKeys.add(key);
+    });
+    // The rollback delete for the partially-persisted vault sentinel
+    // ALSO fails — this is the worst-case of round-15 F2. The
+    // aggregated error must surface this so the caller knows the
+    // sentinel is still live on disk.
+    nativeSecure.deleteItem.mockImplementation(async (key: string) => {
+      if (key === sentinelKeyOnDisk) {
+        throw new Error('SecureStorage delete failed for vault-reset sentinel');
+      }
+      onDiskKeys.delete(key);
+    });
+
+    let thrown: unknown = null;
+    try {
+      try {
+        await useAgentStore.getState().reset();
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      const message = (thrown as Error).message;
+      // Aggregated message must mention BOTH the underlying
+      // sentinel-write failure AND the rollback failure count, with
+      // the failed sentinel key listed by name.
+      expect(message).toMatch(/retry-sentinel write failed/);
+      expect(message).toMatch(/rollback could not remove/);
+      expect(message).toMatch(/enbox\.vault\.reset-pending/);
+      expect(message).toMatch(/KEY_INDEX disk full/);
+
+      // Structured `rollbackFailures` field present so callers can
+      // programmatically check + retry.
+      const rollbackFailures = (thrown as { rollbackFailures?: unknown })
+        .rollbackFailures;
+      expect(Array.isArray(rollbackFailures)).toBe(true);
+      const failures = rollbackFailures as Array<{ key: string; error: unknown }>;
+      expect(failures.length).toBeGreaterThanOrEqual(1);
+      expect(failures.map((f) => f.key)).toEqual(
+        expect.arrayContaining([sentinelKeyForRollback]),
+      );
+      // `cause` chain preserves the original SecureStorage write
+      // failure for downstream telemetry.
+      const cause = (thrown as { cause?: unknown }).cause;
+      expect((cause as Error).message).toMatch(/KEY_INDEX disk full/);
+    } finally {
+      delete (global as any).__r15F2KeyIndexThrew;
+    }
+  });
+
+  it('throws the original sentinel-write error UNWRAPPED when rollback succeeds (no false-positive aggregation)', async () => {
+    // Backwards-compat: the round-14 F2 happy path (rollback works)
+    // must NOT wrap the thrown error in the new aggregated shape.
+    // Callers / tests that match against the underlying error
+    // message keep working.
+    await useAgentStore.getState().initializeFirstLaunch();
+    nativeSecure.deleteItem.mockClear();
+
+    nativeSecure.setItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:__keys__') {
+        if (!(global as any).__r15F2RollbackOkKeyIndexThrew) {
+          (global as any).__r15F2RollbackOkKeyIndexThrew = true;
+          throw new Error('KEY_INDEX transient IO error');
+        }
+      }
+    });
+    // Rollback delete succeeds for every key — this is the round-14
+    // F2 path.
+    nativeSecure.deleteItem.mockResolvedValue(undefined);
+
+    let thrown: unknown = null;
+    try {
+      try {
+        await useAgentStore.getState().reset();
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      const message = (thrown as Error).message;
+      // Original message — NOT the aggregated wrapping one.
+      expect(message).toMatch(/KEY_INDEX transient IO error/);
+      expect(message).not.toMatch(/rollback could not remove/);
+      expect(
+        (thrown as { rollbackFailures?: unknown }).rollbackFailures,
+      ).toBeUndefined();
+    } finally {
+      delete (global as any).__r15F2RollbackOkKeyIndexThrew;
+    }
+  });
+});
+
+describe('runPendingResetCleanups — Round-15 F2 vault-intact defensive guard', () => {
+  // The defensive guard runs at the top of `runPendingResetCleanups`,
+  // which is invoked by every agent-init entry point
+  // (`initializeFirstLaunch`, `unlockAgent`, `resumePendingBackup`,
+  // `restoreFromMnemonic`). We exercise it through
+  // `initializeFirstLaunch()` because that path is the one a fresh
+  // user hits after a failed reset.
+  it('SKIPS destructive cleanups when sentinels are set + vault is intact (false-alarm path)', async () => {
+    // Fully-provisioned vault state on disk: INITIALIZED='true' AND
+    // `NativeBiometricVault.hasSecret` resolves true. The cleanup
+    // sentinels are also set — exactly the round-15 F2 partial-
+    // success scenario where a sentinel value landed via
+    // `SecureStorageAdapter.set()` but the rollback couldn't remove
+    // it.
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.vault.reset-pending') return 'true';
+      if (key === 'enbox:enbox.agent.leveldb-cleanup-pending') return 'true';
+      if (key === 'enbox:enbox.auth.reset-pending') return 'true';
+      if (key === 'enbox:enbox.session.reset-pending') return 'true';
+      if (key === 'enbox:enbox.vault.initialized') return 'true';
+      return null;
+    });
+    nativeBiometric.deleteSecret.mockClear();
+    (NativeBiometricVault as unknown as { hasSecret: jest.Mock }).hasSecret
+      .mockReset()
+      .mockResolvedValue(true);
+    mockDestroyDB.mockClear();
+
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    // CRITICAL: the destructive helpers MUST NOT have fired.
+    expect(nativeBiometric.deleteSecret).not.toHaveBeenCalled();
+    // LevelDB destroyDB might be invoked for OTHER reasons during
+    // `initializeFirstLaunch`, but never for the cleanup sentinel
+    // path. The defensive guard runs BEFORE
+    // `runPendingLevelDbCleanup()` so a stale leveldb sentinel
+    // never triggers a destroyDB call.
+    //
+    // The defensive guard ALSO clears every false-alarm sentinel so
+    // the next launch starts from a known-good state.
+    const deletedKeys = nativeSecure.deleteItem.mock.calls.map((c) => c[0]);
+    expect(deletedKeys).toEqual(
+      expect.arrayContaining([
+        'enbox:enbox.vault.reset-pending',
+        'enbox:enbox.agent.leveldb-cleanup-pending',
+        'enbox:enbox.auth.reset-pending',
+        'enbox:enbox.session.reset-pending',
+      ]),
+    );
+  });
+
+  it('RUNS destructive cleanups when sentinels are set + vault is wiped (genuine partial-reset retry)', async () => {
+    // Vault is wiped (INITIALIZED is null) — the defensive guard
+    // must NOT fire so a real partial-wipe retry actually completes.
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.vault.reset-pending') return 'true';
+      if (key === 'enbox:enbox.agent.leveldb-cleanup-pending') return 'true';
+      if (key === 'enbox:enbox.vault.initialized') return null; // wiped
+      return null;
+    });
+    (NativeBiometricVault as unknown as { hasSecret: jest.Mock }).hasSecret
+      .mockReset()
+      .mockResolvedValue(false);
+    nativeBiometric.deleteSecret.mockClear();
+    nativeBiometric.deleteSecret.mockResolvedValue(undefined);
+    mockDestroyDB.mockReset();
+    mockDestroyDB.mockImplementation(() => undefined);
+
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    // The vault deleteSecret retry ran (vault sentinel was set).
+    expect(nativeBiometric.deleteSecret).toHaveBeenCalled();
+    // The LevelDB destroyDB retry ran (leveldb sentinel was set).
+    expect(mockDestroyDB).toHaveBeenCalled();
+  });
+
+  it('SKIPS destructive cleanups when INITIALIZED read fails (fail-CLOSED on indeterminate state)', async () => {
+    // Defensive posture: when we cannot determine vault state, we
+    // assume "intact" so a transient SecureStorage read error during
+    // agent-init never destroys a vault we cannot prove is wipeable.
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.vault.reset-pending') return 'true';
+      if (key === 'enbox:enbox.vault.initialized') {
+        throw new Error('SecureStorage read failed');
+      }
+      return null;
+    });
+    nativeBiometric.deleteSecret.mockClear();
+
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    // No destructive cleanup fired despite the sentinel being on
+    // disk — defensive guard kicked in.
+    expect(nativeBiometric.deleteSecret).not.toHaveBeenCalled();
+  });
+
+  it('SKIPS destructive cleanups when hasSecret read fails (fail-CLOSED on indeterminate state)', async () => {
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.vault.reset-pending') return 'true';
+      if (key === 'enbox:enbox.vault.initialized') return 'true';
+      return null;
+    });
+    (NativeBiometricVault as unknown as { hasSecret: jest.Mock }).hasSecret
+      .mockReset()
+      .mockRejectedValue(new Error('Keystore probe failed'));
+    nativeBiometric.deleteSecret.mockClear();
+
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    // Vault state could not be determined → fail-CLOSED → no
+    // destructive cleanup.
+    expect(nativeBiometric.deleteSecret).not.toHaveBeenCalled();
+  });
+
+  it('CONTROL: cleanup runs normally when vault is wiped + no INITIALIZED read failure (regression guard)', async () => {
+    // Sanity: confirm the defensive guard does NOT trigger on a
+    // clean wiped-vault state. The vault sentinel is set,
+    // INITIALIZED is null, hasSecret is false — the destructive
+    // retry must run.
+    nativeSecure.getItem.mockImplementation(async (key: string) => {
+      if (key === 'enbox:enbox.vault.reset-pending') return 'true';
+      if (key === 'enbox:enbox.vault.initialized') return null;
+      return null;
+    });
+    (NativeBiometricVault as unknown as { hasSecret: jest.Mock }).hasSecret
+      .mockReset()
+      .mockResolvedValue(false);
+    nativeBiometric.deleteSecret.mockClear();
+    nativeBiometric.deleteSecret.mockResolvedValue(undefined);
+
+    await useAgentStore.getState().initializeFirstLaunch();
+
+    expect(nativeBiometric.deleteSecret).toHaveBeenCalled();
+  });
+});

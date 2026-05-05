@@ -385,7 +385,110 @@ export async function runPendingAuthResetCleanup(
  *      root vault material (the keys are scoped to specific
  *      dApps), but still must not leak across a wallet reset.
  */
+/**
+ * Round-15 F2: defensive guard that decides whether the per-cleanup
+ * destructive helpers should run at all. The `useAgentStore.reset()`
+ * sentinel-write loop (round-12 F1, round-13 self-review, round-14 F2)
+ * persists a sentinel for each retry-able wipe BEFORE any wipe
+ * actually starts. That ordering is required for crash-resilience —
+ * without it a SIGKILL between "wipe started" and "wipe finished"
+ * would leak the prior wallet's state past a reset that only
+ * partially completed.
+ *
+ * The dual edge case is the one round-14 F2 partially patched and
+ * round-15 F2 closes for good: a sentinel value can land on disk on
+ * the very FIRST write of an aborted reset cycle (e.g.
+ * `SecureStorageAdapter.set()` succeeds at
+ * `NativeSecureStorage.setItem()` and then rejects from the
+ * follow-up `trackKey()`; OR a SIGKILL hits between sentinel-write
+ * and the first wipe step). The reset never started destroying
+ * anything, but the sentinel says "wipe was in progress, retry".
+ * Pre-fix the next launch dutifully called
+ * `NativeBiometricVault.deleteSecret(...)` against a still-valid
+ * vault and the user lost their wallet.
+ *
+ * The discriminator: if the vault state is internally consistent
+ * with "fully provisioned, never touched"
+ * (`INITIALIZED_STORAGE_KEY === 'true'` AND `hasSecret(WALLET_ROOT_KEY_ALIAS)`
+ * is `true`), the sentinels are false alarms. Pre-condition: a
+ * successful `vault.reset()` clears `INITIALIZED_STORAGE_KEY` AND
+ * deletes the secret atomically (round-3 finding 4), so a partial
+ * wipe state ALWAYS leaves at least one of those signals false.
+ *
+ * Trade-off (deliberate): if a user genuinely triggered a reset
+ * AND the process was SIGKILL'd between the sentinel write and the
+ * first wipe step, the next launch will see "vault intact" and
+ * skip the cleanup. The user has to re-trigger reset from Settings
+ * — one extra tap. That is acceptable; the alternative
+ * (run the destructive cleanup) would mean a transient
+ * SecureStorage hiccup during the sentinel write loop nukes a
+ * working wallet.
+ *
+ * Stays defensive on read failure: if either `INITIALIZED` or
+ * `hasSecret` cannot be determined (transient SecureStorage /
+ * Keystore error), we do NOT proceed with destructive cleanup. The
+ * cleanup retries naturally on a future launch when the underlying
+ * IO recovers; the user's wallet is never put at risk by an
+ * indeterminate read.
+ */
+async function isVaultStateIntact(): Promise<boolean> {
+  let initialized: string | null;
+  try {
+    const sentinelStorage = new SecureStorageAdapter();
+    initialized = await sentinelStorage.get(INITIALIZED_STORAGE_KEY);
+  } catch (err) {
+    console.warn(
+      '[agent-store] isVaultStateIntact: SecureStorage read for INITIALIZED failed; assuming "intact" to avoid destroying a possibly-valid vault on indeterminate state:',
+      err,
+    );
+    return true;
+  }
+  if (initialized !== 'true') {
+    // Vault was wiped or never provisioned. Cleanup helpers may run
+    // safely; their destructive ops are idempotent on absent state.
+    return false;
+  }
+  let hasSecret: boolean;
+  try {
+    hasSecret = await NativeBiometricVault.hasSecret(WALLET_ROOT_KEY_ALIAS);
+  } catch (err) {
+    console.warn(
+      '[agent-store] isVaultStateIntact: NativeBiometricVault.hasSecret failed; assuming "intact" to avoid destroying a possibly-valid vault on indeterminate state:',
+      err,
+    );
+    return true;
+  }
+  return hasSecret;
+}
+
 async function runPendingResetCleanups(): Promise<void> {
+  // Round-15 F2: defensive vault-intact guard. If the vault is fully
+  // provisioned (INITIALIZED='true' AND hasSecret), every retry
+  // sentinel currently on disk is a false alarm — the prior reset
+  // either aborted at the sentinel-write step (round-14 F2 partial-
+  // success or round-15 F2 rollback failure) or got SIGKILL'd before
+  // any wipe started. Clear the sentinels and skip the destructive
+  // cleanups.
+  if (await isVaultStateIntact()) {
+    const sentinelStorage = new SecureStorageAdapter();
+    const FALSE_ALARM_KEYS = [
+      VAULT_RESET_PENDING_KEY,
+      LEVELDB_CLEANUP_PENDING_KEY,
+      AUTH_RESET_PENDING_KEY,
+      SESSION_RESET_PENDING_KEY,
+    ] as const;
+    for (const key of FALSE_ALARM_KEYS) {
+      try {
+        await sentinelStorage.remove(key);
+      } catch (err) {
+        console.warn(
+          `[agent-store] runPendingResetCleanups: vault is intact but failed to clear stale sentinel "${key}" (next launch will retry the same defensive guard):`,
+          err,
+        );
+      }
+    }
+    return;
+  }
   await runPendingVaultResetCleanup();
   await runPendingLevelDbCleanup();
   await runPendingAuthResetCleanup();
@@ -1344,12 +1447,28 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // unconditionally is safe — it covers the partial-success
       // case AND short-circuits cleanly when `set()` never wrote
       // the value in the first place.
+      //
+      // Round-15 F2: rollback failures are now CAPTURED (not
+      // swallowed) and folded into the thrown error. Pre-fix every
+      // rollback `remove()` failure was only `console.warn`'d, so
+      // the caller (Settings UI / tests) had no signal that one or
+      // more sentinel values still survived on disk. The next cold
+      // launch's `runPendingResetCleanups()` then read those stale
+      // sentinels and ran the destructive cleanup against a vault
+      // the user thought they had aborted resetting. The defensive
+      // `isVaultStateIntact` guard added below is the primary
+      // safety net; surfacing the rollback failures here gives the
+      // caller an explicit signal to retry / report when the
+      // SecureStorage IO itself is misbehaving (the upstream cause
+      // of the partial-success scenario in the first place).
+      const rollbackFailures: Array<{ key: string; error: unknown }> = [];
       for (const key of SENTINEL_KEYS) {
         try {
           await sentinelStorage.remove(key);
         } catch (rollbackErr) {
+          rollbackFailures.push({ key, error: rollbackErr });
           console.warn(
-            `[agent-store] reset: failed to roll back retry sentinel "${key}" after a sentinel write failure (next cold launch may run a no-op cleanup retry):`,
+            `[agent-store] reset: failed to roll back retry sentinel "${key}" after a sentinel write failure:`,
             rollbackErr,
           );
         }
@@ -1358,6 +1477,28 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         '[agent-store] reset: refusing to start wipe — retry-sentinel persistence failed (failing closed so a partial reset cannot leak past a non-existent retry path):',
         firstSentinelWriteError,
       );
+      if (rollbackFailures.length > 0) {
+        const failedKeys = rollbackFailures.map((f) => f.key).join(', ');
+        const primaryMsg =
+          firstSentinelWriteError instanceof Error
+            ? firstSentinelWriteError.message
+            : String(firstSentinelWriteError);
+        const aggregate = new Error(
+          `useAgentStore.reset(): retry-sentinel write failed AND rollback could ` +
+            `not remove ${rollbackFailures.length} stale sentinel value(s) ` +
+            `(${failedKeys}). The next cold launch's runPendingResetCleanups() ` +
+            `vault-intact defensive guard (round-15 F2) will detect the stale ` +
+            `sentinels and clear them WITHOUT destroying wallet data so long as ` +
+            `INITIALIZED + hasSecret remain consistent on disk. Underlying ` +
+            `sentinel-write failure: ${primaryMsg}`,
+        );
+        (aggregate as unknown as { cause?: unknown }).cause =
+          firstSentinelWriteError;
+        (
+          aggregate as unknown as { rollbackFailures?: typeof rollbackFailures }
+        ).rollbackFailures = rollbackFailures;
+        throw aggregate;
+      }
       throw firstSentinelWriteError;
     }
 

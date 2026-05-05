@@ -914,4 +914,146 @@ describe('useSessionStore', () => {
       );
     });
   });
+
+  // -------------------------------------------------------------------
+  // Round-15 F1 — orphan-secret promotion MUST NOT fire when the
+  // SESSION_RESET_PENDING sentinel is set
+  // -------------------------------------------------------------------
+  //
+  // The Round-14 F3 ghost-state guard ignores SESSION_KEY when the
+  // sentinel is set. Pre-Round-15 hydrate STILL ran orphan-secret
+  // promotion off `hasSecret + (hasCompletedOnboarding ||
+  // vaultPriorInitialized)`. If the prior `useAgentStore.reset()`
+  // failed at the vault step (vault wipe rejected, INITIALIZED='true'
+  // and the native secret still present), orphan-promotion fired:
+  //   committedHasIdentity=false  // sentinel ignored SESSION_KEY
+  //   hasSecret=true              // vault wipe failed
+  //   vaultPriorInitialized=true  // INITIALIZED still 'true'
+  //   isOrphanedSecret=true
+  // → effectiveHasIdentity=true + effectiveIsPendingFirstBackup=true
+  // → router lands the user on RecoveryPhrase showing the OLD
+  //   wallet's mnemonic (re-derived from the still-resident vault
+  //   secret), defeating the sentinel's stated "Welcome flow"
+  //   contract.
+  //
+  // The fix gates `isOrphanedSecret` on `sessionResetPending !== 'true'`
+  // so the ghost-state guard ALWAYS routes to Welcome regardless of
+  // residual vault state.
+  describe('Round-15 F1 — sentinel suppresses orphan-secret promotion', () => {
+    const SESSION_KEY = 'session:state';
+    const SESSION_RESET_PENDING_RAW_KEY = 'enbox:enbox.session.reset-pending';
+    const VAULT_INITIALIZED_RAW_KEY = 'enbox:enbox.vault.initialized';
+
+    it('refuses orphan promotion when sentinel set + INITIALIZED=true + hasSecret=true (vault-wipe-failed scenario)', async () => {
+      // Failure mode reproduced: prior `useAgentStore.reset()` failed
+      // at the vault step. The vault is intact (INITIALIZED='true',
+      // hasSecret=true) but session.reset() was skipped, so the
+      // SESSION_RESET sentinel and a stale-or-absent SESSION_KEY are
+      // both on disk.
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_RESET_PENDING_RAW_KEY) return 'true';
+        if (key === VAULT_INITIALIZED_RAW_KEY) return 'true';
+        // SESSION_KEY itself absent; even if it were stale the
+        // sentinel-driven ignore branch would skip it.
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      // CRITICAL: orphan promotion MUST NOT fire when the sentinel
+      // is set, even though vault-prior-init + hasSecret would
+      // otherwise satisfy the orphan condition.
+      expect(state.hasIdentity).toBe(false);
+      expect(state.isPendingFirstBackup).toBe(false);
+      expect(state.hasCompletedOnboarding).toBe(false);
+    });
+
+    it('refuses orphan promotion when sentinel set + biometricState=ready + hasSecret=true (alternate vaultPriorInitialized signal)', async () => {
+      // `vaultPriorInitialized` accepts EITHER `INITIALIZED='true'`
+      // OR `biometricState ∈ {ready, invalidated}`. The sentinel
+      // guard MUST hold against both signal sources.
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_RESET_PENDING_RAW_KEY) return 'true';
+        if (key === 'enbox:enbox.vault.biometric-state') return 'ready';
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.hasIdentity).toBe(false);
+      expect(state.isPendingFirstBackup).toBe(false);
+    });
+
+    it('refuses orphan promotion when sentinel set + biometricState=invalidated + hasSecret=true', async () => {
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_RESET_PENDING_RAW_KEY) return 'true';
+        if (key === 'enbox:enbox.vault.biometric-state') return 'invalidated';
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.hasIdentity).toBe(false);
+      expect(state.isPendingFirstBackup).toBe(false);
+    });
+
+    it('refuses orphan promotion when sentinel set even with stale SESSION_KEY + hasSecret=true + INITIALIZED=true', async () => {
+      // Worst-case stack: stale SESSION_KEY says "completed onboarding",
+      // INITIALIZED='true', vault has a secret. Pre-Round-15 this
+      // produced effectiveHasCompletedOnboarding=true via the orphan
+      // path even after the sentinel ignored SESSION_KEY. The fix
+      // forces every effective-* signal to fresh-install defaults.
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === SESSION_KEY) {
+          return JSON.stringify({
+            hasCompletedOnboarding: true,
+            hasIdentity: true,
+            isPendingFirstBackup: false,
+          });
+        }
+        if (key === SESSION_RESET_PENDING_RAW_KEY) return 'true';
+        if (key === VAULT_INITIALIZED_RAW_KEY) return 'true';
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      expect(state.hasIdentity).toBe(false);
+      expect(state.hasCompletedOnboarding).toBe(false);
+      expect(state.isPendingFirstBackup).toBe(false);
+    });
+
+    it('CONTROL: orphan promotion still fires when sentinel ABSENT + hasSecret=true + INITIALIZED=true (legacy crash-resilience path preserved)', async () => {
+      // The orphan-promotion guard is the ROUND-7 F2 crash-resilience
+      // path: a SIGKILL between `_doInitialize()`'s INITIALIZED='true'
+      // write and the SESSION_KEY persistence on the very first
+      // launch must still produce `isPendingFirstBackup=true` so the
+      // user is routed to RecoveryPhrase to back up the new wallet.
+      // The Round-15 F1 fix MUST NOT regress this path when the
+      // session-reset sentinel is absent.
+      nativeBiometric.hasSecret.mockResolvedValue(true);
+      mockedGetSecureItem.mockImplementation(async (key) => {
+        if (key === VAULT_INITIALIZED_RAW_KEY) return 'true';
+        // No SESSION_RESET sentinel, no SESSION_KEY.
+        return null;
+      });
+
+      await useSessionStore.getState().hydrate();
+
+      const state = useSessionStore.getState();
+      // Orphan promotion should fire — user is sent to RecoveryPhrase
+      // to back up the in-progress wallet.
+      expect(state.hasIdentity).toBe(true);
+      expect(state.isPendingFirstBackup).toBe(true);
+      expect(state.hasCompletedOnboarding).toBe(true);
+    });
+  });
 });

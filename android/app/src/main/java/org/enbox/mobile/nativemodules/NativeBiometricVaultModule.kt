@@ -19,6 +19,7 @@ import java.security.KeyStore
 import java.security.KeyStoreException
 import java.security.SecureRandom
 import java.security.UnrecoverableKeyException
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -82,6 +83,12 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         // failure cannot wipe a working wallet via the silent
         // delete-before-write pattern.
         private const val ERR_ALREADY_INITIALIZED = "VAULT_ERROR_ALREADY_INITIALIZED"
+        // Round-15 F3: returned when a concurrent
+        // `generateAndStoreSecret` / `deleteSecret` is already in
+        // flight for the SAME alias. Cross-alias calls remain
+        // parallel.
+        private const val ERR_OPERATION_IN_PROGRESS =
+            "VAULT_ERROR_OPERATION_IN_PROGRESS"
 
         // Round-4 Finding 3: strict lower-case-hex validator for the
         // optional `secretHex` parameter on `generateAndStoreSecret`.
@@ -91,6 +98,82 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
         // iOS and JS in lock-step — see the call site for the full
         // contract-drift rationale.
         private val LOWER_HEX_64_REGEX = Regex("^[0-9a-f]{64}$")
+
+        /**
+         * Round-15 F3: per-alias serialization for state-changing
+         * operations (`generateAndStoreSecret`, `deleteSecret`).
+         *
+         * Pre-fix the Android module had no concurrency guard at the
+         * native level. Two concurrent `generateAndStoreSecret(alias)`
+         * calls both passed the `hasPrefs && hasKey` non-upsert check
+         * (each sees an empty alias state), then both ran
+         * `deleteKeystoreKeyBestEffort(alias) + createKeystoreKey(alias)`
+         * back-to-back — the second `KeyGenParameterSpec.Builder` call
+         * silently overwrites the alias entry created by the first.
+         * Each call's `Cipher` is bound to its own (now-mutated) key,
+         * so:
+         *   - The user authenticates whichever BiometricPrompt is on
+         *     screen. doFinal succeeds / fails depending on which key
+         *     "won" the race; the other call's prompt is left dangling
+         *     until the user cancels, at which point its
+         *     `deleteKeystoreKeyBestEffort` wipes the alias the
+         *     succeeded call just persisted ciphertext under.
+         *   - Result: prefs encrypted under a key that no longer
+         *     exists in the Keystore, surfaced as `KEY_INVALIDATED`
+         *     on the very first unlock attempt with no recovery path
+         *     short of a full reset.
+         *
+         * The JS layer (`BiometricSetupScreen`) already has a
+         * synchronous tap-guard, but the TurboModule contract is
+         * public — deep links, attached debuggers, dev tools, and
+         * future native consumers all reach the module directly. The
+         * JS guard cannot block multi-instance JS callers either
+         * (e.g. a BiometricVault constructed in a worker / second
+         * RN runtime). Native serialization is the only way to
+         * guarantee the contract end-to-end.
+         *
+         * Implementation: `ConcurrentHashMap.newKeySet()` membership
+         * acts as a non-reentrant per-alias lock. `add(alias)` is
+         * atomic and returns `false` when the alias is already in the
+         * set; `remove(alias)` is the matching release. The set lives
+         * on the companion object so the lock is process-scoped (two
+         * `NativeBiometricVaultModule` instances within the same RN
+         * process share the same lock), which mirrors what iOS gets
+         * for free via the module-level serial dispatch queue. Native
+         * module re-instantiation (RN reload during dev) starts with
+         * an empty set, which is correct because no Keystore op can
+         * outlive the process.
+         *
+         * Released on every terminal path (early returns, biometric
+         * callbacks, exceptions). The `BiometricPrompt.authenticate`
+         * callback fires on the system executor we provide, NOT the
+         * RN module thread that acquired the lock — `Set.remove` is
+         * thread-agnostic so this works correctly across thread
+         * boundaries (a `ReentrantLock` would not, because its
+         * thread-affinity check would throw
+         * `IllegalMonitorStateException` on cross-thread release).
+         */
+        private val aliasInProgress: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
+
+        /**
+         * Atomically claim `alias` for an exclusive operation. Returns
+         * `true` when the caller now owns the lock and MUST eventually
+         * call `releaseAliasLock(alias)`; returns `false` when another
+         * caller is still holding it (use `ERR_OPERATION_IN_PROGRESS`).
+         */
+        private fun tryAcquireAliasLock(alias: String): Boolean =
+            aliasInProgress.add(alias)
+
+        /**
+         * Release a previously-acquired per-alias lock. Idempotent on
+         * already-released aliases (returns silently if the lock was
+         * never held or has already been released — protects against
+         * double-release on overlapping cleanup paths).
+         */
+        private fun releaseAliasLock(alias: String) {
+            aliasInProgress.remove(alias)
+        }
     }
 
     override fun getName(): String = NAME
@@ -344,6 +427,43 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             return
         }
 
+        // Round-15 F3: claim the per-alias lock BEFORE any Keystore /
+        // SharedPreferences mutation. Concurrent calls on the SAME
+        // alias fail fast with VAULT_ERROR_OPERATION_IN_PROGRESS so
+        // they cannot race through the destructive
+        // `deleteKeystoreKeyBestEffort + createKeystoreKey` pair below.
+        // Cross-alias calls are unaffected (different alias =
+        // different membership entry).
+        //
+        // EVERY terminal path from here forward MUST call
+        // `releaseAliasLock(keyAlias)` (the helper-released paths and
+        // the BiometricPrompt callback paths all do). The
+        // `lockReleased` boolean prevents double-release across paths
+        // that overlap on early-exit logic (e.g. a callback that
+        // resolved before an outer catch fires).
+        if (!tryAcquireAliasLock(keyAlias)) {
+            promise.reject(
+                ERR_OPERATION_IN_PROGRESS,
+                "A generateAndStoreSecret/deleteSecret is already in progress for this alias",
+            )
+            return
+        }
+        // Lambda variable (NOT a local function): a Kotlin lambda is a
+        // first-class object that is always-correctly captured by
+        // anonymous-object subclasses (`BiometricPrompt.AuthenticationCallback`
+        // below). Local functions can be called from the enclosing
+        // scope but are not guaranteed to be reachable from an
+        // anonymous-object instance method (the inner-class capture
+        // semantics differ across Kotlin versions). Lambdas dodge
+        // that ambiguity entirely.
+        val lockReleased = booleanArrayOf(false)
+        val releaseAliasLockOnce: () -> Unit = {
+            if (!lockReleased[0]) {
+                lockReleased[0] = true
+                releaseAliasLock(keyAlias)
+            }
+        }
+
         // Non-destructive contract (VAL-VAULT-030): refuse to provision
         // over an existing alias. The pre-fix code path silently
         // `deleteKeystoreKey()`'d the existing key BEFORE creating the
@@ -395,6 +515,7 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                     "A biometric secret already exists for this alias; " +
                         "delete it explicitly before re-provisioning",
                 )
+                releaseAliasLockOnce()
                 return
             }
             // At this point at least one of (prefs, key) is genuinely
@@ -413,6 +534,7 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                 "Could not determine whether a biometric secret already exists; " +
                     "refusing to provision to avoid overwriting a valid alias",
             )
+            releaseAliasLockOnce()
             return
         }
 
@@ -441,6 +563,7 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                     "secretHex must be exactly 64 lower-case hex characters " +
                         "(^[0-9a-f]{64}\$)",
                 )
+                releaseAliasLockOnce()
                 return
             }
             for (i in 0 until SECRET_BYTES) {
@@ -487,16 +610,19 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             secret.fill(0.toByte())
             deleteKeystoreKeyBestEffort(keyAlias)
             promise.reject(ERR_KEY_INVALIDATED, "Keystore key was invalidated")
+            releaseAliasLockOnce()
             return
         } catch (e: GeneralSecurityException) {
             secret.fill(0.toByte())
             deleteKeystoreKeyBestEffort(keyAlias)
             promise.reject(mapKeystoreException(e), "generateAndStoreSecret failed")
+            releaseAliasLockOnce()
             return
         } catch (e: Exception) {
             secret.fill(0.toByte())
             deleteKeystoreKeyBestEffort(keyAlias)
             promise.reject(ERR_VAULT, "generateAndStoreSecret failed")
+            releaseAliasLockOnce()
             return
         }
 
@@ -516,6 +642,7 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             secret.fill(0.toByte())
             deleteKeystoreKeyBestEffort(keyAlias)
             promise.reject(ERR_VAULT, "No FragmentActivity available for biometric prompt")
+            releaseAliasLockOnce()
             return
         }
 
@@ -538,7 +665,15 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                     secret.fill(0.toByte())
                     deleteKeystoreKeyBestEffort(keyAlias)
                     val code = mapBiometricError(errorCode)
-                    promise.reject(code, "Biometric authentication failed")
+                    try {
+                        promise.reject(code, "Biometric authentication failed")
+                    } finally {
+                        // Round-15 F3: callback fires on the system
+                        // executor — different thread from the one
+                        // that acquired the alias lock. Set-based
+                        // release is thread-agnostic so this works.
+                        releaseAliasLockOnce()
+                    }
                 }
 
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
@@ -581,6 +716,13 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                         // Zero the in-memory secret buffer once the
                         // encrypted ciphertext has landed on disk.
                         secret.fill(0.toByte())
+                        // Round-15 F3: terminal callback path —
+                        // release the per-alias lock unconditionally
+                        // so a subsequent generateAndStoreSecret /
+                        // deleteSecret on the same alias is no longer
+                        // blocked, regardless of which try/catch arm
+                        // resolved or rejected the promise above.
+                        releaseAliasLockOnce()
                     }
                 }
 
@@ -588,7 +730,14 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                     // Single mismatch; BiometricPrompt stays open for
                     // retry. Do NOT reject here — the terminal
                     // lockout / cancellation comes through
-                    // onAuthenticationError above.
+                    // onAuthenticationError above. The per-alias lock
+                    // also stays held: BiometricPrompt is still on
+                    // screen with our `cipher` operation handle live,
+                    // and a concurrent `generateAndStoreSecret` on
+                    // the same alias would still race with the
+                    // pending Keystore op. The lock is released on
+                    // whichever terminal callback (success/error)
+                    // fires next.
                 }
             }
 
@@ -611,6 +760,12 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                     secret.fill(0.toByte())
                     deleteKeystoreKeyBestEffort(keyAlias)
                     promise.reject(ERR_VAULT, "Failed to start biometric prompt")
+                    // Round-15 F3: BiometricPrompt construction or
+                    // .authenticate() threw before the system could
+                    // schedule the callback — release the per-alias
+                    // lock here so the call is not stuck holding it
+                    // forever.
+                    releaseAliasLockOnce()
                 }
             }
         }
@@ -806,6 +961,22 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             promise.resolve(null)
             return
         }
+        // Round-15 F3: serialise against `generateAndStoreSecret` on
+        // the SAME alias. Without the lock, a concurrent
+        // generate→delete pair could race through the
+        // `deleteKeystoreKeyBestEffort + createKeystoreKey` window in
+        // generate, and the delete here would either wipe the freshly
+        // provisioned key (orphaning the prefs the generate just
+        // committed) or run before the generate's prefs commit
+        // landed. Either way the user ends up with a half-provisioned
+        // vault. Cross-alias deletes remain parallel.
+        if (!tryAcquireAliasLock(keyAlias)) {
+            promise.reject(
+                ERR_OPERATION_IN_PROGRESS,
+                "A generateAndStoreSecret/deleteSecret is already in progress for this alias",
+            )
+            return
+        }
         try {
             // Round-11 F1: use `commit()` (synchronous + returns boolean)
             // instead of `apply()` (async + fire-and-forget). The pre-fix
@@ -852,6 +1023,8 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                 ERR_VAULT,
                 "deleteSecret failed: ${e.javaClass.simpleName}: ${e.message ?: "<no message>"}",
             )
+        } finally {
+            releaseAliasLock(keyAlias)
         }
     }
 

@@ -26,6 +26,26 @@ export interface Spec extends TurboModule {
    * Android can offer that — Keychain and Keystore both lack a
    * compare-and-swap primitive — so both implementations enforce the
    * pre-check).
+   *
+   * **Per-alias serialization contract (round-15 F3)**: native
+   * implementations MUST serialize concurrent
+   * `generateAndStoreSecret` / `deleteSecret` calls on the SAME
+   * alias. A second concurrent call for an alias whose
+   * provisioning / deletion is still in flight MUST fail-fast with
+   * `VAULT_ERROR_OPERATION_IN_PROGRESS` rather than racing through
+   * the destructive `delete-then-create` window. Cross-alias calls
+   * remain parallel.
+   *
+   * iOS satisfies this for free via the module-level serial dispatch
+   * queue (`_keychainQueue`); Android uses a per-alias membership
+   * lock at the companion-object level. The JS layer
+   * (`BiometricSetupScreen`) also has a synchronous tap-guard, but
+   * the TurboModule contract is public — deep links, attached
+   * debuggers, dev tools, and future native consumers all reach the
+   * module directly, and JS-side serialization cannot guarantee
+   * exclusivity across multiple `BiometricVault` instances within
+   * the same RN process. Native serialization is the only way to
+   * guarantee the contract end-to-end.
    */
   generateAndStoreSecret(
     keyAlias: string,

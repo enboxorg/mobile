@@ -772,6 +772,8 @@ describe('BiometricVault — IdentityVault conformance (VAL-VAULT-024)', () => {
         'VAULT_ERROR_USER_CANCELED',
         'VAULT_ERROR_KEY_INVALIDATED',
         'VAULT_ERROR_UNSUPPORTED',
+        // Round-15 F3: per-alias serialization rejection from native.
+        'VAULT_ERROR_OPERATION_IN_PROGRESS',
         'VAULT_ERROR',
       ]),
     );
@@ -1739,6 +1741,16 @@ describe('mapNativeErrorToVaultError', () => {
     // existing alias. The mapper preserves the code through to the
     // VaultError surface so the JS layer's UI logic can branch on it.
     ['VAULT_ERROR_ALREADY_INITIALIZED', 'VAULT_ERROR_ALREADY_INITIALIZED'],
+    // Round-15 F3: native rejects with this code when a concurrent
+    // generateAndStoreSecret/deleteSecret is already in flight on the
+    // SAME alias (per-alias serialization contract). The mapper
+    // preserves the code so the JS layer can detect the in-progress
+    // state and show appropriate recovery UI instead of treating it
+    // as a generic VAULT_ERROR.
+    [
+      'VAULT_ERROR_OPERATION_IN_PROGRESS',
+      'VAULT_ERROR_OPERATION_IN_PROGRESS',
+    ],
   ])('maps %s to %s', (nativeCode, vaultCode) => {
     const err = withErrorCode(nativeCode);
     expect(mapNativeErrorToVaultError(err)?.code).toBe(vaultCode);

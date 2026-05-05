@@ -473,7 +473,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         rawVaultInitialized === 'true' ||
         rawBiometricState === 'ready' ||
         rawBiometricState === 'invalidated';
+      // Round-15 F1: when the SESSION_RESET_PENDING sentinel is set
+      // we MUST refuse orphan-secret promotion. Pre-fix the orphan
+      // path still fired off `hasSecret + vaultPriorInitialized`
+      // even when SESSION_KEY had been ignored — so a partially-
+      // failed `useAgentStore.reset()` (e.g. vault wipe failed,
+      // INITIALIZED=`true` still on disk, secret still in Keystore)
+      // would set `hasIdentity=true` + `isPendingFirstBackup=true`
+      // and route the user to the RecoveryPhrase backup of the
+      // VERY WALLET they just tried to delete, defeating the
+      // sentinel's stated ghost-state guard ("user lands on the
+      // fresh-install Welcome flow regardless"). Gating the orphan
+      // predicate on the sentinel preserves the Round-7 F2
+      // crash-resilience for clean (non-reset) install timelines
+      // AND honours Round-14 F3's promise of a Welcome route on a
+      // failed-or-aborted reset.
       const isOrphanedSecret =
+        sessionResetPending !== 'true' &&
         !committedHasIdentity &&
         hasSecret &&
         (committedHasCompletedOnboarding || vaultPriorInitialized);

@@ -116,6 +116,12 @@ export const VAULT_ERROR_CODES = [
   'VAULT_ERROR_USER_CANCELED',
   'VAULT_ERROR_KEY_INVALIDATED',
   'VAULT_ERROR_UNSUPPORTED',
+  // Round-15 F3: surfaced when a concurrent
+  // generateAndStoreSecret/deleteSecret is already in flight on the
+  // SAME alias. Native module serializes per-alias to prevent the
+  // delete-then-create race that could otherwise wipe a working
+  // wallet through two simultaneous setup attempts.
+  'VAULT_ERROR_OPERATION_IN_PROGRESS',
   'VAULT_ERROR',
 ] as const;
 
@@ -702,6 +708,16 @@ export function mapNativeErrorToVaultError(err: unknown): VaultError | null {
       // overwrites and the canonical error code flows through here.
       return new VaultError(
         'VAULT_ERROR_ALREADY_INITIALIZED',
+        message ?? code,
+      );
+    case 'VAULT_ERROR_OPERATION_IN_PROGRESS':
+      // Round-15 F3: native module rejected because a concurrent
+      // generateAndStoreSecret / deleteSecret is already running on
+      // the SAME alias. Surface to the JS layer so the caller (e.g.
+      // BiometricSetupScreen) can show a "please wait" recovery UI
+      // instead of treating it as a generic VAULT_ERROR.
+      return new VaultError(
+        'VAULT_ERROR_OPERATION_IN_PROGRESS',
         message ?? code,
       );
     default:
