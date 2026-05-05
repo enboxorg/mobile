@@ -318,3 +318,196 @@ export async function createRNLevelDatabase(
   await db.open();
   return db;
 }
+
+/**
+ * Every LevelDB location the `EnboxUserAgent` opens AS A CHILD of
+ * `dataPath`. Used by `destroyAgentLevelDatabases()` to wipe persistent
+ * agent state during reset.
+ *
+ * This mirrors the upstream `@enbox/agent` and `@enbox/dwn-sdk-js`
+ * sub-store names. Keep in sync with `node_modules/@enbox/agent/src/
+ * enbox-user-agent.ts` / `dwn-api.ts`. The replication-cursor / dead-
+ * letter / ledger DB owned by `SyncEngineLevel` is NOT a child path
+ * (see `AGENT_LEVEL_DB_ROOT_PATH` below) so it is intentionally
+ * absent from this list — round-13 F2.
+ */
+export const AGENT_LEVEL_DB_SUBPATHS: readonly string[] = [
+  'VAULT_STORE',
+  'DID_RESOLVERCACHE',
+  'DWN_DATASTORE',
+  'DWN_STATEINDEX',
+  'DWN_MESSAGESTORE',
+  'DWN_MESSAGEINDEX',
+  'DWN_RESUMABLETASKSTORE',
+];
+
+/**
+ * Round-13 F2: the `EnboxUserAgent` constructs `SyncEngineLevel` with
+ * `new SyncEngineLevel({ dataPath })`, and inside that class the
+ * underlying LevelDB is opened DIRECTLY at `dataPath` (NOT at a
+ * subpath such as `${dataPath}/SYNC_STORE`):
+ *
+ *     // node_modules/@enbox/agent/src/sync-engine-level.ts:282
+ *     this._db = (db) ? db : new Level(dataPath ?? 'DATA/AGENT/SYNC_STORE');
+ *
+ * The replication ledger, dead-letter store, and watermark cursors
+ * live as sublevels of THAT root DB. So `${dataPath}/SYNC_STORE`
+ * does not actually exist on disk — destroying it was a no-op and
+ * left every byte of sync ledger / dead-letter / DWN-cursor data
+ * resident across reset.
+ *
+ * `destroyAgentLevelDatabases()` therefore destroys both the
+ * subpath children AND the root path (this constant). Order:
+ * children first, root last. LevelDB's `DestroyDB` only removes
+ * its OWN files (CURRENT, MANIFEST-*, LOCK, *.log, *.ldb) and does
+ * NOT recurse into subdirectories, so destroying the root after
+ * the children is safe — the child subdirectories are already
+ * gone, leaving only the sync DB's flat files at the root for
+ * the final destroy to remove.
+ *
+ * Empty string is the canonical "destroy at the root path itself"
+ * marker; the join below special-cases it to skip the trailing
+ * slash that would otherwise rename the target to `${dataPath}/`.
+ */
+export const AGENT_LEVEL_DB_ROOT_PATH = '';
+
+/**
+ * Predicate matching error messages emitted by ``LevelDB.destroyDB``
+ * for the "database does not exist on disk" idempotent path. This is
+ * a legitimate no-op for a reset flow — the caller's intent is "wipe
+ * everything", and "nothing to wipe" satisfies that. Anything else
+ * (permission denied, I/O error, file-system corruption, missing
+ * native bridge) is a HARD failure and MUST surface so the wallet
+ * doesn't fall back to a half-clean state.
+ *
+ * Round-9 F4: hardened from "swallow ALL throw" to "swallow only the
+ * known idempotency path". The message patterns are kept lower-cased
+ * because react-native-leveldb's underlying LevelDB JNI wrapper
+ * embeds the path into the message and the case of "Does not exist"
+ * varies across Android API levels.
+ *
+ * Round-11 F4: REMOVED the "is not a function" pattern. Pre-fix this
+ * was added so test mocks that omit a `destroyDB` spy still
+ * resolved cleanly, but the same predicate runs in PRODUCTION — and
+ * "LevelDB.destroyDB is not a function" in production means the
+ * native bridge was not properly linked / a turbomodule registration
+ * regressed. Treating that as a vacuous success would let a release
+ * build mark the LevelDB wipe complete while every byte of identity /
+ * DWN / sync data remained on disk. The right contract is fail-CLOSED:
+ * a missing native method is a hard error that surfaces to
+ * `useAgentStore.reset()`, which then persists the
+ * LEVELDB_CLEANUP_PENDING_KEY sentinel and rethrows so the caller
+ * (Settings UI / recovery-restore-screen) can offer a retry. Tests
+ * that genuinely need a no-op `destroyDB` must declare it explicitly
+ * in their mock.
+ */
+function isIdempotentDestroyError(err: unknown): boolean {
+  const msg = (
+    err instanceof Error ? err.message : String(err ?? '')
+  ).toLowerCase();
+  return (
+    msg.includes('does not exist') ||
+    msg.includes('not found') ||
+    msg.includes('no such file')
+  );
+}
+
+/**
+ * Destroy the on-disk LevelDB at `location`.
+ *
+ * Uses `react-native-leveldb`'s `LevelDB.destroyDB(name, force)` which
+ * closes any open handle first (via the `force` flag) and removes the
+ * native database files.
+ *
+ * Round-9 F4: this used to swallow ALL throws (the catch block was
+ * empty). That's the wrong default — a real I/O failure, permission
+ * denied, or a corrupt LOCK file would be reported as success, and
+ * `useAgentStore.reset()` would then claim the wallet had been wiped
+ * even though stale identity / DWN bytes remained on disk. The
+ * fix narrows the swallow to KNOWN idempotency paths
+ * (`isIdempotentDestroyError`); anything else is rethrown so the
+ * caller can persist a retry sentinel and surface failure to the
+ * user. Missing-database / native-module-unavailable are still
+ * vacuous successes, which is what every existing test relies on.
+ */
+export async function destroyRNLevelDatabase(location: string): Promise<void> {
+  const name = normalizeLocation(location);
+  try {
+    LevelDB.destroyDB(name, true);
+  } catch (err) {
+    if (isIdempotentDestroyError(err)) {
+      // Idempotent: missing database / unavailable native module
+      // is a no-op rather than an error. Reset's intent ("wipe
+      // everything") is satisfied by a vacuously-empty wipe.
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Wipe every LevelDB the `EnboxUserAgent` persists under `dataPath`.
+ *
+ * This is the fallback that `useAgentStore.reset()` uses to guarantee
+ * the app's on-disk state matches a clean post-reset install. Call
+ * ordering (close → destroy) is delegated to `destroyRNLevelDatabase`,
+ * which passes `force: true` to `LevelDB.destroyDB`.
+ *
+ * Round-9 F4: previously this looped serially and let one subpath
+ * failure abort the rest, which left the wipe in a half-completed
+ * state. The new contract is:
+ *   1. Attempt every subpath unconditionally — a failure on
+ *      `VAULT_STORE` does not block `DWN_DATASTORE` / `DWN_MESSAGESTORE`.
+ *   2. Collect any non-idempotent throws.
+ *   3. After the loop, rethrow as an AggregateError-style ``Error``
+ *      whose `cause` lists every failure. ``useAgentStore.reset()``
+ *      uses this to decide whether to persist the
+ *      `LEVELDB_CLEANUP_PENDING_KEY` retry sentinel.
+ *
+ * Round-13 F2: ALSO destroy the root `dataPath` itself — that's
+ * where `SyncEngineLevel` opens its replication-ledger /
+ * dead-letter / cursor DB (see `AGENT_LEVEL_DB_ROOT_PATH` for the
+ * full rationale). Pre-fix the wipe targeted `${dataPath}/SYNC_STORE`
+ * which does not exist on disk, leaving every byte of sync state
+ * resident across reset. The root destroy is run LAST so the
+ * subpath children (which live inside the same parent directory
+ * as siblings to the sync DB's own files) are removed first; LevelDB's
+ * `DestroyDB` only touches its own flat files, never subdirectories.
+ */
+export async function destroyAgentLevelDatabases(dataPath: string): Promise<void> {
+  const failures: Array<{ subpath: string; error: unknown }> = [];
+  for (const sub of AGENT_LEVEL_DB_SUBPATHS) {
+    try {
+      await destroyRNLevelDatabase(`${dataPath}/${sub}`);
+    } catch (err) {
+      failures.push({ subpath: sub, error: err });
+    }
+  }
+  // Round-13 F2: destroy the root path itself (sync engine DB).
+  // Tracked separately so the failure-list label is unambiguous —
+  // a failure here means the SyncEngineLevel state survived, NOT
+  // a missing subpath.
+  try {
+    await destroyRNLevelDatabase(dataPath);
+  } catch (err) {
+    failures.push({ subpath: '<root sync DB>', error: err });
+  }
+  if (failures.length === 0) return;
+  const subpathList = failures.map((f) => f.subpath).join(', ');
+  // The denominator counts subpaths PLUS the root destroy attempt
+  // so a partial failure surfaces an honest ratio (e.g. "1/8" when
+  // only the root sync DB destroy threw).
+  const totalAttempts = AGENT_LEVEL_DB_SUBPATHS.length + 1;
+  const aggregate = new Error(
+    `destroyAgentLevelDatabases: ${failures.length}/${totalAttempts} ` +
+      `subpaths failed to wipe (${subpathList}). The agent's on-disk state may ` +
+      `still contain identities / DWN records / sync cursors; useAgentStore.reset() ` +
+      `persists a cleanup-pending sentinel so the next launch retries the wipe ` +
+      `before opening any LevelDB handle.`,
+  );
+  // Attach the original failure list so callers / dev-tools can
+  // inspect which subpaths failed. ``cause`` is supported on Error
+  // since ES2022 and is preserved through ``throw``.
+  (aggregate as unknown as { cause?: unknown }).cause = failures;
+  throw aggregate;
+}

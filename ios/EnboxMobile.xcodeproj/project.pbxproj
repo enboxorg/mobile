@@ -11,6 +11,10 @@
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
+		BV000001A00000000000000A /* RCTNativeBiometricVault.mm in Sources */ = {isa = PBXBuildFile; fileRef = BV000002A00000000000000B /* RCTNativeBiometricVault.mm */; };
+		BV000003A00000000000000C /* RCTNativeBiometricVault.h in Headers */ = {isa = PBXBuildFile; fileRef = BV000004A00000000000000D /* RCTNativeBiometricVault.h */; };
+		LA000001A00000000000F001 /* LocalAuthentication.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = LA000002A00000000000F002 /* LocalAuthentication.framework */; };
+		SE000001A00000000000F003 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = SE000002A00000000000F004 /* Security.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,6 +28,10 @@
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = EnboxMobile/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = EnboxMobile/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
+		BV000002A00000000000000B /* RCTNativeBiometricVault.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = RCTNativeBiometricVault.mm; path = RCTNativeBiometricVault.mm; sourceTree = "<group>"; };
+		BV000004A00000000000000D /* RCTNativeBiometricVault.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = RCTNativeBiometricVault.h; path = RCTNativeBiometricVault.h; sourceTree = "<group>"; };
+		LA000002A00000000000F002 /* LocalAuthentication.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = LocalAuthentication.framework; path = System/Library/Frameworks/LocalAuthentication.framework; sourceTree = SDKROOT; };
+		SE000002A00000000000F004 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -32,6 +40,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				0C80B921A6F3F58F76C31292 /* libPods-EnboxMobile.a in Frameworks */,
+				LA000001A00000000000F001 /* LocalAuthentication.framework in Frameworks */,
+				SE000001A00000000000F003 /* Security.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -46,8 +56,19 @@
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
+				BV000005A00000000000000E /* NativeBiometricVault */,
 			);
 			name = EnboxMobile;
+			sourceTree = "<group>";
+		};
+		BV000005A00000000000000E /* NativeBiometricVault */ = {
+			isa = PBXGroup;
+			children = (
+				BV000004A00000000000000D /* RCTNativeBiometricVault.h */,
+				BV000002A00000000000000B /* RCTNativeBiometricVault.mm */,
+			);
+			name = NativeBiometricVault;
+			path = EnboxMobile/NativeBiometricVault;
 			sourceTree = "<group>";
 		};
 		2D16E6871FA4F8E400B85C8A /* Frameworks */ = {
@@ -55,6 +76,8 @@
 			children = (
 				ED297162215061F000B7C4FE /* JavaScriptCore.framework */,
 				5DCACB8F33CDC322A6C60F78 /* libPods-EnboxMobile.a */,
+				LA000002A00000000000F002 /* LocalAuthentication.framework */,
+				SE000002A00000000000F004 /* Security.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -245,6 +268,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
+				BV000001A00000000000000A /* RCTNativeBiometricVault.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

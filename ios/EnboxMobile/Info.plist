@@ -47,6 +47,8 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan Enbox connect QR codes to authorize apps from this wallet.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Enbox uses Face ID to unlock your wallet and authorize access to your identities.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string></string>
 	<key>UILaunchStoryboardName</key>
