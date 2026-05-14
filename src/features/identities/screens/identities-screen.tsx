@@ -20,6 +20,8 @@ export function IdentitiesScreen() {
   const theme = useAppTheme();
   const identities = useAgentStore((s) => s.identities);
   const createIdentity = useAgentStore((s) => s.createIdentity);
+  const updateIdentityName = useAgentStore((s) => s.updateIdentityName);
+  const deleteIdentity = useAgentStore((s) => s.deleteIdentity);
   const refreshIdentities = useAgentStore((s) => s.refreshIdentities);
   const agent = useAgentStore((s) => s.agent);
   const isInitializing = useAgentStore((s) => s.isInitializing);
@@ -29,6 +31,14 @@ export function IdentitiesScreen() {
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [selectedDid, setSelectedDid] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const selectedIdentity = identities.find((identity) => {
+    const did = identity.metadata?.uri ?? identity.did?.uri;
+    return did === selectedDid;
+  });
 
   const handleCreate = useCallback(async () => {
     if (!name.trim() || creating) return;
@@ -44,6 +54,53 @@ export function IdentitiesScreen() {
       setCreating(false);
     }
   }, [name, creating, createIdentity]);
+
+  const handleSelect = useCallback((identity: any) => {
+    const did = identity.metadata?.uri ?? identity.did?.uri;
+    if (!did) return;
+    setSelectedDid(did);
+    setEditName(identity.metadata?.name ?? '');
+  }, []);
+
+  const handleSaveName = useCallback(async () => {
+    if (!selectedDid || !editName.trim() || saving) return;
+    setSaving(true);
+    try {
+      await updateIdentityName(selectedDid, editName.trim());
+    } catch (err) {
+      Alert.alert('Update failed', err instanceof Error ? err.message : 'Could not update identity');
+    } finally {
+      setSaving(false);
+    }
+  }, [editName, saving, selectedDid, updateIdentityName]);
+
+  const handleDelete = useCallback(() => {
+    if (!selectedDid) return;
+    Alert.alert(
+      'Delete identity',
+      'This removes the identity and its local key material from this wallet. Make sure you have an identity backup before continuing.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            deleteIdentity(selectedDid)
+              .then(() => {
+                setSelectedDid(null);
+                setEditName('');
+              })
+              .catch((err) => {
+                Alert.alert(
+                  'Delete failed',
+                  err instanceof Error ? err.message : 'Could not delete identity',
+                );
+              });
+          },
+        },
+      ],
+    );
+  }, [deleteIdentity, selectedDid]);
 
   useEffect(() => {
     if (agent) {
@@ -130,13 +187,72 @@ export function IdentitiesScreen() {
         </View>
       )}
 
+      {selectedIdentity ? (
+        <View
+          style={[
+            styles.card,
+            { backgroundColor: theme.colors.surface, borderColor: theme.colors.border },
+          ]}
+        >
+          <Text style={[styles.cardTitle, { color: theme.colors.text }]}>Identity details</Text>
+          <TextInput
+            accessibilityLabel="Edit identity name"
+            onChangeText={setEditName}
+            placeholder="Display name"
+            placeholderTextColor={theme.colors.textMuted}
+            style={[styles.input, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border, color: theme.colors.text }]}
+            value={editName}
+          />
+          <Text style={[styles.detailLabel, { color: theme.colors.textMuted }]}>DID</Text>
+          <Text style={[styles.detailValue, { color: theme.colors.text }]} selectable>
+            {selectedIdentity.metadata?.uri ?? selectedIdentity.did?.uri}
+          </Text>
+          {selectedIdentity.metadata?.tenant ? (
+            <>
+              <Text style={[styles.detailLabel, { color: theme.colors.textMuted }]}>Tenant</Text>
+              <Text style={[styles.detailValue, { color: theme.colors.text }]} selectable>
+                {selectedIdentity.metadata.tenant}
+              </Text>
+            </>
+          ) : null}
+          {selectedIdentity.metadata?.connectedDid ? (
+            <>
+              <Text style={[styles.detailLabel, { color: theme.colors.textMuted }]}>Connected DID</Text>
+              <Text style={[styles.detailValue, { color: theme.colors.text }]} selectable>
+                {selectedIdentity.metadata.connectedDid}
+              </Text>
+            </>
+          ) : null}
+          <View style={styles.buttons}>
+            <AppButton
+              label="Close"
+              variant="secondary"
+              onPress={() => setSelectedDid(null)}
+            />
+            <AppButton
+              label="Save"
+              loading={saving}
+              disabled={!editName.trim()}
+              onPress={handleSaveName}
+            />
+          </View>
+          <AppButton
+            label="Delete identity"
+            variant="secondary"
+            onPress={handleDelete}
+          />
+        </View>
+      ) : null}
+
       {identities.length > 0 && (
         <>
           <FlatList
             data={identities}
-            keyExtractor={(item) => item.metadata.uri}
+            keyExtractor={(item) => item.metadata?.uri ?? item.did?.uri}
             scrollEnabled={false}
-            renderItem={({ item }) => <IdentityRow identity={item} theme={theme} />}
+            renderItem={({ item }) => (
+              <IdentityRow identity={item} theme={theme} onPress={() => handleSelect(item)} />
+            )}
             ItemSeparatorComponent={Separator}
             style={[styles.list, { borderColor: theme.colors.border }]}
           />
@@ -154,12 +270,20 @@ function Separator() {
   return <View style={styles.separator} />;
 }
 
-function IdentityRow({ identity, theme }: { identity: any; theme: AppTheme }) {
+function IdentityRow({
+  identity,
+  theme,
+  onPress,
+}: {
+  identity: any;
+  theme: AppTheme;
+  onPress: () => void;
+}) {
   const didUri = identity.metadata?.uri ?? identity.did?.uri ?? 'Unknown DID';
   const displayName = identity.metadata?.name ?? 'Unnamed';
 
   return (
-    <Pressable style={styles.row} accessibilityRole="button">
+    <Pressable style={styles.row} accessibilityRole="button" onPress={onPress}>
       <View style={[styles.avatar, { backgroundColor: theme.colors.surfaceMuted }]}>
         <Text style={[styles.avatarText, { color: theme.colors.accent }]}>
           {displayName.charAt(0).toUpperCase()}
@@ -187,6 +311,8 @@ const styles = StyleSheet.create({
   emptyBody: { fontSize: 15, lineHeight: 22, textAlign: 'center' },
   card: { borderRadius: 24, borderWidth: 1, padding: 20, gap: 12 },
   cardTitle: { fontSize: 18, fontWeight: '700' },
+  detailLabel: { fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
+  detailValue: { fontSize: 12, fontFamily: 'monospace', lineHeight: 18 },
   input: { borderRadius: 16, borderWidth: 1, fontSize: 16, paddingHorizontal: 16, paddingVertical: 14 },
   buttons: { flexDirection: 'row', gap: 12 },
   list: { borderRadius: 16, borderWidth: 1, overflow: 'hidden' },

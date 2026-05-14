@@ -2,20 +2,126 @@ name: Debug on Emulator
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main, master]
+  # Trigger surface (VAL-CI-018 / Round-2 review Finding 2):
+  #
+  # The emulator hardening suite validates the full native-biometric-
+  # first flow, including FLAG_SECURE, native Keychain / Keystore
+  # behaviour, and the emulator driver itself. We trigger on:
+  #
+  #   - `pull_request` against any base branch — this is the critical
+  #     trigger: a PR head must be validated BEFORE merge, not only
+  #     after the merge commit lands on `main`. Without this, native
+  #     vault / FLAG_SECURE / emulator-driver changes can sit on a
+  #     PR for review with no emulator run, and only get exercised
+  #     post-merge — the inverse of what a release-blocking suite
+  #     should do.
+  #   - `push` to long-lived branches (`main`, `master`, `mission/**`)
+  #     — covers direct pushes (e.g. release tagging, mission-line
+  #     fast-forwards) and ensures that the head of any active mission
+  #     branch is always backed by a green emulator run, not just the
+  #     PR snapshots.
+  #
+  # Both triggers share the same `paths:` filter so unrelated doc /
+  # rule / cursor-config churn does not consume an emulator slot.
+  # NB: `bun.lock` IS in the path filter (Round-4 Finding 2) — the
+  # driver imports lock-resolved code (`@scure/bip39`) used by the
+  # sanitizer's cluster gate, so a lockfile-only dep bump must
+  # re-validate the privacy suite even though the source tree is
+  # otherwise untouched.
+  pull_request:
     paths:
       - 'src/**'
       - 'specs/**'
+      - 'scripts/**'
+      - 'android/**'
+      - 'ios/**'
+      - '.github/workflows/debug-emulator.yml'
+      # Round-6 Finding 6: ``.github/workflows/ci.yml`` is in the
+      # trigger surface because it OWNS the always-on
+      # ``bun run emulator:self-test`` gate (Round-3 Finding 2 fix).
+      # That self-test is the no-device validation of the sanitizer
+      # / FLAG_SECURE-parser / classify-on-raw contracts that protect
+      # against mnemonic leakage. A CI-only edit that weakened or
+      # removed the gate (for example, dropping the
+      # ``emulator:self-test`` step from the ``verify`` job) would
+      # NOT re-run the emulator workflow if ``ci.yml`` were absent
+      # from this filter — both gates would slip past the next PR.
+      # Adding it here makes a regression in the self-test gate
+      # automatically re-validated by the full emulator run.
+      - '.github/workflows/ci.yml'
       - 'metro.config.js'
       - 'babel.config.js'
       - 'index.js'
       - 'package.json'
+      # `bun.lock` is part of the trigger surface (Round-4 Finding 2).
+      # The TS emulator driver imports `@scure/bip39/wordlists/english`
+      # — a lock-resolved dependency — and the sanitizer's wordlist
+      # cluster gate IS the privacy-validation primitive. A
+      # lockfile-only dependency change (e.g. `bun update @scure/bip39`
+      # with no `package.json` edit) can therefore alter the driver's
+      # runtime behaviour without re-running the suite. Keep `package.json`
+      # AND `bun.lock` in the trigger paths so the privacy gate
+      # re-validates on either spec-level OR resolved-version drift.
+      - 'bun.lock'
+  push:
+    branches:
+      - main
+      - master
+      - 'mission/**'
+    # Same path filter as `pull_request:` — keep these in sync. The
+    # original trigger (src/**, specs/**, a handful of JS config files)
+    # missed three categories of changes that the suite is SUPPOSED
+    # to guard:
+    #   - The workflow file itself — updating the runner pins or the
+    #     artifact-upload glob without re-running the suite hides
+    #     breakages until the next unrelated src change.
+    #   - `scripts/emulator-debug-flow.ts` / `scripts/**` — the driver
+    #     logic IS the suite. A regression in the driver (missing a
+    #     sensitive-screen placeholder, a bad adb invocation, an
+    #     assertion typo) would never run until a src change landed.
+    #   - `android/**` / `ios/**` — the native vault implementations
+    #     and `MainActivity.onCreate`'s FLAG_SECURE baseline live here;
+    #     a regression in either is EXACTLY what the emulator run
+    #     catches.
+    #   - `package.json` AND `bun.lock` — the driver imports lock-
+    #     resolved code (`@scure/bip39/wordlists/english`) used by the
+    #     sanitizer's cluster gate. A lockfile-only dependency bump
+    #     can therefore change runtime behaviour with no source-tree
+    #     diff. Keep both in the trigger paths (Round-4 Finding 2).
+    paths:
+      - 'src/**'
+      - 'specs/**'
+      - 'scripts/**'
+      - 'android/**'
+      - 'ios/**'
+      - '.github/workflows/debug-emulator.yml'
+      # Round-6 Finding 6: ci.yml owns the always-on self-test gate
+      # (see comment on the pull_request trigger above). Keep both
+      # workflow files in the trigger surface so a CI-only weakening
+      # of the gate is caught by an emulator re-run.
+      - '.github/workflows/ci.yml'
+      - 'metro.config.js'
+      - 'babel.config.js'
+      - 'index.js'
+      - 'package.json'
+      - 'bun.lock'
+
+# Cancel an in-flight run for the same ref (PR head or branch) when a
+# new push lands so we don't burn an emulator slot validating a stale
+# commit. `cancel-in-progress: true` is safe for `pull_request` (each
+# new push supersedes the prior validation result) and for `push` to
+# long-lived branches (only the head matters for the green-build
+# signal).
+concurrency:
+  group: debug-emulator-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   debug-android:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # timeout-minutes must be >= 45 (emulator boot ~5 min, release APK build ~15 min,
+    # biometric-first flow + relaunch cycle ~10 min + margin). See VAL-CI-016.
+    timeout-minutes: 60
 
     steps:
       - name: Free disk space
@@ -61,65 +167,253 @@ jobs:
         run: ./gradlew assembleRelease --no-daemon -x lint
         working-directory: android
 
+      # STEP 1 — run the biometric onboarding flow on the emulator.
+      # The runner script captures the driver's exit code into
+      # ``$GITHUB_ENV`` as ``SCRIPT_EXIT_CODE`` and ALWAYS exits 0 so
+      # that the subsequent ``if: always()`` steps (artifact sanity
+      # check, upload, exit-code propagation) run in a well-defined
+      # order. Job failure when the driver regresses is asserted by
+      # the exit-code propagation step below (Option A — workflow-level
+      # always-run capture, VAL-CI-013 / VAL-CI-024).
       - name: Run on emulator and capture logs
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 31
+          # `google_apis` system image includes the fingerprint HAL required by the
+          # biometric-first onboarding flow; the default `default`/`aosp_atd` images
+          # lack it and would silently let the flow pass. See VAL-CI-036.
+          target: google_apis
           arch: x86_64
           profile: pixel_5
+          # Reset AVD state between reruns so stale fingerprint/credential state
+          # from a prior run cannot satisfy the current flow. See VAL-CI-031.
           force-avd-creation: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
-          script: |
-            set -e
+          # IMPORTANT: keep this `script:` block a one-liner.
+          # `reactivecircus/android-emulator-runner@v2` runs each line of
+          # this field as a separate `sh -c` invocation (see its
+          # `parseScript` helper and issue #391), which makes multi-line
+          # bash functions / `trap` handlers impossible here. All the
+          # actual orchestration (install APK, launch app, capture
+          # logcat, run the Python flow, always-run cleanup) lives in
+          # `scripts/ci-debug-emulator-runner.sh` so the logic survives.
+          # Do not inline the script body back into this block.
+          script: bash scripts/ci-debug-emulator-runner.sh
 
-            echo "=== Installing release APK ==="
-            adb install android/app/build/outputs/apk/release/app-release.apk
+      # STEP 2 — verify the capture phase produced the artifacts the
+      # upload step expects. Runs unconditionally so failed runs still
+      # surface missing-artifact diagnostics in the workflow log. If
+      # any required artifact is missing, a placeholder file is
+      # written so ``actions/upload-artifact`` has something to upload
+      # (rather than silently skipping when all paths resolve to
+      # nothing — see VAL-CI-032).
+      #
+      # Round-6 Finding 5: previously this step only created
+      # placeholders for the three logcat files; the UI artifact
+      # directory was treated as best-effort and a run that produced
+      # zero PNGs/XMLs would still report green. The privacy-gate
+      # audit trail (recovery-phrase, biometric-prompt, etc.) lives
+      # exclusively under ``/tmp/emulator-ui-artifacts``, so a green
+      # run with an empty directory means nobody can audit whether
+      # the gate actually ran. We now record the UI file count as
+      # ``EMULATOR_UI_FILE_COUNT`` in ``$GITHUB_ENV``; the
+      # exit-code-propagation step (STEP 4) hard-fails the job when
+      # that count is zero AND the driver claimed success. We still
+      # write a marker file here so the upload step always has
+      # something diagnostic to surface.
+      - name: Verify captured artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          echo "=== [verify] Listing captured artifacts ==="
+          ls -la /tmp/logcat-full.txt /tmp/logcat-rn.txt /tmp/logcat-startup.txt 2>/dev/null \
+            || echo "warning: one or more logcat files are missing"
+          ls -la /tmp/emulator-ui-artifacts 2>/dev/null \
+            || echo "warning: /tmp/emulator-ui-artifacts directory is missing"
 
-            echo "=== Clearing logcat ==="
-            adb logcat -c
+          mkdir -p /tmp/emulator-ui-artifacts
+          for f in /tmp/logcat-full.txt /tmp/logcat-rn.txt /tmp/logcat-startup.txt; do
+            if [ ! -f "$f" ]; then
+              echo "=== [verify] creating placeholder for missing $f ===" >&2
+              echo "MISSING — emulator step aborted before capture phase could write this file." > "$f"
+            fi
+          done
 
-            echo "=== Launching app ==="
-            adb shell am start -n org.enbox.mobile/.MainActivity
+          # Round-6 F5: count UI artifacts (PNGs + XMLs) and export the
+          # count to GITHUB_ENV so STEP 4 can hard-fail on zero. Also
+          # write a marker file when the directory is empty so the
+          # upload step has unambiguous evidence of the gap.
+          UI_FILE_COUNT=$(find /tmp/emulator-ui-artifacts -type f 2>/dev/null | wc -l | tr -d ' ')
+          UI_PNG_COUNT=$(find /tmp/emulator-ui-artifacts -type f -name '*.png' 2>/dev/null | wc -l | tr -d ' ')
+          UI_XML_COUNT=$(find /tmp/emulator-ui-artifacts -type f -name '*.xml' 2>/dev/null | wc -l | tr -d ' ')
+          echo "[verify] UI artifacts: total=${UI_FILE_COUNT}, PNG=${UI_PNG_COUNT}, XML=${UI_XML_COUNT}"
+          if [ "${UI_FILE_COUNT}" = "0" ]; then
+            echo "::warning::No UI artifacts under /tmp/emulator-ui-artifacts. STEP 4 will hard-fail this job if the driver reported success."
+            echo "MISSING — emulator capture phase produced no PNGs or uiautomator XMLs. The privacy-gate audit trail (recovery-phrase, biometric-prompt, etc.) is unavailable for this run. Inspect the runner step's ::error:: lines above for the underlying cp / capture failure." \
+              > /tmp/emulator-ui-artifacts/UI_ARTIFACTS_MISSING.txt
+          fi
+          if [ -n "${GITHUB_ENV:-}" ] && [ -w "${GITHUB_ENV}" ]; then
+            echo "EMULATOR_UI_FILE_COUNT=${UI_FILE_COUNT}" >> "${GITHUB_ENV}"
+            echo "EMULATOR_UI_PNG_COUNT=${UI_PNG_COUNT}" >> "${GITHUB_ENV}"
+            echo "EMULATOR_UI_XML_COUNT=${UI_XML_COUNT}" >> "${GITHUB_ENV}"
+          fi
 
-            echo "=== Waiting for app to start (20s) ==="
-            sleep 20
+          # Round-7 Finding 4: tally the REQUIRED named artifacts.
+          # Counting "any files" alone is insufficient — a partial copy
+          # that successfully transferred only the welcome screen
+          # artifacts could pass with UI_FILE_COUNT > 0 while
+          # ``recovery-phrase.png`` / ``recovery-phrase.xml`` (the
+          # privacy-critical mnemonic-display capture) is missing.
+          # The audit trail must positively assert each named pair the
+          # driver emits. The list below mirrors the
+          # ``screencap('<name>')`` + ``dumpUi('<name>')`` calls in
+          # ``mainFlow()`` of ``scripts/emulator-debug-flow.ts``. If
+          # the driver gains a new capture point, add it here too.
+          #
+          # The recovery-phrase pair is the privacy-gate keystone — it
+          # is the placeholder PNG and the sanitized XML that prove
+          # the suite did NOT leak the mnemonic, AND the FLAG_SECURE
+          # assertion's evidence trail. Missing either one means the
+          # gate cannot be audited; STEP 4 hard-fails the job.
+          REQUIRED_ARTIFACTS=(
+            welcome.png
+            welcome.xml
+            biometric-setup.png
+            biometric-setup.xml
+            biometric-prompt-1.png
+            biometric-prompt-1.xml
+            recovery-phrase.png
+            recovery-phrase.xml
+            main-wallet.png
+            main-wallet.xml
+            relaunch-unlock-prompt.png
+            relaunch-unlock-prompt.xml
+            after-relaunch.png
+            after-relaunch.xml
+          )
+          MISSING_REQUIRED=()
+          for f in "${REQUIRED_ARTIFACTS[@]}"; do
+            if [ ! -f "/tmp/emulator-ui-artifacts/${f}" ]; then
+              MISSING_REQUIRED+=("${f}")
+            fi
+          done
+          UI_REQUIRED_MISSING_COUNT=${#MISSING_REQUIRED[@]}
+          UI_REQUIRED_TOTAL_COUNT=${#REQUIRED_ARTIFACTS[@]}
+          echo "[verify] required artifacts: ${UI_REQUIRED_TOTAL_COUNT} expected, ${UI_REQUIRED_MISSING_COUNT} missing"
+          if [ "${UI_REQUIRED_MISSING_COUNT}" -gt "0" ]; then
+            echo "[verify] missing required artifacts:"
+            for f in "${MISSING_REQUIRED[@]}"; do
+              echo "  - ${f}"
+            done
+            # Surface the privacy-critical pair specifically so an
+            # operator scanning the workflow log lands on the most
+            # important diagnostic first.
+            for keystone in recovery-phrase.png recovery-phrase.xml; do
+              if [ ! -f "/tmp/emulator-ui-artifacts/${keystone}" ]; then
+                echo "::warning::PRIVACY-GATE KEYSTONE missing: /tmp/emulator-ui-artifacts/${keystone} — the FLAG_SECURE / sanitizer assertions for the mnemonic-display screen cannot be audited from this run's artifacts."
+              fi
+            done
+            # Write a manifest file into the artifact bundle so the
+            # uploaded zip carries an unambiguous record of the gap
+            # (the ``::warning::`` line is only in the workflow log).
+            {
+              echo "Round-7 F4: REQUIRED named artifacts missing from this run."
+              echo "Inspect the per-step ::error:: lines for the underlying cp / capture failure."
+              echo ""
+              echo "Missing (${UI_REQUIRED_MISSING_COUNT} of ${UI_REQUIRED_TOTAL_COUNT}):"
+              for f in "${MISSING_REQUIRED[@]}"; do
+                echo "  - ${f}"
+              done
+            } > /tmp/emulator-ui-artifacts/REQUIRED_ARTIFACTS_MISSING.txt
+          fi
+          if [ -n "${GITHUB_ENV:-}" ] && [ -w "${GITHUB_ENV}" ]; then
+            echo "EMULATOR_UI_REQUIRED_MISSING_COUNT=${UI_REQUIRED_MISSING_COUNT}" >> "${GITHUB_ENV}"
+            echo "EMULATOR_UI_REQUIRED_TOTAL_COUNT=${UI_REQUIRED_TOTAL_COUNT}" >> "${GITHUB_ENV}"
+          fi
 
-            echo "=== Capturing initial logcat ==="
-            adb logcat -d > /tmp/logcat-startup.txt 2>&1
-
-            echo "=== Driving onboarding flow by UI text ==="
-            python3 scripts/emulator-debug-flow.py || true
-
-            echo "=== Copying screenshots and dumps ==="
-            mkdir -p /tmp/emulator-ui
-            cp -R /tmp/emulator-ui/. /tmp/emulator-ui-artifacts/ 2>/dev/null || true
-
-            echo ""
-            echo "========================================="
-            echo "=== ReactNativeJS + Crash Logs ==="
-            echo "========================================="
-            adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E
-
-            echo ""
-            echo "========================================="
-            echo "=== All ERROR level logs ==="
-            echo "========================================="
-            adb logcat -d '*:E' | grep -i "react\|enbox\|level\|crypto\|fatal\|exception" || true
-
-            echo ""
-            echo "=== Saving full logcat ==="
-            adb logcat -d > /tmp/logcat-full.txt 2>&1
-            adb logcat -d -s ReactNativeJS:V ReactNative:V AndroidRuntime:E > /tmp/logcat-rn.txt 2>&1
-
+      # STEP 3 — upload whatever artifacts exist, even on failure.
+      # ``if: always()`` guarantees the upload runs when STEP 1 or
+      # STEP 2 report failure (VAL-CI-013 / VAL-CI-030).
       - name: Upload logs and screenshot
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          # Deterministic artifact name keyed on the commit SHA so a parent
+          # validation step can locate it by SHA. See VAL-CI-030.
           name: emulator-debug-${{ github.sha }}
           path: |
             /tmp/logcat-full.txt
             /tmp/logcat-rn.txt
             /tmp/logcat-startup.txt
+            /tmp/emulator-debug-flow.log
             /tmp/emulator-ui-artifacts/**
+          # retention-days must be >= 7 per VAL-CI-030.
           retention-days: 7
+
+      # STEP 4 — re-exit with the driver's exit code so the job fails
+      # loudly whenever the onboarding flow regressed. STEP 1
+      # deliberately exits 0 to let the ``if: always()`` sanity-check
+      # and upload steps run; this step is the sole source of job
+      # failure signal for driver regressions. ``if: always()`` so it
+      # also runs when STEPS 2 or 3 reported a problem (VAL-CI-024).
+      #
+      # Round-6 Finding 5: ALSO fail when the driver claimed success
+      # but STEP 2 saw zero UI artifacts under
+      # ``/tmp/emulator-ui-artifacts``. The privacy-gate audit trail
+      # (recovery-phrase, biometric-prompt, etc.) lives exclusively
+      # there, and a green run with an empty directory means the
+      # gate cannot be audited — exactly the state the reviewer
+      # flagged as "a green run can omit screenshots/XML artifacts
+      # needed to audit the privacy gate". Failing here prevents the
+      # green-but-evidence-free run from masking a regression in the
+      # capture path itself (cp failure, runner crash, missing
+      # mkdir).
+      - name: Propagate emulator flow exit code
+        if: always()
+        shell: bash
+        run: |
+          CODE="${SCRIPT_EXIT_CODE:-}"
+          if [ -z "$CODE" ]; then
+            echo "::error::SCRIPT_EXIT_CODE was not exported — the emulator step likely aborted before the driver ran."
+            exit 1
+          fi
+          echo "=== Emulator flow script exit code: ${CODE} ==="
+          if [ "$CODE" != "0" ]; then
+            echo "::error::Emulator onboarding flow failed (bun run scripts/emulator-debug-flow.ts exited ${CODE}). Check the uploaded artifact 'emulator-debug-${{ github.sha }}' for logs and screenshots."
+            exit "$CODE"
+          fi
+          # Round-6 F5: hard-fail when no UI artifacts were captured
+          # despite the driver reporting success. The count is
+          # exported by STEP 2 (Verify captured artifacts).
+          UI_COUNT="${EMULATOR_UI_FILE_COUNT:-}"
+          if [ -z "${UI_COUNT}" ]; then
+            echo "::error::EMULATOR_UI_FILE_COUNT was not exported — STEP 2 (Verify captured artifacts) likely did not run, so the privacy-gate audit cannot be confirmed."
+            exit 1
+          fi
+          if [ "${UI_COUNT}" = "0" ]; then
+            echo "::error::Emulator driver reported success but STEP 2 found ZERO UI artifacts under /tmp/emulator-ui-artifacts. The privacy-gate audit trail (recovery-phrase, biometric-prompt, etc.) is missing — failing loudly so a green run cannot mask a regression in the capture path. Inspect the 'Run on emulator and capture logs' step's ::error:: lines for the underlying cp / capture failure."
+            exit 1
+          fi
+          # Round-7 Finding 4: hard-fail when REQUIRED named artifacts
+          # are missing. A non-zero total count alone is insufficient
+          # — a partial copy that landed only ``welcome.png`` would
+          # pass the count gate while leaving ``recovery-phrase.{png,
+          # xml}`` (the privacy-gate keystone) absent. The exported
+          # ``EMULATOR_UI_REQUIRED_MISSING_COUNT`` reports how many
+          # entries from the required list (mirrors the
+          # ``screencap('<name>')`` + ``dumpUi('<name>')`` calls in
+          # ``mainFlow()``) are missing. Any non-zero value with a
+          # successful driver exit indicates the audit trail is
+          # incomplete and the privacy gate cannot be confirmed.
+          REQUIRED_MISSING="${EMULATOR_UI_REQUIRED_MISSING_COUNT:-}"
+          if [ -z "${REQUIRED_MISSING}" ]; then
+            echo "::error::EMULATOR_UI_REQUIRED_MISSING_COUNT was not exported — STEP 2 (Verify captured artifacts) likely did not run its required-artifacts probe, so the privacy-gate audit cannot be confirmed."
+            exit 1
+          fi
+          if [ "${REQUIRED_MISSING}" != "0" ]; then
+            echo "::error::Emulator driver reported success but ${REQUIRED_MISSING} of ${EMULATOR_UI_REQUIRED_TOTAL_COUNT:-?} REQUIRED named artifacts are missing under /tmp/emulator-ui-artifacts. The privacy-gate audit trail is incomplete — failing loudly so a partial-copy or partial-capture regression cannot mask a missing recovery-phrase.{png,xml} keystone. Inspect /tmp/emulator-ui-artifacts/REQUIRED_ARTIFACTS_MISSING.txt and the 'Verify captured artifacts' step's log for the specific missing names."
+            exit 1
+          fi
+          echo "=== Emulator onboarding flow completed successfully (UI artifacts: total=${UI_COUNT}, PNG=${EMULATOR_UI_PNG_COUNT:-?}, XML=${EMULATOR_UI_XML_COUNT:-?}, required=${EMULATOR_UI_REQUIRED_TOTAL_COUNT:-?} all present) ==="

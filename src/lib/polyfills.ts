@@ -14,9 +14,107 @@ if (typeof globalThis.TextDecoder === 'undefined') {
   }
 }
 
+// AbortSignal.timeout — WHATWG 2022 static factory missing in RN/Hermes.
+// @enbox/dids' pkarrPut calls `AbortSignal.timeout(30_000)` at runtime;
+// without this shim the call throws "TypeError: undefined is not a function"
+// and surfaces as `internalError: Failed to put Pkarr record for identifier
+// <zbase32>: undefined is not a function` on device. Node >= 18 (Jest) has
+// this natively, so Jest passes without the shim; the RN release build is
+// the only failure surface.
+//
+// Idempotent via the `typeof` guard so module reloads in dev/HMR do not
+// replace the shim every time, preserving referential identity.
+if (
+  typeof AbortSignal !== 'undefined' &&
+  typeof (AbortSignal as any).timeout !== 'function'
+) {
+  (AbortSignal as any).timeout = (ms: number): AbortSignal => {
+    const controller = new AbortController();
+    setTimeout(() => {
+      try {
+        controller.abort(new DOMException('TimeoutError', 'TimeoutError'));
+      } catch {
+        controller.abort();
+      }
+    }, ms);
+    return controller.signal;
+  };
+}
+
+// EventTarget / CustomEvent — Hermes does not expose the full browser event
+// surface, while @enbox/api defines LiveQuery classes at module load that
+// extend EventTarget and CustomEvent. Keep this minimal but standards-shaped
+// enough for add/remove/dispatch and `.detail` consumers.
+if (typeof globalThis.Event === 'undefined') {
+  (globalThis as any).Event = class Event {
+    public readonly type: string;
+    public readonly bubbles: boolean;
+    public readonly cancelable: boolean;
+    public defaultPrevented = false;
+
+    constructor(type: string, init: EventInit = {}) {
+      this.type = type;
+      this.bubbles = Boolean(init.bubbles);
+      this.cancelable = Boolean(init.cancelable);
+    }
+
+    preventDefault(): void {
+      if (this.cancelable) this.defaultPrevented = true;
+    }
+  };
+}
+
+if (typeof globalThis.EventTarget === 'undefined') {
+  (globalThis as any).EventTarget = class EventTarget {
+    private readonly listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
+      if (!listener) return;
+      let listenersForType = this.listeners.get(type);
+      if (!listenersForType) {
+        listenersForType = new Set();
+        this.listeners.set(type, listenersForType);
+      }
+      listenersForType.add(listener);
+    }
+
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
+      if (!listener) return;
+      this.listeners.get(type)?.delete(listener);
+    }
+
+    dispatchEvent(event: Event): boolean {
+      const listenersForType = this.listeners.get(event.type);
+      if (!listenersForType) return !event.defaultPrevented;
+      for (const listener of [...listenersForType]) {
+        if (typeof listener === 'function') {
+          listener.call(this, event);
+        } else {
+          listener.handleEvent(event);
+        }
+      }
+      return !event.defaultPrevented;
+    }
+  };
+}
+
+if (typeof globalThis.CustomEvent === 'undefined') {
+  (globalThis as any).CustomEvent = class CustomEvent<T = unknown> extends Event {
+    public readonly detail: T | null;
+
+    constructor(type: string, init: CustomEventInit<T> = {}) {
+      super(type, init);
+      this.detail = init.detail ?? null;
+    }
+  };
+}
+
 // crypto.subtle + crypto.getRandomValues
 import { install as installCrypto } from 'react-native-quick-crypto';
 installCrypto();
+
+const ENABLE_CRYPTO_DIAGNOSTICS =
+  process.env.ENBOX_DEBUG_CRYPTO === '1';
 
 function wrapSubtleMethod<T extends keyof SubtleCrypto>(name: T) {
   const subtle = globalThis.crypto?.subtle as any;
@@ -54,20 +152,24 @@ function wrapSubtleMethod<T extends keyof SubtleCrypto>(name: T) {
   };
 }
 
-wrapSubtleMethod('generateKey');
-wrapSubtleMethod('importKey');
-wrapSubtleMethod('encrypt');
-wrapSubtleMethod('decrypt');
-wrapSubtleMethod('wrapKey');
-wrapSubtleMethod('unwrapKey');
+if (ENABLE_CRYPTO_DIAGNOSTICS) {
+  wrapSubtleMethod('generateKey');
+  wrapSubtleMethod('importKey');
+  wrapSubtleMethod('encrypt');
+  wrapSubtleMethod('decrypt');
+  wrapSubtleMethod('wrapKey');
+  wrapSubtleMethod('unwrapKey');
+}
 
 // ReadableStream / WritableStream / TransformStream
 import 'web-streams-polyfill/polyfill';
 
-// Diagnostic: log what's available after polyfills
-console.log('[polyfills] crypto.subtle:', typeof globalThis.crypto?.subtle);
-console.log('[polyfills] crypto.getRandomValues:', typeof globalThis.crypto?.getRandomValues);
-console.log('[polyfills] ReadableStream:', typeof globalThis.ReadableStream);
-console.log('[polyfills] TextEncoder:', typeof globalThis.TextEncoder);
-console.log('[polyfills] TextDecoder:', typeof globalThis.TextDecoder);
-console.log('[polyfills] Blob:', typeof globalThis.Blob);
+if (ENABLE_CRYPTO_DIAGNOSTICS) {
+  console.log('[polyfills] crypto.subtle:', typeof globalThis.crypto?.subtle);
+  console.log('[polyfills] crypto.getRandomValues:', typeof globalThis.crypto?.getRandomValues);
+  console.log('[polyfills] ReadableStream:', typeof globalThis.ReadableStream);
+  console.log('[polyfills] TextEncoder:', typeof globalThis.TextEncoder);
+  console.log('[polyfills] TextDecoder:', typeof globalThis.TextDecoder);
+  console.log('[polyfills] Blob:', typeof globalThis.Blob);
+  console.log('[polyfills] AbortSignal.timeout:', typeof (AbortSignal as any).timeout);
+}

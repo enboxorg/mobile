@@ -4,12 +4,24 @@
  * Configures the agent with:
  *   - RN-compatible LevelDB storage (via react-native-leveldb, intercepted via Metro)
  *   - Secure auth storage (via NativeSecureStorage Turbo Module)
+ *   - Biometric-first IdentityVault (BiometricVault) supplied as `agentVault`
+ *     so `EnboxUserAgent.create` does NOT fall back to the legacy
+ *     password-based default identity vault on mobile.
  */
 
 import { AgentDwnApi, EnboxUserAgent, LocalDwnDiscovery } from '@enbox/agent';
 import { AuthManager } from '@enbox/auth';
 
+import { BiometricVault } from './biometric-vault';
 import { SecureStorageAdapter } from './storage-adapter';
+
+const ENABLE_AGENT_INIT_LOGS = process.env.ENBOX_DEBUG_AGENT === '1';
+
+function debugLog(...args: unknown[]) {
+  if (ENABLE_AGENT_INIT_LOGS) {
+    console.log(...args);
+  }
+}
 
 function patchAgentDwnApiForMobile() {
   const flag = '__enboxMobilePatchedAgentDwnApi';
@@ -49,20 +61,32 @@ function patchAgentDwnApiForMobile() {
   });
 
   (globalThis as any)[flag] = true;
-  console.log('[agent-init] Patched AgentDwnApi.agent setter for mobile');
+  debugLog('[agent-init] Patched AgentDwnApi.agent setter for mobile');
+}
+
+/**
+ * Build the biometric vault used by the mobile agent. Constructed with
+ * the `SecureStorageAdapter` so the vault can persist its one-bit
+ * `initialized` / `biometric-state` flags through @enbox/auth storage.
+ */
+export function createBiometricVault(): BiometricVault {
+  return new BiometricVault({ secureStorage: new SecureStorageAdapter() });
 }
 
 export async function initializeAgent() {
   patchAgentDwnApiForMobile();
 
-  console.log('[agent-init] Creating auth manager...');
+  debugLog('[agent-init] Creating auth manager...');
   const authManager = await AuthManager.create({
     storage: new SecureStorageAdapter(),
     localDwnStrategy: 'off',
   });
-  console.log('[agent-init] Auth manager created.');
+  debugLog('[agent-init] Auth manager created.');
 
-  console.log('[agent-init] Creating agent...');
+  debugLog('[agent-init] Creating biometric vault...');
+  const vault = createBiometricVault();
+
+  debugLog('[agent-init] Creating agent...');
   const agent = await EnboxUserAgent.create({
     dataPath: 'ENBOX_AGENT',
     // Mobile wallet runs against remote DID-document endpoints.
@@ -70,8 +94,15 @@ export async function initializeAgent() {
     // which is meant for CLI/native desktop flows and triggers Node built-in
     // requires (`node:fs/promises`, `node:path`, `node:os`).
     localDwnStrategy: 'off',
+    // Inject the biometric-first IdentityVault so EnboxUserAgent.create
+    // does NOT fall back to the legacy password-based default. The
+    // injected vault's own `initialize({})` / `unlock({})` methods call
+    // the native biometric TurboModule; passwords flowing through
+    // `agent.initialize({ password })` / `agent.start({ password })`
+    // are ignored by BiometricVault.
+    agentVault: vault,
   });
-  console.log('[agent-init] Agent created.');
+  debugLog('[agent-init] Agent created.');
 
-  return { agent, authManager };
+  return { agent, authManager, vault };
 }

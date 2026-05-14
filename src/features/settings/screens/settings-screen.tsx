@@ -1,30 +1,184 @@
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useState } from 'react';
+import {
+  Alert,
+  Linking,
+  Pressable,
+  Share,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 
 import { Screen } from '@/components/ui/screen';
 import { ScreenHeader } from '@/components/ui/screen-header';
+import { useSessionStore } from '@/features/session/session-store';
 import { useAgentStore } from '@/lib/enbox/agent-store';
 import { useAppTheme, type AppTheme } from '@/theme';
 
-export interface SettingsScreenProps {
-  onLock: () => void;
-  onReset?: () => Promise<void>;
+// Sourced from package.json so the About row always mirrors the shipped
+// app's declared version (VAL-UX-053). Importing the field directly keeps
+// tests honest — they read the same constant — without pulling in any
+// runtime-only dependency.
+ 
+const APP_VERSION: string = require('../../../../package.json').version;
+
+// External-link targets surfaced in the About section. Hardcoded so the
+// URLs are reviewable in source and stable across builds (VAL-UX-053
+// requires `Linking.openURL` to be invoked with the exact URL on press).
+const PRIVACY_POLICY_URL = 'https://enbox.org/privacy';
+const TERMS_OF_SERVICE_URL = 'https://enbox.org/terms';
+
+/**
+ * Surface a useful one-liner from any reset / hydrate rejection.
+ * Prefers the native error `.code` (Keystore /
+ * Keychain / SecureStorage error tokens like `VAULT_ERROR_*`,
+ * `SECURE_STORAGE_*`) so the user / support team can correlate to
+ * the failure mode in logs. Falls back to `.message` and finally a
+ * generic string.
+ */
+function errorMessageFor(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as Error & { code?: unknown }).code;
+    if (typeof code === 'string' && code.length > 0) {
+      return err.message ? `${code}: ${err.message}` : code;
+    }
+    if (err.message) {
+      return err.message;
+    }
+  }
+  return 'unknown error';
 }
 
-export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
+export interface SettingsScreenProps {
+  onLock: () => void;
+}
+
+export function SettingsScreen({ onLock }: SettingsScreenProps) {
   const theme = useAppTheme();
   const agent = useAgentStore((s) => s.agent);
   const identityCount = useAgentStore((s) => s.identities.length);
   const agentError = useAgentStore((s) => s.error);
+  const exportIdentities = useAgentStore((s) => s.exportIdentities);
+  const importIdentities = useAgentStore((s) => s.importIdentities);
+
+  const [showImport, setShowImport] = useState(false);
+  const [importJson, setImportJson] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
 
   const agentDid = agent?.agentDid?.uri;
+
+  async function handleExportBackup(): Promise<void> {
+    if (isExporting) return;
+    setIsExporting(true);
+    try {
+      const json = await exportIdentities();
+      await Share.share({
+        title: 'Enbox identity backup',
+        message: json,
+      });
+    } catch (err) {
+      Alert.alert(
+        'Export failed',
+        err instanceof Error ? err.message : 'Could not export identities',
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  async function handleImportBackup(): Promise<void> {
+    if (!importJson.trim() || isImporting) return;
+    setIsImporting(true);
+    try {
+      const count = await importIdentities(importJson.trim());
+      setImportJson('');
+      setShowImport(false);
+      Alert.alert(
+        'Import complete',
+        `Imported ${count} ${count === 1 ? 'identity' : 'identities'}.`,
+      );
+    } catch (err) {
+      Alert.alert(
+        'Import failed',
+        err instanceof Error ? err.message : 'Could not import identities',
+      );
+    } finally {
+      setIsImporting(false);
+    }
+  }
+
+  async function performReset(): Promise<void> {
+    // Settings uses the same reset primitive as recovery restore:
+    // native vault wipe, LevelDB wipe, in-memory teardown, and session
+    // reset. Do not hydrate after a reset failure; retry sentinels keep
+    // cleanup armed, and the current route must keep the error visible.
+    let resetError: unknown = null;
+    try {
+      await useAgentStore.getState().reset();
+    } catch (err) {
+      resetError = err;
+      console.warn('[settings] reset wallet failed:', err);
+    }
+
+    if (resetError !== null) {
+      // Surface the failure in-session while retry sentinels keep the
+      // next agent init armed for cleanup.
+      const message = errorMessageFor(resetError);
+      Alert.alert(
+        'Reset failed',
+        `The wallet reset did not complete: ${message}\n\nYour data is in a partially-cleared state. The app will retry the cleanup the next time you open it. You can also try resetting again now.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Retry',
+            onPress: () => {
+              performReset().catch(() => {
+                // Already handled inside performReset.
+              });
+            },
+          },
+        ],
+      );
+      // CRITICAL: do NOT call hydrate(). Hydrating after a
+      // partial reset routes the user against a half-cleared
+      // SecureStorage view and traps them in unlock loops. The
+      // retry sentinels handle the recovery on the next cold
+      // launch; the user stays on Settings with the error
+      // visible until they tap Retry or background the app.
+      return;
+    }
+
+    // sessionStore.reset() leaves biometricStatus as `'unknown'`
+    // which would route the navigator to `Loading`. Re-run hydrate
+    // so biometric hardware is re-probed and routing returns to
+    // `Welcome` (first-launch flow) per VAL-UX-036. Best-effort —
+    // any failure is logged but must not throw out of the alert
+    // confirmation handler. Reached only on a SUCCESSFUL reset.
+    try {
+      await useSessionStore.getState().hydrate();
+    } catch (err) {
+      console.warn('[settings] post-reset hydrate failed:', err);
+    }
+  }
 
   function handleReset() {
     Alert.alert(
       'Reset wallet',
-      'This will erase all data including your identities and PIN. This cannot be undone.',
+      'This will erase your biometric-protected wallet, the biometric secret stored on this device, and all identities. This cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Reset', style: 'destructive', onPress: () => onReset?.() },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: () => {
+            performReset().catch(() => {
+              // performReset already logs its own failures; swallow
+              // here so the alert-button handler stays synchronous.
+            });
+          },
+        },
       ],
     );
   }
@@ -67,7 +221,6 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
           Security
         </Text>
         <SettingsRow label="Lock wallet" onPress={onLock} theme={theme} />
-        <SettingsRow label="Change PIN" disabled onPress={() => {}} theme={theme} />
         <SettingsRow label="Biometric unlock" disabled onPress={() => {}} theme={theme} />
       </View>
 
@@ -75,18 +228,95 @@ export function SettingsScreen({ onLock, onReset }: SettingsScreenProps) {
         <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
           Data
         </Text>
-        <SettingsRow label="Export backup" disabled onPress={() => {}} theme={theme} />
-        <SettingsRow label="Import backup" disabled onPress={() => {}} theme={theme} />
+        <SettingsRow
+          label={isExporting ? 'Exporting backup...' : 'Export backup'}
+          disabled={identityCount === 0 || isExporting}
+          onPress={() => {
+            handleExportBackup().catch(() => {});
+          }}
+          theme={theme}
+        />
+        <SettingsRow
+          label="Import backup"
+          onPress={() => setShowImport((value) => !value)}
+          theme={theme}
+        />
+        {showImport ? (
+          <View style={styles.importBox}>
+            <Text style={[styles.importHelp, { color: theme.colors.textMuted }]}>
+              Paste an Enbox identity backup JSON export. Imported identities
+              keep their exact DID and key material.
+            </Text>
+            <TextInput
+              accessibilityLabel="Identity backup JSON"
+              autoCapitalize="none"
+              autoCorrect={false}
+              multiline
+              onChangeText={setImportJson}
+              placeholder="[{...}]"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[
+                styles.importInput,
+                {
+                  backgroundColor: theme.colors.surfaceMuted,
+                  borderColor: theme.colors.border,
+                  color: theme.colors.text,
+                },
+              ]}
+              value={importJson}
+            />
+            <SettingsRow
+              label={isImporting ? 'Importing...' : 'Import pasted backup'}
+              disabled={!importJson.trim() || isImporting}
+              onPress={() => {
+                handleImportBackup().catch(() => {});
+              }}
+              theme={theme}
+            />
+          </View>
+        ) : null}
       </View>
 
-      {onReset && (
-        <View style={[styles.section, { borderColor: theme.colors.border }]}>
-          <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
-            Danger zone
+      <View style={[styles.section, { borderColor: theme.colors.border }]}>
+        <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
+          About
+        </Text>
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: theme.colors.textMuted }]}>App version</Text>
+          <Text
+            accessibilityLabel={`App version ${APP_VERSION}`}
+            style={[styles.infoValue, { color: theme.colors.text }]}
+            selectable
+          >
+            {APP_VERSION}
           </Text>
-          <SettingsRow label="Reset wallet" destructive onPress={handleReset} theme={theme} />
         </View>
-      )}
+        <SettingsRow
+          label="Privacy policy"
+          onPress={() => {
+            // `void` marks a deliberately-unawaited fire-and-forget promise.
+            // eslint-disable-next-line no-void
+            void Linking.openURL(PRIVACY_POLICY_URL);
+          }}
+          theme={theme}
+        />
+        <SettingsRow
+          label="Terms of service"
+          onPress={() => {
+            // `void` marks a deliberately-unawaited fire-and-forget promise.
+            // eslint-disable-next-line no-void
+            void Linking.openURL(TERMS_OF_SERVICE_URL);
+          }}
+          theme={theme}
+        />
+      </View>
+
+      <View style={[styles.section, { borderColor: theme.colors.border }]}>
+        <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
+          Danger zone
+        </Text>
+        <SettingsRow label="Reset wallet" destructive onPress={handleReset} theme={theme} />
+      </View>
     </Screen>
   );
 }
@@ -129,6 +359,9 @@ const styles = StyleSheet.create({
   infoRow: { paddingHorizontal: 16, paddingVertical: 10, gap: 2 },
   infoLabel: { fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
   infoValue: { fontSize: 13, fontFamily: 'monospace' },
+  importBox: { gap: 10, paddingHorizontal: 16, paddingVertical: 12 },
+  importHelp: { fontSize: 13, lineHeight: 18 },
+  importInput: { borderRadius: 14, borderWidth: 1, fontSize: 13, minHeight: 120, paddingHorizontal: 12, paddingVertical: 10, textAlignVertical: 'top' },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14 },
   rowLabel: { fontSize: 16 },
   rowChevron: { fontSize: 22 },
