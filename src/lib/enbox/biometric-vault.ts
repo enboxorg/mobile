@@ -12,8 +12,10 @@
  *   - Gate provisioning (`initialize()`) on `hasSecret()` so we never
  *     overwrite a live vault.
  *   - Prompt biometrics to retrieve the secret during `unlock()`.
- *   - Keep the derived seed / DID / CEK in memory only; `lock()` clears
- *     them, leaving the native secret intact.
+ *   - Keep only the active DID / CEK in memory after a normal unlock;
+ *     `lock()` clears them, leaving the native secret intact. The root
+ *     entropy is retained only during the first-backup resume flow where
+ *     the mnemonic must be re-derived for display.
  *   - Translate native error codes into stable `VAULT_ERROR_*` codes so
  *     the UI can route the user (invalidated -> recovery, cancel -> retry,
  *     etc.).
@@ -707,7 +709,7 @@ export class BiometricVault
   private readonly _unlockPrompt: typeof DEFAULT_UNLOCK_PROMPT;
   private readonly _provisionPrompt: typeof DEFAULT_PROVISION_PROMPT;
 
-  // In-memory secret bytes (undefined when locked).
+  // In-memory secret bytes (only populated during pending-backup resume).
   // Fields whose names combine sensitive tokens ("secret", "key") with a
   // raw-byte array type are routed through the neutral `BinaryBuffer`
   // alias from `./binary-types` to avoid Droid-Shield content-scanner
@@ -742,7 +744,7 @@ export class BiometricVault
   }
 
   async isInitialized(): Promise<boolean> {
-    if (this._secretBytes && this._bearerDid) {
+    if (this._bearerDid && this._contentEncryptionKey) {
       return true;
     }
     try {
@@ -763,7 +765,7 @@ export class BiometricVault
   }
 
   isLocked(): boolean {
-    return !this._secretBytes || !this._bearerDid || !this._contentEncryptionKey;
+    return !this._bearerDid || !this._contentEncryptionKey;
   }
 
   // ---------------------------------------------------------------------
@@ -906,13 +908,14 @@ export class BiometricVault
     // outer `finally` can scrub its buffers regardless of which
     // branch (success / derivation throw / rollback) we exit on.
     let rootHdKeyLocal: { privateKey?: Uint8Array; chainCode?: Uint8Array } | undefined;
+    let rootSeedLocal: Uint8Array | undefined;
     try {
       const mnemonic = entropyToMnemonic(entropy, wordlist);
       if (!validateMnemonic(mnemonic, wordlist)) {
         throw new VaultError('VAULT_ERROR', 'Derived mnemonic failed validation');
       }
-      const rootSeed = await mnemonicToSeed(mnemonic);
-      rootHdKeyLocal = HDKey.fromMasterSeed(rootSeed);
+      rootSeedLocal = await mnemonicToSeed(mnemonic);
+      rootHdKeyLocal = HDKey.fromMasterSeed(rootSeedLocal);
       const bearerDid = await this._didFactory({
         rootHdKey: rootHdKeyLocal,
         dwnEndpoints: params.dwnEndpoints,
@@ -924,8 +927,8 @@ export class BiometricVault
       //    was unread (every consumer used the local) and retained
       //    a 32-byte private key + 32-byte chain code that
       //    `_clearInMemoryState` only dropped — never zeroed.
-      this._secretBytes = entropy;
-      this._rootSeed = rootSeed;
+      this._secretBytes = undefined;
+      this._rootSeed = undefined;
       this._bearerDid = bearerDid;
       this._contentEncryptionKey = cek;
       this._biometricState = 'ready';
@@ -983,6 +986,8 @@ export class BiometricVault
       // here closes the residency window before GC is allowed
       // to reclaim the underlying buffers.
       zeroHdKeyBuffers(rootHdKeyLocal);
+      zeroBytes(entropy);
+      zeroBytes(rootSeedLocal);
     }
   }
 
@@ -990,7 +995,9 @@ export class BiometricVault
   // Unlock
   // ---------------------------------------------------------------------
 
-  async unlock(_params: { password?: string } = {}): Promise<void> {
+  async unlock(
+    _params: { password?: string; retainSecretForBackup?: boolean } = {},
+  ): Promise<void> {
     if (this._pendingUnlock) {
       return this._pendingUnlock;
     }
@@ -1011,7 +1018,7 @@ export class BiometricVault
           // need to know the slot is free so we can continue.
         }
       }
-      return this._doUnlock();
+      return this._doUnlock(Boolean(_params.retainSecretForBackup));
     })();
     this._pendingUnlock = task;
     try {
@@ -1021,7 +1028,7 @@ export class BiometricVault
     }
   }
 
-  private async _doUnlock(): Promise<void> {
+  private async _doUnlock(retainSecretForBackup = false): Promise<void> {
     // Probe native presence. A rejected probe is indeterminate and must
     // not be collapsed into "no vault".
     let hasExisting: boolean;
@@ -1148,6 +1155,8 @@ export class BiometricVault
     let secretBytes: Uint8Array | undefined;
     let rootSeed: Uint8Array | undefined;
     let cek: Uint8Array | undefined;
+    let publishedSecret = false;
+    let publishedCek = false;
     // Hold the local rootHdKey so the outer `finally`
     // can scrub its `chainCode` + `privateKey` buffers regardless
     // of which branch we exit on. See `_doInitialize` for the full
@@ -1167,15 +1176,21 @@ export class BiometricVault
       const bearerDid = await this._didFactory({ rootHdKey: rootHdKeyLocal });
       cek = await deriveContentEncryptionKey(rootHdKeyLocal);
 
-      // Atomic publish: assign all four fields in one synchronous
+      // Atomic publish: assign all unlock-visible fields in one synchronous
       // block AFTER every derivation step has succeeded. No partial
       // assignment is ever observable.
       // Do NOT store rootHdKey on `this`. See the
       // matching note in `_doInitialize`.
-      this._secretBytes = secretBytes;
-      this._rootSeed = rootSeed;
+      if (retainSecretForBackup) {
+        this._secretBytes = secretBytes;
+        publishedSecret = true;
+      } else {
+        this._secretBytes = undefined;
+      }
+      this._rootSeed = undefined;
       this._bearerDid = bearerDid;
       this._contentEncryptionKey = cek;
+      publishedCek = true;
       this._biometricState = 'ready';
     } catch (err) {
       // Zero local allocations before clearing any stale prior-unlock fields.
@@ -1190,6 +1205,13 @@ export class BiometricVault
       // derived material; the rootHdKey itself is no longer
       // referenced by any store-facing field.
       zeroHdKeyBuffers(rootHdKeyLocal);
+      if (!publishedSecret) {
+        zeroBytes(secretBytes);
+      }
+      zeroBytes(rootSeed);
+      if (!publishedCek) {
+        zeroBytes(cek);
+      }
     }
   }
 
@@ -1218,8 +1240,10 @@ export class BiometricVault
     //    missing-alias — but a rejection from a present-alias delete
     //    indicates a real Keystore / Keychain failure that we MUST
     //    surface.
+    let nativeDeleteSucceeded = false;
     try {
       await this._native.deleteSecret(WALLET_ROOT_KEY_ALIAS);
+      nativeDeleteSucceeded = true;
     } catch (err) {
       firstError = err;
     }
@@ -1230,7 +1254,7 @@ export class BiometricVault
     //    state. Both writes are independent — we attempt the second
     //    even if the first throws so a single corrupt key does not
     //    block the other.
-    if (this._secureStorage) {
+    if (this._secureStorage && nativeDeleteSucceeded) {
       try {
         await this._secureStorage.remove(INITIALIZED_STORAGE_KEY);
       } catch (err) {
@@ -1268,8 +1292,8 @@ export class BiometricVault
   /**
    * Re-derive the 24-word BIP-39 mnemonic from the vault's root entropy.
    *
-   * Only callable while the vault is unlocked — callers MUST have gone
-   * through `initialize()` / `unlock()` first so `_secretBytes` is
+   * Only callable after the pending-backup resume path has unlocked with
+   * `retainSecretForBackup=true`, so `_secretBytes` is temporarily
    * populated. The returned string is the same mnemonic that
    * `initialize()` produced for the caller-provided / CSPRNG entropy, so
    * this method can be used to re-show the phrase during the pending-

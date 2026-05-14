@@ -8,58 +8,79 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { Enbox } from '@enbox/api';
+import { ProfileDefinition } from '@enbox/protocols';
 
 import { AppButton } from '@/components/ui/app-button';
 import { Screen } from '@/components/ui/screen';
 import { ScreenHeader } from '@/components/ui/screen-header';
-import { useAgentStore } from '@/lib/enbox/agent-store';
 import { useAppTheme } from '@/theme';
 
 interface ResolveResult {
   didUri: string;
-  document: any;
+  profile: {
+    displayName: string;
+    tagline?: string;
+    bio?: string;
+  } | null;
   error?: string;
+}
+
+let anonymousEnbox: ReturnType<typeof Enbox.anonymous> | undefined;
+
+function getAnonymousEnbox() {
+  if (!anonymousEnbox) anonymousEnbox = Enbox.anonymous();
+  return anonymousEnbox;
+}
+
+async function fetchPublicProfile(did: string): Promise<ResolveResult['profile']> {
+  const { dwn } = getAnonymousEnbox();
+  const { records } = await dwn.records.query({
+    from: did,
+    filter: {
+      protocol: ProfileDefinition.protocol,
+      protocolPath: 'profile',
+    },
+  });
+
+  if (records.length === 0) {
+    return { displayName: '' };
+  }
+
+  const data = await records[0].data.json() as Record<string, string | undefined>;
+  return {
+    displayName: data.displayName ?? '',
+    tagline: data.tagline,
+    bio: data.bio,
+  };
 }
 
 export function SearchScreen() {
   const theme = useAppTheme();
-  const agent = useAgentStore((s) => s.agent);
   const [query, setQuery] = useState('');
   const [resolving, setResolving] = useState(false);
   const [result, setResult] = useState<ResolveResult | null>(null);
 
   const handleResolve = useCallback(async () => {
-    if (!query.trim() || !agent || resolving) return;
+    if (!query.trim() || resolving) return;
 
     setResolving(true);
     setResult(null);
 
     try {
-      const resolution = await agent.did.resolve(query.trim());
-
-      if (resolution.didResolutionMetadata.error) {
-        setResult({
-          didUri: query.trim(),
-          document: null,
-          error: resolution.didResolutionMetadata.errorMessage
-            ?? resolution.didResolutionMetadata.error,
-        });
-      } else {
-        setResult({
-          didUri: query.trim(),
-          document: resolution.didDocument,
-        });
-      }
+      const did = query.trim();
+      const profile = await fetchPublicProfile(did);
+      setResult({ didUri: did, profile });
     } catch (err) {
       setResult({
         didUri: query.trim(),
-        document: null,
+        profile: null,
         error: err instanceof Error ? err.message : 'Resolution failed',
       });
     } finally {
       setResolving(false);
     }
-  }, [query, agent, resolving]);
+  }, [query, resolving]);
 
   return (
     <KeyboardAvoidingView
@@ -69,7 +90,7 @@ export function SearchScreen() {
       <Screen>
         <ScreenHeader
           title="Search"
-          subtitle="Look up a decentralized identifier to view its public document."
+          subtitle="Look up a decentralized identifier to view its public profile."
         />
 
         <View style={styles.searchRow}>
@@ -108,37 +129,29 @@ export function SearchScreen() {
           </View>
         )}
 
-        {result?.document && (
-          <View style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
-            <Text style={[styles.cardTitle, { color: theme.colors.success }]}>Resolved</Text>
+        {result?.profile && (
+          <View
+            style={[
+              styles.card,
+              { backgroundColor: theme.colors.surface, borderColor: theme.colors.border },
+            ]}
+          >
+            <Text style={[styles.cardTitle, { color: theme.colors.success }]}>Public profile</Text>
             <Text style={[styles.didUri, { color: theme.colors.accent }]} selectable>{result.didUri}</Text>
 
-            {result.document.service?.length > 0 && (
-              <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>Services</Text>
-                {result.document.service.map((svc: any, i: number) => (
-                  <View key={i} style={styles.serviceRow}>
-                    <Text style={[styles.serviceType, { color: theme.colors.text }]}>{svc.type}</Text>
-                    <Text style={[styles.serviceEndpoint, { color: theme.colors.textMuted }]} numberOfLines={1}>
-                      {Array.isArray(svc.serviceEndpoint) ? svc.serviceEndpoint[0] : svc.serviceEndpoint}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            )}
-
-            {result.document.verificationMethod?.length > 0 && (
-              <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
-                  Verification methods ({result.document.verificationMethod.length})
-                </Text>
-                {result.document.verificationMethod.map((vm: any, i: number) => (
-                  <Text key={i} style={[styles.vmId, { color: theme.colors.text }]} numberOfLines={1}>
-                    {vm.id} ({vm.type})
-                  </Text>
-                ))}
-              </View>
-            )}
+            <Text style={[styles.profileName, { color: theme.colors.text }]}>
+              {result.profile.displayName || 'Unnamed identity'}
+            </Text>
+            {result.profile.tagline ? (
+              <Text style={[styles.cardBody, { color: theme.colors.textMuted }]}>
+                {result.profile.tagline}
+              </Text>
+            ) : null}
+            {result.profile.bio ? (
+              <Text style={[styles.cardBody, { color: theme.colors.textMuted }]}>
+                {result.profile.bio}
+              </Text>
+            ) : null}
           </View>
         )}
 
@@ -146,7 +159,7 @@ export function SearchScreen() {
           <View style={[styles.emptyState, { borderColor: theme.colors.border }]}>
             <Text style={[styles.emptyTitle, { color: theme.colors.textMuted }]}>Enter a DID to search</Text>
             <Text style={[styles.emptyBody, { color: theme.colors.textMuted }]}>
-              Results will show the public DID document including services and verification methods.
+              Results will show public profile data published to the DID&apos;s DWN.
             </Text>
           </View>
         )}
@@ -164,6 +177,7 @@ const styles = StyleSheet.create({
   card: { borderRadius: 24, borderWidth: 1, padding: 20, gap: 10 },
   cardTitle: { fontSize: 18, fontWeight: '700' },
   cardBody: { fontSize: 15, lineHeight: 22 },
+  profileName: { fontSize: 20, fontWeight: '700' },
   didUri: { fontSize: 13, fontFamily: 'monospace' },
   section: { gap: 6, marginTop: 4 },
   sectionTitle: { fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase' },

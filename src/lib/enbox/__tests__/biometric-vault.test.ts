@@ -1053,7 +1053,6 @@ describe('BiometricVault — prior-init routing and in-memory cleanup', () => {
     // and serving derived state.
     expect(vault.isLocked()).toBe(false);
     await expect(vault.getDid()).resolves.toBeDefined();
-    await expect(vault.getMnemonic()).resolves.toBeDefined();
     await expect(
       vault.encryptData({ plaintext: new Uint8Array([1, 2, 3]) }),
     ).resolves.toBeDefined();
@@ -1331,7 +1330,6 @@ describe('BiometricVault — getSecret NOT_FOUND race and derivation cleanup', (
     // Pre-condition: vault is unlocked and serving a DID.
     expect(vault.isLocked()).toBe(false);
     await expect(vault.getDid()).resolves.toBeDefined();
-    await expect(vault.getMnemonic()).resolves.toBeDefined();
 
     // Now: lock and trigger an unlock attempt where DID derivation
     // throws AFTER getSecret succeeds.

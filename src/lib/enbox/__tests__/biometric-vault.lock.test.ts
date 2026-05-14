@@ -213,14 +213,13 @@ describe('BiometricVault.lock() — primitive contract (auto-lock prerequisite)'
 });
 
 // ===================================================================
-// VAL-VAULT-028 — getMnemonic() re-derives the BIP-39 phrase from the
-// vault's in-memory entropy so the pending-first-backup resume flow
-// can re-show the 24 words WITHOUT triggering a second biometric
-// prompt (the caller has already gone through `unlock()` / the new
-// agent's `start()`).
+// VAL-VAULT-028 — getMnemonic() re-derives the BIP-39 phrase only from
+// the pending-first-backup resume path's temporary in-memory entropy so
+// the 24 words can be re-shown WITHOUT triggering a second biometric
+// prompt. Normal initialize/unlock flows must not retain root entropy.
 // ===================================================================
 
-describe('BiometricVault.getMnemonic() — re-derive phrase from in-memory secret (VAL-VAULT-028)', () => {
+describe('BiometricVault.getMnemonic() — temporary backup-secret retention (VAL-VAULT-028)', () => {
   // The 24-word all-`abandon` / `art` phrase is the BIP-39 phrase
   // that decodes to 32 zero bytes of entropy. Used here as a stable,
   // well-known fixture: initialize({ recoveryPhrase: FIXED_MNEMONIC })
@@ -231,20 +230,24 @@ describe('BiometricVault.getMnemonic() — re-derive phrase from in-memory secre
     'abandon abandon abandon abandon abandon abandon ' +
     'abandon abandon abandon abandon abandon art';
 
-  it('round-trips the mnemonic passed to initialize() — unlocked vault returns it verbatim', async () => {
+  it('does not retain mnemonic entropy after initialize()', async () => {
     const vault = makeTestVault();
     await vault.initialize({ recoveryPhrase: FIXED_MNEMONIC });
 
-    const mnemonic = await vault.getMnemonic();
-    expect(mnemonic).toBe(FIXED_MNEMONIC);
+    expect(vault.isLocked()).toBe(false);
+    await expect(vault.getMnemonic()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
   });
 
-  it('does NOT trigger a native biometric prompt — entropy is already in memory', async () => {
+  it('does NOT trigger a second native biometric prompt after backup-retention unlock', async () => {
     const vault = makeTestVault();
     await vault.initialize({ recoveryPhrase: FIXED_MNEMONIC });
+    await vault.lock();
+    await vault.unlock({ retainSecretForBackup: true });
 
     // getMnemonic MUST NOT trigger a native biometric prompt —
-    // entropy is already in memory from initialize() / unlock().
+    // entropy is already in memory from the explicit backup-retention unlock.
     // getSecret() is the native method that would prompt biometrics
     // on a real device, so its call count is the canonical signal.
     const getSecretCountBefore = native.getSecret.mock.calls.length;
@@ -254,23 +257,34 @@ describe('BiometricVault.getMnemonic() — re-derive phrase from in-memory secre
     expect(native.getSecret.mock.calls.length).toBe(getSecretCountBefore);
   });
 
-  it('returns the same mnemonic across initialize → lock → unlock → getMnemonic (round-trip)', async () => {
+  it('returns the same mnemonic across initialize → lock → backup-retention unlock → getMnemonic', async () => {
     const vault = makeTestVault();
     await vault.initialize({ recoveryPhrase: FIXED_MNEMONIC });
-    expect(await vault.getMnemonic()).toBe(FIXED_MNEMONIC);
 
     // Simulate the auto-lock → re-foreground sequence that underlies
     // the resumePendingBackup() path.
     await vault.lock();
     expect(vault.isLocked()).toBe(true);
 
-    await vault.unlock({});
+    await vault.unlock({ retainSecretForBackup: true });
     expect(vault.isLocked()).toBe(false);
 
     // Same entropy → same mnemonic. This pins the deterministic
     // round-trip so a future entropy-encoding refactor can't silently
     // break the pending-backup resume flow.
     expect(await vault.getMnemonic()).toBe(FIXED_MNEMONIC);
+  });
+
+  it('does not retain mnemonic entropy after a normal unlock', async () => {
+    const vault = makeTestVault();
+    await vault.initialize({ recoveryPhrase: FIXED_MNEMONIC });
+    await vault.lock();
+    await vault.unlock({});
+
+    expect(vault.isLocked()).toBe(false);
+    await expect(vault.getMnemonic()).rejects.toMatchObject({
+      code: 'VAULT_ERROR_LOCKED',
+    });
   });
 
   it('rejects with VAULT_ERROR_LOCKED when the vault is locked', async () => {
