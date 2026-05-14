@@ -1,5 +1,6 @@
 #import "RCTNativeCrypto.h"
 #import <CommonCrypto/CommonDigest.h>
+#import <CommonCrypto/CommonCryptor.h>
 #import <CommonCrypto/CommonKeyDerivation.h>
 #import <Security/SecRandom.h>
 
@@ -53,7 +54,7 @@
 
   int status = CCKeyDerivationPBKDF(
     kCCPBKDF2,
-    passwordData.bytes, passwordData.length,
+    (const char *)passwordData.bytes, passwordData.length,
     (const uint8_t *)saltData.bytes, saltData.length,
     kCCPRFHmacAlgSHA256,
     (uint)iterations,
