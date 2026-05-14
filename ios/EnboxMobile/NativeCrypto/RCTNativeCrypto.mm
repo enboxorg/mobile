@@ -58,7 +58,7 @@
     (const uint8_t *)saltData.bytes, saltData.length,
     kCCPRFHmacAlgSHA256,
     (uint)iterations,
-    derivedKey.mutableBytes, keyLen
+    (uint8_t *)derivedKey.mutableBytes, keyLen
   );
 
   if (status != kCCSuccess) {
