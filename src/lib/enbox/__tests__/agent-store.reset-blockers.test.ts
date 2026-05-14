@@ -444,16 +444,12 @@ describe('useAgentStore.reset() — no-vault fallback clears SecureStorage keys'
       /simulated native error/,
     );
 
-    // SecureStorage flags STILL cleared (defense in depth — even
-    // though the native delete failed, removing the flags ensures the
-    // hydrate gate can route to onboarding instead of an unlock loop).
+    // SecureStorage flags are preserved when the native wipe fails.
+    // Clearing them first creates a mixed partial-reset state where the
+    // app forgets the wallet while the OS-gated secret may still exist.
     const deletedKeys = nativeSecure.deleteItem.mock.calls.map((c) => c[0]);
-    expect(deletedKeys).toEqual(
-      expect.arrayContaining([
-        'enbox:enbox.vault.initialized',
-        'enbox:enbox.vault.biometric-state',
-      ]),
-    );
+    expect(deletedKeys).not.toContain('enbox:enbox.vault.initialized');
+    expect(deletedKeys).not.toContain('enbox:enbox.vault.biometric-state');
 
     // The vault-reset-pending sentinel was persisted under the
     // canonical key. SecureStorageAdapter prefixes every key with

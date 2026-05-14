@@ -16,6 +16,9 @@ export const WEB_WALLET_URL = 'https://enbox-wallet.pages.dev';
 
 const REGISTRATION_TOKENS_KEY = 'enbox.registration.tokens';
 const ENABLE_IDENTITY_PROVISIONING_LOGS = process.env.ENBOX_DEBUG_AGENT === '1';
+const SOCIAL_GRAPH_PROTOCOL_URI = 'https://identity.foundation/protocols/social-graph';
+const PROFILE_PROTOCOL_URI = 'https://identity.foundation/protocols/profile';
+const CONNECT_PROTOCOL_URI = 'https://identity.foundation/protocols/connect';
 
 type RegistrationTokenData = {
   registrationToken: string;
@@ -84,16 +87,29 @@ type ProviderAuthInfo = NonNullable<ServerInfoSummary['providerAuth']>;
 
 type IdentityAgent = {
   agentDid?: DidUri;
+  did?: {
+    delete?: EnboxUserAgent['did']['delete'];
+  };
   identity: {
     create(params: MobileIdentityCreateOptions): Promise<CreatedIdentity>;
     list(): Promise<IdentityRecord[]>;
+    get?: EnboxUserAgent['identity']['get'];
+    import?: EnboxUserAgent['identity']['import'];
+    export?: EnboxUserAgent['identity']['export'];
+    delete?: EnboxUserAgent['identity']['delete'];
+    setMetadataName?: EnboxUserAgent['identity']['setMetadataName'];
   };
   processDwnRequest?: EnboxUserAgent['processDwnRequest'];
   rpc?: {
     getServerInfo?: (url: string) => Promise<ServerInfoSummary>;
     sendDwnRequest?: EnboxUserAgent['rpc']['sendDwnRequest'];
   };
-  sync?: Partial<Pick<EnboxUserAgent['sync'], 'registerIdentity'>>;
+  sync?: Partial<
+    Pick<
+      EnboxUserAgent['sync'],
+      'registerIdentity' | 'unregisterIdentity' | 'startSync' | 'stopSync' | 'sync'
+    >
+  >;
 };
 
 function debugWarn(message: string, error?: unknown): void {
@@ -106,7 +122,18 @@ function loadEnboxApi(): typeof import('@enbox/api') {
 }
 
 function loadProtocols(): typeof import('@enbox/protocols') {
-  return require('@enbox/protocols') as typeof import('@enbox/protocols');
+  try {
+    return require('@enbox/protocols') as typeof import('@enbox/protocols');
+  } catch (err) {
+    debugWarn('Falling back to inline protocol metadata:', err);
+    return {
+      SocialGraphDefinition: { protocol: SOCIAL_GRAPH_PROTOCOL_URI },
+      ProfileDefinition: { protocol: PROFILE_PROTOCOL_URI },
+      ConnectDefinition: { protocol: CONNECT_PROTOCOL_URI },
+      ProfileProtocol: { protocol: PROFILE_PROTOCOL_URI },
+      ConnectProtocol: { protocol: CONNECT_PROTOCOL_URI },
+    } as unknown as typeof import('@enbox/protocols');
+  }
 }
 
 function loadDwnRegistrar(): typeof import('@enbox/dwn-clients').DwnRegistrar {
@@ -149,6 +176,172 @@ function loadRequiredProtocols(): readonly DwnProtocolDefinition[] {
     ProfileDefinition,
     ConnectDefinition,
   ] as const;
+}
+
+function requiredProtocolUris(): string[] {
+  return loadRequiredProtocols().map((definition) => definition.protocol);
+}
+
+async function registerSyncIdentity(
+  agent: IdentityAgent,
+  did: string,
+  protocols?: string[],
+): Promise<boolean> {
+  if (!agent.sync?.registerIdentity) return false;
+  try {
+    await agent.sync.registerIdentity({
+      did,
+      ...(protocols ? { options: { protocols } } : {}),
+    });
+    return true;
+  } catch {
+    // Already registered or unavailable offline.
+    return false;
+  }
+}
+
+export async function startWalletSync(agent: IdentityAgent): Promise<void> {
+  if (!agent.sync?.startSync) return;
+  try {
+    await agent.sync.startSync({ mode: 'live', interval: '5m' });
+  } catch (err) {
+    debugWarn('Failed to start wallet sync:', err);
+  }
+}
+
+export async function stopWalletSync(agent: IdentityAgent): Promise<void> {
+  if (!agent.sync?.stopSync) return;
+  try {
+    await agent.sync.stopSync(2000);
+  } catch (err) {
+    debugWarn('Failed to stop wallet sync:', err);
+  }
+}
+
+export async function ensurePostSession(
+  agent: IdentityAgent,
+  endpoints: string[] = DEFAULT_DWN_ENDPOINTS,
+): Promise<void> {
+  try {
+    await ensureRegistration(agent, normalizeEndpoints(endpoints));
+  } catch (err) {
+    debugWarn('Post-session DWN registration failed:', err);
+  }
+
+  if (agent.agentDid?.uri) {
+    await registerSyncIdentity(agent, agent.agentDid.uri);
+  }
+
+  if (agent.sync?.registerIdentity) {
+    const protocolUris = requiredProtocolUris();
+    try {
+      const identities = await agent.identity.list();
+      for (const identity of identities) {
+        const did = identity.metadata?.connectedDid ?? identity.did?.uri ?? identity.metadata?.uri;
+        if (did) {
+          await registerSyncIdentity(agent, did, protocolUris);
+        }
+      }
+    } catch (err) {
+      debugWarn('Post-session identity sync registration failed:', err);
+    }
+  }
+
+  await startWalletSync(agent);
+}
+
+export async function recoverWalletFromSync(
+  agent: IdentityAgent,
+  endpoints: string[] = DEFAULT_DWN_ENDPOINTS,
+): Promise<void> {
+  const canRegisterSync = typeof agent.sync?.registerIdentity === 'function';
+  const canPullSync = typeof agent.sync?.sync === 'function';
+  const canProvisionDwn = supportsDwnProvisioning(agent);
+
+  if (!canRegisterSync && !canPullSync && !canProvisionDwn) {
+    await startWalletSync(agent);
+    return;
+  }
+
+  const dwnEndpoints = normalizeEndpoints(endpoints);
+  const protocolDefinitions = loadRequiredProtocols();
+  const protocolUris = protocolDefinitions.map((definition) => definition.protocol);
+
+  try {
+    await ensureRegistration(agent, dwnEndpoints);
+  } catch (err) {
+    debugWarn('Restore DWN registration failed before sync pull:', err);
+  }
+
+  await stopWalletSync(agent);
+
+  if (agent.agentDid?.uri) {
+    await registerSyncIdentity(agent, agent.agentDid.uri);
+  }
+
+  if (agent.sync?.sync) {
+    try {
+      await agent.sync.sync('pull');
+    } catch (err) {
+      debugWarn('Restore identity-metadata pull failed:', err);
+    }
+  }
+
+  let identities: IdentityRecord[] = [];
+  try {
+    identities = await agent.identity.list();
+  } catch (err) {
+    debugWarn('Restore identity list after metadata pull failed:', err);
+  }
+
+  for (const identity of identities) {
+    const did = identity.metadata?.connectedDid ?? identity.did?.uri ?? identity.metadata?.uri;
+    if (did) {
+      await registerSyncIdentity(agent, did, protocolUris);
+    }
+  }
+
+  try {
+    await ensureRegistration(agent, dwnEndpoints);
+  } catch (err) {
+    debugWarn('Restore DWN registration failed after identity pull:', err);
+  }
+
+  if (agent.sync?.sync) {
+    try {
+      await agent.sync.sync('pull');
+    } catch (err) {
+      debugWarn('Restore profile/data pull failed:', err);
+    }
+  }
+
+  try {
+    identities = await agent.identity.list();
+  } catch (err) {
+    debugWarn('Restore identity list after data pull failed:', err);
+  }
+
+  if (canProvisionDwn) {
+    for (const identity of identities) {
+      const did = identity.did?.uri ?? identity.metadata?.uri;
+      if (!did) continue;
+      try {
+        await installIdentityProtocols(agent, did, protocolDefinitions);
+      } catch (err) {
+        debugWarn(`Restore protocol install for ${did} failed:`, err);
+      }
+    }
+  }
+
+  if (agent.sync?.sync) {
+    try {
+      await agent.sync.sync('push');
+    } catch (err) {
+      debugWarn('Restore protocol push failed:', err);
+    }
+  }
+
+  await startWalletSync(agent);
 }
 
 async function readRegistrationTokens(
@@ -453,20 +646,13 @@ export async function createMobileIdentity(
     shouldProvisionDwn || agent.sync?.registerIdentity
       ? loadRequiredProtocols()
       : [];
+  const protocolUris = requiredProtocolUris();
 
-  if (agent.sync?.registerIdentity) {
-    try {
-      await agent.sync.registerIdentity({
-        did,
-        options: {
-          protocols: protocolDefinitions.map((definition) => definition.protocol),
-        },
-      });
-    } catch {
-      // Already registered or unavailable offline. Local provisioning below
-      // remains the source of truth for the created identity.
-    }
+  if (agent.agentDid?.uri) {
+    await registerSyncIdentity(agent, agent.agentDid.uri);
   }
+
+  await registerSyncIdentity(agent, did, protocolUris);
 
   if (shouldProvisionDwn) {
     await ensureRegistration(agent, dwnEndpoints);
@@ -475,5 +661,98 @@ export async function createMobileIdentity(
     await createWalletRecord(agent, did);
   }
 
+  await startWalletSync(agent);
+
   return identity as BearerIdentity;
+}
+
+export async function importMobileIdentity(
+  agent: IdentityAgent,
+  portableIdentity: any,
+): Promise<BearerIdentity> {
+  if (!agent.identity.import) {
+    throw new Error('Identity import is not available');
+  }
+
+  const did =
+    portableIdentity?.portableDid?.uri ??
+    portableIdentity?.did?.uri ??
+    portableIdentity?.metadata?.uri;
+  if (typeof did !== 'string' || did.length === 0) {
+    throw new Error('Imported identity is missing a DID URI');
+  }
+
+  if (agent.identity.get) {
+    const existing = await agent.identity.get({ didUri: did });
+    if (existing) throw new Error(`Identity already exists: ${did}`);
+  }
+
+  const identity = await agent.identity.import({ portableIdentity });
+  const importedDid = getIdentityDid(identity);
+  const protocolDefinitions = loadRequiredProtocols();
+  const protocolUris = protocolDefinitions.map((definition) => definition.protocol);
+
+  if (agent.agentDid?.uri) {
+    await registerSyncIdentity(agent, agent.agentDid.uri);
+  }
+  await registerSyncIdentity(agent, importedDid, protocolUris);
+  if (supportsDwnProvisioning(agent)) {
+    await ensureRegistration(agent, DEFAULT_DWN_ENDPOINTS);
+    await installIdentityProtocols(agent, importedDid, protocolDefinitions);
+    await createWalletRecord(agent, importedDid);
+  }
+  await startWalletSync(agent);
+
+  return identity as BearerIdentity;
+}
+
+export async function updateMobileIdentityName(
+  agent: IdentityAgent,
+  did: string,
+  name: string,
+): Promise<void> {
+  const nextName = name.trim();
+  if (!nextName) throw new Error('Identity name is required');
+  if (!agent.identity.setMetadataName) {
+    throw new Error('Identity metadata updates are not available');
+  }
+
+  await agent.identity.setMetadataName({ didUri: did, name: nextName });
+
+  try {
+    await writeInitialProfile(agent, did, nextName);
+  } catch (err) {
+    debugWarn(`Profile update for ${did} failed:`, err);
+  }
+
+  await startWalletSync(agent);
+}
+
+export async function deleteMobileIdentity(
+  agent: IdentityAgent,
+  did: string,
+): Promise<void> {
+  if (!agent.identity.delete) {
+    throw new Error('Identity delete is not available');
+  }
+
+  if (agent.sync?.unregisterIdentity) {
+    try {
+      await agent.sync.unregisterIdentity(did);
+    } catch (err) {
+      debugWarn(`Sync unregister for ${did} failed:`, err);
+    }
+  }
+
+  await agent.identity.delete({ didUri: did });
+
+  if (agent.did?.delete && agent.agentDid?.uri) {
+    try {
+      await agent.did.delete({ didUri: did, tenant: agent.agentDid.uri });
+    } catch (err) {
+      debugWarn(`DID delete for ${did} failed:`, err);
+    }
+  }
+
+  await startWalletSync(agent);
 }

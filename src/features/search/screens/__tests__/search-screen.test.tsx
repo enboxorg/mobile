@@ -1,13 +1,39 @@
 /**
  * SearchScreen regression tests (VAL-UX-052).
  *
- * The biometric-first refactor must not change the DID-resolution
- * surface: when the user types a DID and presses Resolve, the screen
- * still calls `agent.did.resolve(did)` and renders the resolved
- * document. Biometric/PIN copy must not leak into Search.
+ * Search mirrors the web wallet's public-profile lookup surface: when
+ * the user types a DID and presses Resolve, the screen performs an
+ * anonymous DWN profile query and renders public profile data.
+ * Biometric/PIN copy must not leak into Search.
  */
 
- 
+const mockRecordsQuery = jest.fn();
+
+jest.mock(
+  '@enbox/api',
+  () => ({
+    __esModule: true,
+    Enbox: {
+      anonymous: jest.fn(() => ({
+        dwn: {
+          records: {
+            query: mockRecordsQuery,
+          },
+        },
+      })),
+    },
+  }),
+  { virtual: true },
+);
+
+jest.mock(
+  '@enbox/protocols',
+  () => ({
+    __esModule: true,
+    ProfileDefinition: { protocol: 'https://identity.foundation/protocols/profile' },
+  }),
+  { virtual: true },
+);
 
 jest.mock('@/lib/enbox/agent-store', () => {
   const { create } = require('zustand');
@@ -38,6 +64,7 @@ const agentStoreMock = require('@/lib/enbox/agent-store') as {
 
 describe('SearchScreen — VAL-UX-052 regression', () => {
   beforeEach(() => {
+    mockRecordsQuery.mockReset();
     agentStoreMock.__mockResolve.mockReset();
     // Ensure the agent stub is restored between tests.
     agentStoreMock.__setAgent({ did: { resolve: agentStoreMock.__mockResolve } });
@@ -51,15 +78,19 @@ describe('SearchScreen — VAL-UX-052 regression', () => {
     expect(screen.getByPlaceholderText(/did:/)).toBeTruthy();
   });
 
-  it('calls agent.did.resolve with the trimmed DID and renders the document on success', async () => {
-    const document = {
-      id: 'did:dht:abc',
-      service: [{ type: 'IdentityHub', serviceEndpoint: 'https://dwn.example' }],
-      verificationMethod: [{ id: 'did:dht:abc#0', type: 'Ed25519VerificationKey2020' }],
-    };
-    agentStoreMock.__mockResolve.mockResolvedValue({
-      didResolutionMetadata: {},
-      didDocument: document,
+  it('queries the public profile with the trimmed DID and renders profile data on success', async () => {
+    mockRecordsQuery.mockResolvedValue({
+      records: [
+        {
+          data: {
+            json: jest.fn(async () => ({
+              displayName: 'Alice',
+              tagline: 'Decentralized builder',
+              bio: 'Building with Enbox.',
+            })),
+          },
+        },
+      ],
     });
 
     const screen = render(<SearchScreen />);
@@ -74,21 +105,22 @@ describe('SearchScreen — VAL-UX-052 regression', () => {
     });
 
     await waitFor(() => {
-      expect(agentStoreMock.__mockResolve).toHaveBeenCalledWith('did:dht:abc');
+      expect(mockRecordsQuery).toHaveBeenCalledWith({
+        from: 'did:dht:abc',
+        filter: {
+          protocol: 'https://identity.foundation/protocols/profile',
+          protocolPath: 'profile',
+        },
+      });
     });
-    expect(screen.getByText('Resolved')).toBeTruthy();
+    expect(screen.getByText('Public profile')).toBeTruthy();
     expect(screen.getByText('did:dht:abc')).toBeTruthy();
-    expect(screen.getByText('IdentityHub')).toBeTruthy();
+    expect(screen.getByText(/Alice/)).toBeTruthy();
+    expect(screen.getByText(/Decentralized builder/)).toBeTruthy();
   });
 
-  it('renders the inline error card when the resolver reports an error', async () => {
-    agentStoreMock.__mockResolve.mockResolvedValue({
-      didResolutionMetadata: {
-        error: 'notFound',
-        errorMessage: 'DID not found on the DHT',
-      },
-      didDocument: null,
-    });
+  it('renders an unnamed profile card when no profile record exists', async () => {
+    mockRecordsQuery.mockResolvedValue({ records: [] });
 
     const screen = render(<SearchScreen />);
     await act(async () => {
@@ -99,13 +131,12 @@ describe('SearchScreen — VAL-UX-052 regression', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText('Resolution failed')).toBeTruthy();
+      expect(screen.getByText('Unnamed identity')).toBeTruthy();
     });
-    expect(screen.getByText('DID not found on the DHT')).toBeTruthy();
   });
 
-  it('renders the Resolution failed card when resolve throws', async () => {
-    agentStoreMock.__mockResolve.mockRejectedValue(new Error('network down'));
+  it('renders the Resolution failed card when profile lookup throws', async () => {
+    mockRecordsQuery.mockRejectedValue(new Error('network down'));
 
     const screen = render(<SearchScreen />);
     await act(async () => {
@@ -130,7 +161,7 @@ describe('SearchScreen — VAL-UX-052 regression', () => {
     await act(async () => {
       fireEvent.press(screen.getByText('Resolve'));
     });
-    expect(agentStoreMock.__mockResolve).not.toHaveBeenCalled();
+    expect(mockRecordsQuery).not.toHaveBeenCalled();
 
     // Type a non-DID query — the CTA is disabled and pressing it does nothing.
     await act(async () => {
@@ -139,23 +170,7 @@ describe('SearchScreen — VAL-UX-052 regression', () => {
     await act(async () => {
       fireEvent.press(screen.getByText('Resolve'));
     });
-    expect(agentStoreMock.__mockResolve).not.toHaveBeenCalled();
-  });
-
-  it('does not call resolve when the agent is absent (locked/uninitialized state)', async () => {
-    agentStoreMock.__setAgent(null);
-
-    const screen = render(<SearchScreen />);
-    await act(async () => {
-      fireEvent.changeText(
-        screen.getByLabelText('Search DID'),
-        'did:dht:abc',
-      );
-    });
-    await act(async () => {
-      fireEvent.press(screen.getByText('Resolve'));
-    });
-    expect(agentStoreMock.__mockResolve).not.toHaveBeenCalled();
+    expect(mockRecordsQuery).not.toHaveBeenCalled();
   });
 
   it('does not render any PIN-era copy (regression guard)', () => {

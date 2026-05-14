@@ -41,6 +41,74 @@ if (
   };
 }
 
+// EventTarget / CustomEvent — Hermes does not expose the full browser event
+// surface, while @enbox/api defines LiveQuery classes at module load that
+// extend EventTarget and CustomEvent. Keep this minimal but standards-shaped
+// enough for add/remove/dispatch and `.detail` consumers.
+if (typeof globalThis.Event === 'undefined') {
+  (globalThis as any).Event = class Event {
+    public readonly type: string;
+    public readonly bubbles: boolean;
+    public readonly cancelable: boolean;
+    public defaultPrevented = false;
+
+    constructor(type: string, init: EventInit = {}) {
+      this.type = type;
+      this.bubbles = Boolean(init.bubbles);
+      this.cancelable = Boolean(init.cancelable);
+    }
+
+    preventDefault(): void {
+      if (this.cancelable) this.defaultPrevented = true;
+    }
+  };
+}
+
+if (typeof globalThis.EventTarget === 'undefined') {
+  (globalThis as any).EventTarget = class EventTarget {
+    private readonly listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
+      if (!listener) return;
+      let listenersForType = this.listeners.get(type);
+      if (!listenersForType) {
+        listenersForType = new Set();
+        this.listeners.set(type, listenersForType);
+      }
+      listenersForType.add(listener);
+    }
+
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
+      if (!listener) return;
+      this.listeners.get(type)?.delete(listener);
+    }
+
+    dispatchEvent(event: Event): boolean {
+      const listenersForType = this.listeners.get(event.type);
+      if (!listenersForType) return !event.defaultPrevented;
+      for (const listener of [...listenersForType]) {
+        if (typeof listener === 'function') {
+          listener.call(this, event);
+        } else {
+          listener.handleEvent(event);
+        }
+      }
+      return !event.defaultPrevented;
+    }
+  };
+}
+
+if (typeof globalThis.CustomEvent === 'undefined') {
+  (globalThis as any).CustomEvent = class CustomEvent<T = unknown> extends Event {
+    public readonly detail: T | null;
+
+    constructor(type: string, init: CustomEventInit<T> = {}) {
+      super(type, init);
+      this.detail = init.detail ?? null;
+    }
+  };
+}
+
 // crypto.subtle + crypto.getRandomValues
 import { install as installCrypto } from 'react-native-quick-crypto';
 installCrypto();

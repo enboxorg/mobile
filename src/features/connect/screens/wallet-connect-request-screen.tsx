@@ -96,7 +96,7 @@ export function WalletConnectRequestScreen() {
 
   useEffect(() => {
     if (!selectedDid && identities.length > 0) {
-      setSelectedDid(identities[0].metadata.uri);
+      setSelectedDid(identities[0].metadata?.uri ?? identities[0].did?.uri);
     }
   }, [identities, selectedDid]);
 
@@ -128,7 +128,7 @@ export function WalletConnectRequestScreen() {
     setCreatingIdentity(true);
     try {
       const identity = await createIdentity(identityName.trim());
-      setSelectedDid(identity.metadata.uri);
+      setSelectedDid(identity.metadata?.uri ?? identity.did?.uri);
       setIdentityName('');
     } catch (err) {
       Alert.alert('Identity creation failed', err instanceof Error ? err.message : 'Could not create identity');
@@ -273,7 +273,7 @@ export function WalletConnectRequestScreen() {
         ) : (
           <View style={styles.identityList}>
             {identities.map((identity) => {
-              const did = identity.metadata.uri;
+              const did = identity.metadata?.uri ?? identity.did?.uri;
               const selected = selectedDid === did;
               return (
                 <AppButton

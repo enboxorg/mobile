@@ -85,6 +85,33 @@ describe('polyfills — AbortSignal.timeout', () => {
     expect(typeof (globalThis as any).TextEncoder).toBe('function');
   });
 
+  it('exposes CustomEvent with detail payload support for @enbox/api live queries', () => {
+    expect(typeof (globalThis as any).CustomEvent).toBe('function');
+
+    const event = new (globalThis as any).CustomEvent('change', {
+      detail: { ok: true },
+    });
+    expect(event.type).toBe('change');
+    expect(event.detail).toEqual({ ok: true });
+  });
+
+  it('installs CustomEvent when Hermes does not provide it', () => {
+    const originalCustomEvent = (globalThis as any).CustomEvent;
+    try {
+      (globalThis as any).CustomEvent = undefined;
+      jest.isolateModules(() => {
+        require('../polyfills');
+      });
+
+      const event = new (globalThis as any).CustomEvent('change', {
+        detail: { ok: true },
+      });
+      expect(event.detail).toEqual({ ok: true });
+    } finally {
+      (globalThis as any).CustomEvent = originalCustomEvent;
+    }
+  });
+
   it('does not wrap globalThis.crypto.subtle methods under Jest (NODE_ENV=test)', () => {
     // Sanity check: NODE_ENV should be 'test' when running under Jest.
     expect(process.env.NODE_ENV).toBe('test');

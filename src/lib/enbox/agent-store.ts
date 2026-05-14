@@ -27,7 +27,16 @@ import {
   BiometricVault,
   type BiometricState,
 } from './biometric-vault';
-import { createMobileIdentity } from './identity-service';
+import {
+  createMobileIdentity,
+  deleteMobileIdentity,
+  DEFAULT_DWN_ENDPOINTS,
+  ensurePostSession,
+  importMobileIdentity,
+  recoverWalletFromSync,
+  stopWalletSync,
+  updateMobileIdentityName,
+} from './identity-service';
 import { destroyAgentLevelDatabases } from './rn-level';
 import { SecureStorageAdapter } from './storage-adapter';
 import {
@@ -357,6 +366,18 @@ export interface AgentStore {
   /** Create a new identity. */
   createIdentity: (name: string) => Promise<BearerIdentity>;
 
+  /** Export all identities as portable JSON. */
+  exportIdentities: () => Promise<string>;
+
+  /** Import one or more portable identities from JSON. */
+  importIdentities: (json: string) => Promise<number>;
+
+  /** Update an identity's local/profile display name. */
+  updateIdentityName: (did: string, name: string) => Promise<void>;
+
+  /** Delete an identity from local wallet storage. */
+  deleteIdentity: (did: string) => Promise<void>;
+
   /** Tear down agent (on lock or reset). */
   teardown: () => void;
 
@@ -539,7 +560,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // defensively `lock()` it if `initialize({})` / `start({})`
     // unlocked the vault before a later step threw. The same
     // residency-window argument applies to first-launch as to unlock.
-    let vaultRef: { lock: () => Promise<void> } | null = null;
+    let vaultRef: { lock?: () => Promise<void>; unlock?: (params?: any) => Promise<void> } | null = null;
     try {
       // Retry pending reset cleanups before creating the agent. Both
       // helpers are fail-CLOSED — if the retry rejects we throw before opening
@@ -562,7 +583,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         // is widened to optional by `scripts/apply-patches.mjs`'s
         // `patchEnboxAgentPasswordOptional()` so the call site does NOT
         // need to carry a `password` property.
-        recoveryPhrase = await agent.initialize({});
+        recoveryPhrase = await agent.initialize({
+          dwnEndpoints: DEFAULT_DWN_ENDPOINTS,
+        });
         debugLog('[agent-store] vault initialized.');
         // Upstream `EnboxUserAgent.initialize()` does NOT assign
         // `agentDid` (only `start()` does). Without this assignment the
@@ -597,6 +620,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         recoveryPhrase,
         biometricState: 'ready',
       });
+      // Keep sync startup off the critical onboarding path; recovery phrase
+      // display must not wait on remote DWN availability.
+      // eslint-disable-next-line no-void
+      void ensurePostSession(agent).catch(() => {});
       get().refreshIdentities().catch(() => {});
       return recoveryPhrase;
     } catch (err) {
@@ -617,7 +644,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // GC. Calling `lock()` here scrubs them immediately. Best-
       // effort: a `lock()` rejection is logged but never re-thrown so
       // the caller still sees the original failure.
-      if (vaultRef !== null) {
+      if (typeof vaultRef?.lock === 'function') {
         // eslint-disable-next-line no-void
         void vaultRef.lock().catch((lockErr) => {
           console.warn(
@@ -674,6 +701,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         biometricState: 'ready',
       });
 
+      // eslint-disable-next-line no-void
+      void ensurePostSession(agent).catch(() => {});
       get().refreshIdentities().catch(() => {});
     } catch (err) {
       const code = (err as { code?: unknown })?.code;
@@ -748,7 +777,21 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // prompts biometrics once and populates the vault's in-memory
       // `_secretBytes` buffer. The subsequent `getMnemonic()` call
       // does NOT re-prompt — it reads the already-in-memory entropy.
-      await agent.start({});
+      if (typeof vault.unlock === 'function') {
+        await vault.unlock({ retainSecretForBackup: true } as any);
+      } else {
+        await agent.start({});
+      }
+      try {
+        const bearerDid = await vault.getDid();
+        (agent as unknown as { agentDid?: { uri: string } }).agentDid =
+          bearerDid as unknown as { uri: string };
+      } catch (err) {
+        console.warn(
+          '[agent-store] resumePendingBackup: could not assign agentDid',
+          err,
+        );
+      }
       const recoveryPhrase = await vault.getMnemonic();
       debugLog('[agent-store] resumePendingBackup: mnemonic re-derived.');
 
@@ -760,6 +803,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         biometricState: 'ready',
         recoveryPhrase,
       });
+
+      // eslint-disable-next-line no-void
+      void ensurePostSession(agent).catch(() => {});
 
       get()
         .refreshIdentities()
@@ -784,7 +830,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // the success-path `set(...)` was pre-empted), the unlocked
       // buffers (and the freshly re-derived mnemonic) live on the
       // vault instance until GC. Best-effort lock() scrubs them.
-      if (vaultRef !== null) {
+      if (typeof vaultRef?.lock === 'function') {
         // eslint-disable-next-line no-void
         void vaultRef.lock().catch((lockErr) => {
           console.warn(
@@ -836,7 +882,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // synchronously so a heap snapshot taken between the throw and
     // the next `restoreFromMnemonic()` retry cannot leak the
     // restored entropy.
-    let vaultRef: { lock: () => Promise<void> } | null = null;
+    let vaultRef: { lock?: () => Promise<void> } | null = null;
     try {
       // Retry any pending cleanup before creating the agent. Restore is
       // the most important place to enforce both: a user typing a
@@ -850,14 +896,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // `initialize({ recoveryPhrase })` path won't fast-fail with
       // `VAULT_ERROR_ALREADY_INITIALIZED`. Best-effort — a missing
       // alias resolves as success on both iOS and Android.
-      try {
-        await NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS);
-      } catch (err) {
-        console.warn(
-          '[agent-store] restoreFromMnemonic: deleteSecret failed (ignored):',
-          err,
-        );
-      }
+      await NativeBiometricVault.deleteSecret(WALLET_ROOT_KEY_ALIAS);
 
       // Create a fresh agent + vault. We do NOT reuse any existing
       // instance — the old state is tied to the now-invalid secret
@@ -875,7 +914,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       //    rejection is mapped to a canonical VAULT_ERROR_* and
       //    surfaced via the screen. `AgentInitializeParams.password` is
       //    widened to optional by the postinstall patch, so we omit it.
-      await agent.initialize({ recoveryPhrase: trimmed });
+      await agent.initialize({
+        recoveryPhrase: trimmed,
+        dwnEndpoints: DEFAULT_DWN_ENDPOINTS,
+      });
 
       // Upstream `EnboxUserAgent.initialize()` does NOT assign
       // `agentDid` — only `start()` does (`this.agentDid = await
@@ -899,6 +941,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           err,
         );
       }
+
+      await recoverWalletFromSync(agent, DEFAULT_DWN_ENDPOINTS);
 
       set({
         agent,
@@ -937,7 +981,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // the next retry / app close is closed. A `lock()` rejection
       // is logged but never re-throws so the original restore error
       // remains the one the caller observes.
-      if (vaultRef !== null) {
+      if (typeof vaultRef?.lock === 'function') {
         // eslint-disable-next-line no-void
         void vaultRef.lock().catch((lockErr) => {
           console.warn(
@@ -1019,6 +1063,52 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     return identity;
   },
 
+  exportIdentities: async () => {
+    const { agent } = get();
+    if (!agent) throw new Error('Agent not initialized');
+    const identities = await agent.identity.list();
+    const exported = [];
+    for (const identity of identities) {
+      exported.push(await agent.identity.export({ didUri: identity.did.uri }));
+    }
+    return JSON.stringify(exported, null, 2);
+  },
+
+  importIdentities: async (json) => {
+    const { agent } = get();
+    if (!agent) throw new Error('Agent not initialized');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      throw new Error('Backup JSON is not valid');
+    }
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    if (items.length === 0) throw new Error('Backup JSON contains no identities');
+
+    let imported = 0;
+    for (const item of items) {
+      await importMobileIdentity(agent, item);
+      imported += 1;
+    }
+    await get().refreshIdentities();
+    return imported;
+  },
+
+  updateIdentityName: async (did, name) => {
+    const { agent } = get();
+    if (!agent) throw new Error('Agent not initialized');
+    await updateMobileIdentityName(agent, did, name);
+    await get().refreshIdentities();
+  },
+
+  deleteIdentity: async (did) => {
+    const { agent } = get();
+    if (!agent) throw new Error('Agent not initialized');
+    await deleteMobileIdentity(agent, did);
+    await get().refreshIdentities();
+  },
+
   teardown: () => {
     // Cancel the refreshIdentities() agentDid-race poller (if any) so
     // background / lock / reset paths never leak an interval. The stop
@@ -1039,8 +1129,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // is a no-op, and any unexpected throw is logged and swallowed so
     // teardown still completes (auto-lock on background MUST NOT partially
     // fail and strand the store in a half-torn-down state).
-    const { vault } = get();
-    if (vault) {
+    const { agent, vault } = get();
+    if (agent) {
+      // eslint-disable-next-line no-void
+      void stopWalletSync(agent as any).catch(() => {});
+    }
+    if (vault && typeof vault.lock === 'function') {
       try {
         // `BiometricVault.lock()` returns a Promise but only because the
         // `IdentityVault` interface requires it — the implementation itself
@@ -1076,7 +1170,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   reset: async () => {
-    const { vault } = get();
+    const { agent, vault } = get();
 
     // Persist retry sentinels before destructive work begins. The writes
     // stay sequential because SecureStorageAdapter tracks keys with a
@@ -1162,24 +1256,26 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           err,
         );
       }
-      const fallbackStorage = new SecureStorageAdapter();
-      try {
-        await fallbackStorage.remove(INITIALIZED_STORAGE_KEY);
-      } catch (err) {
-        if (vaultResetError === null) vaultResetError = err;
-        console.warn(
-          '[agent-store] reset: no-vault fallback clear initialized failed:',
-          err,
-        );
-      }
-      try {
-        await fallbackStorage.remove(BIOMETRIC_STATE_STORAGE_KEY);
-      } catch (err) {
-        if (vaultResetError === null) vaultResetError = err;
-        console.warn(
-          '[agent-store] reset: no-vault fallback clear biometric-state failed:',
-          err,
-        );
+      if (vaultResetError === null) {
+        const fallbackStorage = new SecureStorageAdapter();
+        try {
+          await fallbackStorage.remove(INITIALIZED_STORAGE_KEY);
+        } catch (err) {
+          if (vaultResetError === null) vaultResetError = err;
+          console.warn(
+            '[agent-store] reset: no-vault fallback clear initialized failed:',
+            err,
+          );
+        }
+        try {
+          await fallbackStorage.remove(BIOMETRIC_STATE_STORAGE_KEY);
+        } catch (err) {
+          if (vaultResetError === null) vaultResetError = err;
+          console.warn(
+            '[agent-store] reset: no-vault fallback clear biometric-state failed:',
+            err,
+          );
+        }
       }
     }
     if (vaultResetError === null) {
@@ -1192,6 +1288,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           err,
         );
       }
+    }
+
+    if (vaultResetError === null && agent) {
+      await stopWalletSync(agent as any);
     }
 
     // Wipe ENBOX_AGENT LevelDB only after the vault wipe succeeds.

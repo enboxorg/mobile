@@ -940,8 +940,18 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
             return
         }
         try {
+            // CHECKED Keystore delete first. The wrapped secret prefs remain
+            // intact until the OS-gated key is proven gone, so a Keystore
+            // failure leaves the vault in a retryable, still-intact state.
+            // Previously the prefs were removed before this checked delete;
+            // if the Keystore delete then failed, the wallet secret was
+            // unrecoverable even though reset rejected.
+            deleteKeystoreKeyChecked(keyAlias)
+
             // Use `commit()` so a prefs write failure is surfaced before
-            // the JS layer clears the reset sentinel.
+            // the JS layer clears the reset sentinel. A failure here leaves
+            // stale ciphertext prefs without a Keystore key; the next
+            // sentinel retry will re-run this idempotently and remove them.
             val prefsRemoved = prefs()
                 .edit()
                 .remove(ivKey(keyAlias))
@@ -954,16 +964,6 @@ class NativeBiometricVaultModule(reactContext: ReactApplicationContext) : Native
                 )
                 return
             }
-            // CHECKED Keystore delete. Any failure here
-            // (KeyStoreException, ProviderException, IOException, or
-            // the silent-OEM-fail caught by the post-delete
-            // containsAlias() guard) propagates to JS via promise.reject
-            // so `useAgentStore.reset()` can persist the
-            // VAULT_RESET_PENDING_KEY sentinel and surface the error to
-            // the user. Previously, `deleteKeystoreKey` swallowed every
-            // exception and `deleteSecret` resolved successfully even
-            // when the OS-gated key remained on disk.
-            deleteKeystoreKeyChecked(keyAlias)
             // Both halves succeeded — missing alias is a vacuous
             // success path inside `deleteKeystoreKeyChecked` (it
             // skips the deleteEntry call when containsAlias is false).

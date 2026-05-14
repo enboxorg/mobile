@@ -1,4 +1,14 @@
-import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useState } from 'react';
+import {
+  Alert,
+  Linking,
+  Pressable,
+  Share,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 
 import { Screen } from '@/components/ui/screen';
 import { ScreenHeader } from '@/components/ui/screen-header';
@@ -49,8 +59,55 @@ export function SettingsScreen({ onLock }: SettingsScreenProps) {
   const agent = useAgentStore((s) => s.agent);
   const identityCount = useAgentStore((s) => s.identities.length);
   const agentError = useAgentStore((s) => s.error);
+  const exportIdentities = useAgentStore((s) => s.exportIdentities);
+  const importIdentities = useAgentStore((s) => s.importIdentities);
+
+  const [showImport, setShowImport] = useState(false);
+  const [importJson, setImportJson] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
 
   const agentDid = agent?.agentDid?.uri;
+
+  async function handleExportBackup(): Promise<void> {
+    if (isExporting) return;
+    setIsExporting(true);
+    try {
+      const json = await exportIdentities();
+      await Share.share({
+        title: 'Enbox identity backup',
+        message: json,
+      });
+    } catch (err) {
+      Alert.alert(
+        'Export failed',
+        err instanceof Error ? err.message : 'Could not export identities',
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  async function handleImportBackup(): Promise<void> {
+    if (!importJson.trim() || isImporting) return;
+    setIsImporting(true);
+    try {
+      const count = await importIdentities(importJson.trim());
+      setImportJson('');
+      setShowImport(false);
+      Alert.alert(
+        'Import complete',
+        `Imported ${count} ${count === 1 ? 'identity' : 'identities'}.`,
+      );
+    } catch (err) {
+      Alert.alert(
+        'Import failed',
+        err instanceof Error ? err.message : 'Could not import identities',
+      );
+    } finally {
+      setIsImporting(false);
+    }
+  }
 
   async function performReset(): Promise<void> {
     // Settings uses the same reset primitive as recovery restore:
@@ -171,8 +228,53 @@ export function SettingsScreen({ onLock }: SettingsScreenProps) {
         <Text accessibilityRole="header" style={[styles.sectionTitle, { color: theme.colors.textMuted }]}>
           Data
         </Text>
-        <SettingsRow label="Export backup" disabled onPress={() => {}} theme={theme} />
-        <SettingsRow label="Import backup" disabled onPress={() => {}} theme={theme} />
+        <SettingsRow
+          label={isExporting ? 'Exporting backup...' : 'Export backup'}
+          disabled={identityCount === 0 || isExporting}
+          onPress={() => {
+            handleExportBackup().catch(() => {});
+          }}
+          theme={theme}
+        />
+        <SettingsRow
+          label="Import backup"
+          onPress={() => setShowImport((value) => !value)}
+          theme={theme}
+        />
+        {showImport ? (
+          <View style={styles.importBox}>
+            <Text style={[styles.importHelp, { color: theme.colors.textMuted }]}>
+              Paste an Enbox identity backup JSON export. Imported identities
+              keep their exact DID and key material.
+            </Text>
+            <TextInput
+              accessibilityLabel="Identity backup JSON"
+              autoCapitalize="none"
+              autoCorrect={false}
+              multiline
+              onChangeText={setImportJson}
+              placeholder="[{...}]"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[
+                styles.importInput,
+                {
+                  backgroundColor: theme.colors.surfaceMuted,
+                  borderColor: theme.colors.border,
+                  color: theme.colors.text,
+                },
+              ]}
+              value={importJson}
+            />
+            <SettingsRow
+              label={isImporting ? 'Importing...' : 'Import pasted backup'}
+              disabled={!importJson.trim() || isImporting}
+              onPress={() => {
+                handleImportBackup().catch(() => {});
+              }}
+              theme={theme}
+            />
+          </View>
+        ) : null}
       </View>
 
       <View style={[styles.section, { borderColor: theme.colors.border }]}>
@@ -257,6 +359,9 @@ const styles = StyleSheet.create({
   infoRow: { paddingHorizontal: 16, paddingVertical: 10, gap: 2 },
   infoLabel: { fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
   infoValue: { fontSize: 13, fontFamily: 'monospace' },
+  importBox: { gap: 10, paddingHorizontal: 16, paddingVertical: 12 },
+  importHelp: { fontSize: 13, lineHeight: 18 },
+  importInput: { borderRadius: 14, borderWidth: 1, fontSize: 13, minHeight: 120, paddingHorizontal: 12, paddingVertical: 10, textAlignVertical: 'top' },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14 },
   rowLabel: { fontSize: 16 },
   rowChevron: { fontSize: 22 },
