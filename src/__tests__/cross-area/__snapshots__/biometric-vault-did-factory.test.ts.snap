@@ -1,0 +1,3 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`BiometricVault + default didFactory integration (DeterministicKeyGenerator.sign) locks in a deterministic did:dht URI from the fixed entropy (snapshot regression guard): fixed-entropy did:dht uri 1`] = `"did:dht:Ed25519-f3dea790e9b6b0a9caeb5c36eb1115ed"`;

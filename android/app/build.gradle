@@ -111,6 +111,11 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
+    // Biometric vault: androidx.biometric provides BiometricPrompt /
+    // BiometricManager used by NativeBiometricVaultModule. Version is
+    // pinned (not "+") per the mission contract (VAL-NATIVE-020).
+    implementation("androidx.biometric:biometric:1.1.0")
+
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {
